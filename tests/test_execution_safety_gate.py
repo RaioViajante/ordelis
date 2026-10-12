@@ -36,11 +36,11 @@ PROBE_REQUIRED = ["executable_identity", "model_acceptance", "read_only_filesyst
 def attestation(control: str, *, level: str = "enforced", origin: str = "synapse_enforced",
                 outcome: str = "pass", mechanism: str | None = None, observed: str | None = None,
                 sha: str = SHA, command: tuple[str, ...] = TASK_COMMAND, probe_id: str = RUN,
-                issued: float = NOW - 10, expires: float = NOW + 300) -> dict:
+                platform: str = "linux", issued: float = NOW - 10, expires: float = NOW + 300) -> dict:
     return {"control": control, "level": level, "origin": origin, "outcome": outcome,
             "mechanism": mechanism or MECHANISM[control], "observed": observed, "executable_sha256": sha,
             "command_sha256": command_specification_sha256(command), "probe_id": probe_id,
-            "issued_at": issued, "expires_at": expires}
+            "platform": platform, "issued_at": issued, "expires_at": expires}
 
 
 def help_attestations(**changes: object) -> list[dict]:
@@ -125,7 +125,8 @@ class NeverAuthorizesTests(unittest.TestCase):
         scenarios = [model_evaluate([], []), help_evaluate([], []), model_evaluate(platform_name="windows"),
                      model_evaluate(attestations=[{**item, "origin": "provider_reported"}
                                                   for item in task_attestations()]),
-                     model_evaluate(now=NOW + 10_000), help_evaluate(platform_name="darwin")]
+                     model_evaluate(now=NOW + 10_000),
+                     help_evaluate(attestations=help_attestations(platform="darwin"), platform_name="darwin")]
         for result in scenarios:
             self.assert_unauthorized(result)
 
@@ -363,11 +364,12 @@ class PlatformTests(unittest.TestCase):
                                  ("platform", "platform", "unsupported"))
 
     def test_darwin_has_no_accepted_containment_or_memory_mechanism_yet(self) -> None:
-        result = model_evaluate(platform_name="darwin")
+        result = model_evaluate(attestations=task_attestations(platform="darwin"), platform_name="darwin")
         self.assertIs(result["platform"]["supported"], True)
         self.assertEqual(blockers(result), [("control", "process_containment", "mechanism_insufficient"),
                                             ("control", "memory_limit", "mechanism_insufficient")])
-        self.assertEqual(blockers(help_evaluate(platform_name="darwin")), [])
+        self.assertEqual(blockers(help_evaluate(attestations=help_attestations(platform="darwin"),
+                                                platform_name="darwin")), [])
 
     def test_mechanisms_are_judged_per_platform(self) -> None:
         claims = replaced(task_attestations(), "process_containment",
@@ -495,7 +497,7 @@ class SchemaTests(unittest.TestCase):
         bad = [{**good, "control": "magic"}, {**good, "level": "unknown"}, {**good, "origin": "user"},
                {**good, "outcome": "ok"}, {**good, "mechanism": "trust_me"}, {**good, "observed": "free text"},
                {**good, "observed": "replayed"}, {**good, "executable_sha256": "abc"},
-               {**good, "command_sha256": "abc"}, {**good, "probe_id": "two words"},
+               {**good, "command_sha256": "abc"}, {**good, "probe_id": "two words"}, {**good, "platform": "two words"},
                {**good, "issued_at": "now"}, {**good, "issued_at": True}, {**good, "expires_at": float("nan")},
                {**good, "expires_at": float("inf")}, {**good, "expires_at": good["issued_at"]},
                {**good, "expires_at": good["issued_at"] - 1}, {**good, "expires_at": good["issued_at"] + 901},
@@ -524,6 +526,76 @@ class SchemaTests(unittest.TestCase):
     def test_effort_is_required_only_when_requested(self) -> None:
         self.assertEqual(blockers(model_evaluate(effort="medium")), [("evidence", "reasoning_effort", "unknown")])
         self.assertEqual(blockers(model_evaluate()), [])
+
+
+class ReviewRegressionTests(unittest.TestCase):
+    def test_oversized_numbers_are_rejected_as_plan_errors(self) -> None:
+        with self.assertRaises(PlanError):
+            model_evaluate(now=10**400)
+        with self.assertRaises(PlanError):
+            parse_attestations([attestation("filesystem", issued=10**400, expires=10**400 + 1)])
+
+    def test_claims_for_another_platform_cannot_satisfy_a_control(self) -> None:
+        # "os_sandbox" names different mechanisms on different operating systems.
+        result = model_evaluate(attestations=task_attestations(platform="linux"), platform_name="darwin")
+        self.assertEqual(result["attestations"]["platform_mismatch"], len(CONTROLS))
+        self.assertEqual(blockers(result), [("control", name, "unknown") for name in CONTROLS])
+        self.assertEqual(blockers(help_evaluate(attestations=help_attestations(platform="linux"),
+                                                platform_name="darwin")),
+                         [("control", name, "unknown") for name in HELP_CONTROLS])
+
+    def test_decision_records_the_policy_version(self) -> None:
+        self.assertEqual(model_evaluate()["policy_version"], 1)
+
+    def test_legacy_probe_records_alone_never_satisfy_without_a_probe_evidence_window(self) -> None:
+        claims = without(task_attestations(), "probe_evidence")
+        self.assertEqual(blockers(model_evaluate(attestations=claims)), [("control", "probe_evidence", "unknown")])
+        expired = replaced(task_attestations(), "probe_evidence",
+                           attestation("probe_evidence", level="observed", origin="synapse_observed",
+                                       mechanism="none", expires=NOW - 1))
+        self.assertEqual(blockers(model_evaluate(attestations=expired)), [("control", "probe_evidence", "expired")])
+
+    def test_a_historical_failure_does_not_poison_a_distinct_configuration(self) -> None:
+        failures = [attestation("filesystem", outcome="fail", observed="write_succeeded", **change)
+                    for change in ({"command": OTHER_COMMAND}, {"probe_id": "run-0"}, {"platform": "darwin"},
+                                   {"sha": OTHER_SHA})]
+        result = model_evaluate(attestations=[*task_attestations(), *failures])
+        self.assertEqual(blockers(result), [])
+        probe_failure = [{**probe_record("read_only_filesystem", "external_check", "fail",
+                                         observed="write_succeeded"), "probe_id": "run-0"}]
+        self.assertEqual(blockers(model_evaluate(full_evidence(network=True) + probe_failure)), [])
+
+    def test_any_party_can_only_worsen_a_control(self) -> None:
+        # A provider-origin record naming another mechanism turns a satisfied control into a conflict.
+        claims = [*task_attestations(), attestation("filesystem", origin="provider_reported",
+                                                    mechanism="process_group")]
+        self.assertEqual(blockers(model_evaluate(attestations=claims)), [("control", "filesystem", "conflicting")])
+
+    def test_failures_against_a_control_the_tier_does_not_require_block(self) -> None:
+        claims = [*help_attestations(), attestation("network", outcome="fail", observed="network_reachable",
+                                                    command=HELP_COMMAND)]
+        self.assertEqual(blockers(help_evaluate(attestations=claims)), [("control", "network", "failed")])
+
+    def test_validity_window_boundaries(self) -> None:
+        live = replaced(task_attestations(), "filesystem", attestation("filesystem", issued=NOW, expires=NOW + 900))
+        self.assertEqual(blockers(model_evaluate(attestations=live)), [])
+        with self.assertRaises(PlanError):
+            parse_attestations([attestation("filesystem", issued=NOW, expires=NOW + 900.001)])
+        self.assertEqual(model_evaluate(attestations=live, now=NOW + 900)["controls"]["filesystem"]["status"],
+                         "expired")
+
+    def test_import_closure_reaches_no_runner_ledger_cli_or_session_module(self) -> None:
+        import subprocess
+        import sys
+        root = Path(__file__).resolve().parent.parent
+        code = ("import sys; import runtime.execution_safety_gate; "
+                "print(sorted(name for name in sys.modules if name.startswith('runtime.')))")
+        found = subprocess.run([sys.executable, "-I", "-c", f"import sys; sys.path.insert(0, {str(root)!r}); {code}"],
+                               capture_output=True, text=True, check=True, cwd=tempfile.gettempdir()).stdout
+        for forbidden in ("codex_probe_runner", "probe_authorization_ledger", "probe_confirmation",
+                          "codex_capabilities", "runtime.cli", "invocation_runtime", "runtime.session",
+                          "mcp_server", "runtime.adapters"):
+            self.assertNotIn(forbidden, found)
 
 
 if __name__ == "__main__":

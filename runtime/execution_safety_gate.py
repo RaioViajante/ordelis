@@ -14,6 +14,7 @@ import math
 from .runtime_validation import CAPABILITIES, _capability_status, _sha256, _token, parse_evidence
 from .synapse_plan import PlanError, _keys
 
+POLICY_VERSION = 1
 MAX_ATTESTATIONS = 64
 MAX_ATTESTATION_LIFETIME_SECONDS = 900
 MAX_COMMAND_ARGUMENTS = 256
@@ -49,7 +50,7 @@ PLATFORM_MECHANISMS = {
                "network": ("os_sandbox",), "cpu_limit": ("rlimit",), "disk_limit": ("quota_volume",)},
 }
 _ATTESTATION_FIELDS = {"control", "level", "origin", "outcome", "mechanism", "observed", "executable_sha256",
-                       "command_sha256", "probe_id", "issued_at", "expires_at"}
+                       "command_sha256", "probe_id", "platform", "issued_at", "expires_at"}
 _RANK = {name: index for index, name in enumerate(CLAIM_LEVELS)}
 _TRUSTED_ORIGINS = {"observed": ("synapse_observed", "synapse_enforced"), "enforced": ("synapse_enforced",)}
 
@@ -64,9 +65,15 @@ def command_specification_sha256(command: object) -> str:
 
 
 def _timestamp(value: object, label: str) -> float:
-    if type(value) not in (int, float) or not math.isfinite(value):
+    if type(value) not in (int, float):
         raise PlanError(f"invalid {label}")
-    return float(value)
+    try:
+        number = float(value)
+    except OverflowError as exc:
+        raise PlanError(f"invalid {label}") from exc
+    if not math.isfinite(number):
+        raise PlanError(f"invalid {label}")
+    return number
 
 
 def parse_attestations(raw: object) -> list[dict[str, object]]:
@@ -92,6 +99,7 @@ def parse_attestations(raw: object) -> list[dict[str, object]]:
             "executable_sha256": _sha256(record["executable_sha256"], "attestation executable hash"),
             "command_sha256": _sha256(record["command_sha256"], "attestation command hash"),
             "probe_id": _token(record["probe_id"], "attestation probe id"),
+            "platform": _token(record["platform"], "attestation platform"),
             "issued_at": issued, "expires_at": expires,
         })
     return sorted(records, key=lambda record: tuple(str(record[key]) for key in sorted(_ATTESTATION_FIELDS)))
@@ -169,7 +177,8 @@ def evaluate_execution_gate(*, task_kind: str, executable_sha256: str, command: 
     claims = parse_attestations(attestations)
     same_executable = [claim for claim in claims if claim["executable_sha256"] == current_hash]
     same_command = [claim for claim in same_executable if claim["command_sha256"] == command_hash]
-    applicable = [claim for claim in same_command if claim["probe_id"] == run_id]
+    same_platform = [claim for claim in same_command if claim["platform"] == platform]
+    applicable = [claim for claim in same_platform if claim["probe_id"] == run_id]
     controls = {}
     for control in CONTROLS:
         minimum = REQUIREMENTS[task_kind].get(control)
@@ -186,6 +195,7 @@ def evaluate_execution_gate(*, task_kind: str, executable_sha256: str, command: 
     reasons.append(_reason("gate", "coordinator", "no_trusted_execution_coordinator"))
     return {
         "schema_version": 1,
+        "policy_version": POLICY_VERSION,
         "task_kind": task_kind,
         "executable_sha256": current_hash,
         "command_sha256": command_hash,
@@ -197,7 +207,8 @@ def evaluate_execution_gate(*, task_kind: str, executable_sha256: str, command: 
                           "unbound_probe": len(current) - len(bound)},
         "attestations": {"total": len(claims), "stale_executable": len(claims) - len(same_executable),
                          "command_mismatch": len(same_executable) - len(same_command),
-                         "unbound_probe": len(same_command) - len(applicable)},
+                         "platform_mismatch": len(same_command) - len(same_platform),
+                         "unbound_probe": len(same_platform) - len(applicable)},
         "decision": {"status": "unauthorized", "requirements_satisfied": requirements_satisfied,
                      "reasons": reasons, "evidence_authenticated": False, "dispatch_authorized": False,
                      "execution_authorized": False, "sandbox_enforcement_created": False},
