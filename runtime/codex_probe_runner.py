@@ -1,12 +1,12 @@
-"""Bounded, authorization-gated runner for zero-model-call Codex CLI probes.
+"""Private bounded runner for confirmed zero-model-call Codex CLI probes.
 
 Library only: no CLI command, no persistence, no dispatch. It runs exactly `--version`, `--help` and
 `exec --help` against one explicitly authorized executable, inside a scratch directory it creates and owns.
 The scratch directory is a hygiene boundary, not an OS sandbox.
 
 The runner is the only code allowed to build `runtime_probe` / `external_check` records from these probes.
-It cannot establish who approved a probe: `ProbeAuthorization` is caller-asserted, and the evidence it
-returns stays unauthenticated. Provider output is hashed and counted, never copied into results.
+Its private capability prevents accidental unconfirmed calls, not hostile same-user Python code. Evidence
+stays unauthenticated. Provider output is hashed and counted, never copied into results.
 """
 
 from __future__ import annotations
@@ -26,6 +26,8 @@ from .codex_capabilities import CapabilityInspectionError, MAX_HELP_BYTES, _bina
 from .platform import prepare_spawn
 from .runtime_validation import _sha256, _token, check_probe_authorization, parse_evidence
 from .synapse_plan import PlanError, _external_path, _integer, _overlaps
+
+__all__ = ["ProbeAuthorization", "ProbeError"]
 
 ALLOWED_COMMANDS = (("--version",), ("--help",), ("exec", "--help"))
 MAX_AUTHORIZATION_SECONDS = 900
@@ -47,6 +49,9 @@ _VERIFICATION = {
 MAX_CONSUMED_IDS = 4096
 _CONSUMED: set[str] = set()
 _CONSUMED_LOCK = threading.Lock()
+# Imported only by the confirmation module and runner tests. Python module visibility is not a security
+# boundary: same-user code can import or replace this object and can execute the target without Synapse.
+_CONFIRMED_EXECUTION = object()
 
 
 class ProbeError(PlanError):
@@ -67,10 +72,10 @@ def _absolute(value: object, label: str) -> str:
 
 @dataclass(frozen=True)
 class ProbeAuthorization:
-    """One explicit, time-limited, single-use permission for one zero-model-call probe run.
+    """One exact, time-limited proposal for a single zero-model-call probe run.
 
-    The runner cannot tell who created this object. Construct it only after genuine user approval of these
-    exact values, never from a file, environment variable, model response or provider output.
+    This object carries no consent. The controlled entry point must display and confirm these exact values;
+    never construct them from a file, environment variable, model response or provider output.
     """
 
     probe_id: str
@@ -329,6 +334,7 @@ def _cleanup(scratch: Path, identity: tuple[int, int]) -> str:
 def _create_scratch(authorization: ProbeAuthorization, repo: Path, protected: tuple[Path, ...],
                     parent: Path) -> tuple[Path, tuple[int, int]]:
     scratch = Path(tempfile.mkdtemp(prefix="synapse-codex-probe-", dir=parent))
+    owned_identity: tuple[int, int] | None = None
     try:
         created = os.lstat(scratch)
         if not stat.S_ISDIR(created.st_mode) or stat.S_IMODE(created.st_mode) != 0o700:
@@ -341,13 +347,17 @@ def _create_scratch(authorization: ProbeAuthorization, repo: Path, protected: tu
             repo_root=repo, protected_roots=protected, executable_sha256=authorization.executable_sha256)
         if not check["probe_authorized"]:
             raise ProbeError("scratch_authorization_denied")
+        owned_identity = (created.st_dev, created.st_ino)
         for name in _ISOLATED_DIRS:
             os.mkdir(scratch / name, 0o700)
     except BaseException:
-        try:
-            os.rmdir(scratch)
-        except OSError:
-            pass
+        if owned_identity is not None:
+            _cleanup(scratch, owned_identity)
+        else:
+            try:
+                os.rmdir(scratch)
+            except OSError:
+                pass
         raise
     return scratch, (created.st_dev, created.st_ino)
 
@@ -402,21 +412,25 @@ def _preflight(authorization: ProbeAuthorization, repo_root: Path):
     return repo, protected, parent, binary, identity, state, parent_before
 
 
-def run_codex_probe(authorization: ProbeAuthorization, *, repo_root: Path,
-                    cancel: threading.Event | None = None) -> dict[str, object]:
-    """Run the three allowlisted non-model commands once and return bounded, unauthenticated evidence.
-
-    Raises ProbeError (or PlanError) on any refusal. A valid authorization is consumed before any
-    filesystem or process work, so a refused or failed run cannot be retried with the same probe id.
-    """
-    return _run_probe(authorization, repo_root, cancel, "caller_asserted_unverified")
+def _same_executable(authorization: ProbeAuthorization, forbidden: tuple[Path, ...], binary: Path,
+                     identity: dict, state: tuple[int, ...]) -> bool:
+    """Re-hash and re-stat the executable before each command and after the run."""
+    try:
+        current_binary, current_identity, current_state = _bind_executable(authorization, forbidden)
+    except (OSError, ProbeError):
+        return False
+    return (current_binary == binary and current_state == state
+            and current_identity["sha256"] == identity["sha256"])
 
 
 def _run_probe(authorization: ProbeAuthorization, repo_root: Path, cancel: threading.Event | None,
-               origin: str) -> dict[str, object]:
+               confirmation: object) -> dict[str, object]:
+    """Execute a confirmed probe. This internal boundary is not safe from hostile same-user code."""
     if os.name != "posix":
         raise ProbeError("unsupported_platform")
-    if not isinstance(authorization, ProbeAuthorization):
+    if confirmation is not _CONFIRMED_EXECUTION:
+        raise ProbeError("confirmation_missing")
+    if type(authorization) is not ProbeAuthorization:
         raise ProbeError("authorization_missing")
     _check_window(authorization)
     _consume(authorization)
@@ -435,6 +449,7 @@ def _run_probe(authorization: ProbeAuthorization, repo_root: Path, cancel: threa
         env = _build_env(scratch, (repo, *protected, parent))
         _check_env(env, scratch)
         total_deadline = time.monotonic() + authorization.total_timeout_seconds
+        forbidden = (repo, *protected, parent)
         for args in ALLOWED_COMMANDS:
             entry: dict[str, object] = {"argv": list(args), "status": "not_run", "exit_code": None,
                                         "output_bytes": 0, "output_sha256": None}
@@ -442,16 +457,16 @@ def _run_probe(authorization: ProbeAuthorization, repo_root: Path, cancel: threa
             if stop_reason is not None:
                 continue
             remaining = total_deadline - time.monotonic()
-            try:
-                changed = _file_state(binary) != state
-            except OSError:
-                changed = True
             if cancel is not None and cancel.is_set():
                 stop_reason = "cancelled"
             elif remaining <= 0:
                 stop_reason = "total_timeout"
-            elif changed:
+            elif not _same_executable(authorization, forbidden, binary, identity, state):
                 identity_ok, stop_reason = False, "executable_changed"
+            else:
+                remaining = total_deadline - time.monotonic()
+                if remaining <= 0:
+                    stop_reason = "total_timeout"
             if stop_reason is not None:
                 continue
             outcome = _run_command(binary, args, env, str(scratch / "work"),
@@ -476,12 +491,8 @@ def _run_probe(authorization: ProbeAuthorization, repo_root: Path, cancel: threa
             elif unexpected:
                 stop_reason = "unexpected_scratch_entries"
     finally:
-        try:
-            now_state = _file_state(binary)
-            _, after = _binary_identity(str(binary))
-            identity_ok = (identity_ok and now_state == state and after["sha256"] == identity["sha256"])
-        except (OSError, CapabilityInspectionError):
-            identity_ok = False
+        identity_ok = identity_ok and _same_executable(
+            authorization, (repo, *protected, parent), binary, identity, state)
         cleanup = _cleanup(scratch, scratch_id)
     try:
         parent_changes = len((set(os.listdir(parent)) - {scratch.name}) ^ parent_before)
@@ -494,7 +505,7 @@ def _run_probe(authorization: ProbeAuthorization, repo_root: Path, cancel: threa
         isolation["scratch_leftover"] = str(scratch)
     return {
         "schema_version": 1, "provider": "codex", "probe_id": authorization.probe_id,
-        "authorization": {"origin": origin, "single_use_scope": "process",
+        "authorization": {"origin": "terminal_confirmed_process_local", "single_use_scope": "process",
                           "expires_at": authorization.expires_at},
         "executable": {"path": identity["path"], "sha256": identity["sha256"],
                        "size_bytes": identity["size_bytes"], "identity_scope": identity["identity_scope"],

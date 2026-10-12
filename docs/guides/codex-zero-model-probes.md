@@ -1,13 +1,14 @@
 # Codex zero-model-call probe runner
 
-`runtime/codex_probe_runner.py` is a **library-only** runner that executes three non-model Codex CLI commands against one explicitly authorized executable and returns bounded, structured, **unauthenticated** evidence. It has no CLI command, persists nothing, and does not authorize dispatch. `mco context preview`, `mco context plan` and `mco context inspect-codex` do not call it, and a test pins that no other runtime module references it except the [confirmation module](interactive-probe-authorization.md).
+`runtime/codex_probe_runner.py` is the **private, library-only** execution half of the [controlled probe entry point](interactive-probe-authorization.md). It executes three non-model Codex CLI commands against one confirmed executable and returns bounded, structured, **unauthenticated** evidence. It has no CLI command, persists nothing, and does not authorize dispatch. `mco context preview`, `mco context plan` and `mco context inspect-codex` do not call it.
 
 **This increment ran no real Codex probe.** All tests use synthetic fake executables. No provider was authenticated, no credential file was read, no model task ran, and no personal vault was touched.
 
-## Public API
+## Supported API
 
 ```python
-from runtime.codex_probe_runner import ProbeAuthorization, run_codex_probe
+from runtime.codex_probe_runner import ProbeAuthorization
+from runtime.probe_confirmation import run_controlled_probe
 
 authorization = ProbeAuthorization(
     probe_id="run-1",
@@ -22,12 +23,16 @@ authorization = ProbeAuthorization(
     max_output_bytes=65536,                         # 1 to 65536 per command
     issued_at=now, expires_at=now + 300,            # lifetime at most 900 seconds
 )
-result = run_codex_probe(authorization, repo_root=Path("/path/to/checkout"), cancel=threading.Event())
+result = run_controlled_probe(
+    authorization,
+    repo_root=Path("/path/to/checkout"),
+    cancel=threading.Event(),
+)
 ```
 
-`run_codex_probe` accepts **no command arguments**. It raises `ProbeError` (a `PlanError`) on any refusal and otherwise returns a dictionary. Caller requirements:
+`run_controlled_probe` accepts **no command arguments**. It validates the exact authorization, obtains terminal confirmation, and executes in the same process. It raises `ProbeError` (a `PlanError`) on any refusal and otherwise returns a dictionary. Caller requirements:
 
-- Build the authorization only after the user approved these exact values (see [authorization lifecycle](#authorization-lifecycle)).
+- Build the proposal from explicit values, then let `run_controlled_probe` display and confirm them.
 - Use a **dedicated** scratch parent that nothing else writes to while the probe runs. Any other change to its entries is reported as a filesystem failure.
 - Do not redirect the result into the repository. Nothing here writes it anywhere.
 - Pass a `threading.Event` as `cancel` if the run must be abortable.
@@ -35,25 +40,24 @@ result = run_codex_probe(authorization, repo_root=Path("/path/to/checkout"), can
 
 ## Supported commands
 
-The allowlist is `ALLOWED_COMMANDS`, enforced in code: `_run_command` raises `ProbeError("command_not_allowed")` for any vector outside `("--version",)`, `("--help",)`, `("exec", "--help")` before a process is created. The public API cannot supply arguments, and a test scans the module for shell and model-task flags. The three commands run in that order and the run stops at the first failure, anomaly, cancellation or executable change. Remaining commands report `not_run`.
+The allowlist is `ALLOWED_COMMANDS`, enforced in code: `_run_command` raises `ProbeError("command_not_allowed")` for any vector outside `("--version",)`, `("--help",)`, `("exec", "--help")` before a process is created. The supported API cannot supply arguments, and a test scans the module for shell and model-task flags. The three commands run in that order and the run stops at the first failure, anomaly, cancellation or executable change. Remaining commands report `not_run`.
 
 ## Authorization lifecycle
 
 1. **Default deny.** `None`, a dictionary or any non-`ProbeAuthorization` value is refused (`authorization_missing`). Nothing is read from files, environment variables, model responses or provider output.
 2. **Construction** validates the shape: read-only mode, zero model calls, bounded timeouts and output budget, at least one protected root, absolute paths, and a lifetime above 0 and at most 900 seconds. The object is frozen.
-3. **Run time** refuses a not-yet-valid (`issued_at` in the future) or expired authorization.
-4. **Consumption.** A valid, unexpired authorization is recorded as used before any filesystem or process work. Later refusals (hash mismatch, bad paths, a failed command) still consume it. A second attempt with the same `probe_id`, even with different fields or after the first authorization expired, fails with `authorization_reused`. Ids are never pruned; the registry holds at most 4096 and then refuses new runs (`authorization_registry_full`). Expiry is checked once, at the start: a run may finish up to the total timeout after `expires_at`, and the check uses the wall clock.
-5. **Scope of single use: one process.** The registry is in memory, so a new process can reuse a `probe_id`. Cross-process single use would require persistence, which is deliberately not done here.
+3. **Exact type and confirmation.** Authorization or confirmation subclasses are rejected. The exact specification must receive the digest-bound terminal confirmation described in the [entry-point guide](interactive-probe-authorization.md).
+4. **Run time** refuses a not-yet-valid (`issued_at` in the future) or expired authorization.
+5. **Consumption.** A valid, unexpired authorization is recorded as used before any filesystem or process work. Later refusals (hash mismatch, bad paths, a failed command) still consume it. A second attempt with the same `probe_id`, even with different fields or after the first authorization expired, fails with `authorization_reused`. Ids are never pruned; the registry holds at most 4096 and then refuses new runs (`authorization_registry_full`). Expiry is checked once, at the start: a run may finish up to the total timeout after `expires_at`, and the check uses the wall clock.
+6. **Scope of single use: one process.** The registry is in memory, so a new process can reuse a `probe_id`. Cross-process single use is explicitly deferred in the [design decision](../implementation/controlled-probe-entry-point.md).
 
-### The missing user-origin trust boundary
+### The user-origin trust boundary
 
-**`run_codex_probe` cannot establish that a human approved a probe.** `ProbeAuthorization` is a plain object: any code in the process, including code a model agent influenced, can construct one. A file, flag or environment variable would be no stronger, since the party being constrained could write it. Therefore:
+`run_controlled_probe` requires the exact phrase from `/dev/tty`, bound to every displayed value. A controlling terminal is a channel, not proof that a human is present. Same-user code can drive the terminal, import private runner objects, patch the module, or execute the target itself. Therefore:
 
-- The API is **non-authorizing in the trust sense**. Results state `authorization.origin: "caller_asserted_unverified"`.
+- Results state `authorization.origin: "terminal_confirmed_process_local"`, a narrow process-local provenance claim.
 - Evidence stays `evidence_authenticated: false` and `dispatch_authorized: false`.
-- The caller is responsible for obtaining real approval of the exact executable path, hash, scratch parent, protected roots and limits.
-
-A genuine boundary needs an action the agent cannot perform. [Interactive probe authorization](interactive-probe-authorization.md) adds one for library callers: `confirm_probe` prompts on the controlling terminal with the exact values and `run_confirmed_probe` runs only what was typed-approved (`authorization.origin: "terminal_confirmed_process_local"`). It is still a same-user, process-local control and `run_codex_probe` remains directly callable, so the guarantees above are unchanged for direct callers.
+- Python naming and module visibility prevent accidental calls only. They cannot enforce a boundary against hostile same-user code.
 
 ## Filesystem isolation
 
@@ -77,7 +81,7 @@ What it does **not** do: a temporary directory is **not an OS security sandbox**
 
 ## Executable identity
 
-The authorization names the resolved path and SHA-256. The runner hashes the file with the existing `codex_capabilities` routine, compares the hash, and records the file's device, inode, size, mtime and ctime. It re-checks that file state before each spawn and re-hashes after the run. Replacement or in-place modification is reported as `identity_check: changed_during_probe` and a failed `executable_identity` record; identical bytes in a new file also count as changed. No later command starts after a detected change.
+The authorization names the resolved path and SHA-256. The runner hashes the file with the existing `codex_capabilities` routine, compares the hash, and records the file's device, inode, size, mtime and ctime. It re-stats and re-hashes the file before every spawn and after the run. Replacement or in-place modification is reported as `identity_check: changed_during_probe` and a failed `executable_identity` record; identical bytes in a new file also count as changed. No later command starts after a detected change.
 
 This is **not race-free**: the file is executed by pathname, so it can be swapped between the check and the exec, and a change that is undone before the next check is not seen. The hash identifies the launcher file only, not any native binary it starts (`native_binary_identity: not_established`).
 
@@ -103,16 +107,16 @@ Help commands cannot establish any of: authentication state, model acceptance, r
 
 ## Platform behavior
 
-POSIX only. On other platforms `run_codex_probe` raises `unsupported_platform` before consuming the authorization. Tests rely on process groups and run on macOS and Linux; the Windows CI job does not run the Python suite. The tests were run locally on macOS and run on Linux in the repository CI; behavior on other POSIX systems is untested.
+POSIX only. On other platforms `run_controlled_probe` raises `unsupported_platform` before consuming the authorization. Tests rely on process groups and run on macOS and Linux; the Windows CI job does not run the Python suite. Behavior on other POSIX systems is untested.
 
 ## Why dispatch stays blocked
 
-A completed probe shows, at most, that three help commands behaved on one executable at one moment, under an authorization nobody could verify. Dispatch would additionally need authenticated evidence from a trusted runner, independent isolation checks, a fresh identity check, a separately approved plan, and explicit user approval. `context plan` is unchanged and still reports `validation.status: "blocked"`.
+A completed probe shows, at most, that three help commands behaved on one executable at one moment after a process-local terminal confirmation. Dispatch would additionally need authenticated evidence from a trusted runner, independent isolation checks, a fresh identity check, a separately approved plan, and explicit user approval. `context plan` is unchanged and still reports `validation.status: "blocked"`.
 
 ## Prerequisites for a controlled real probe
 
-1. A trusted CLI entry point that uses the [terminal confirmation](interactive-probe-authorization.md) (implemented as a library, not yet reachable) and keeps `run_codex_probe` from being called directly.
-2. A decision on cross-process single use, which requires a small private store.
+1. A separately reviewed public CLI milestone; the controlled entry point remains library-only in this increment.
+2. A private state root and atomic protocol for cross-process single use.
 3. An explicit user-approved run against the real binary, with the user's own installation, still with zero model calls.
 4. Independent isolation witnesses before any claim about filesystem, network or session behavior: an OS-level mechanism applied by Synapse, canary writes and read attempts, and network observation outside the provider process.
 5. Resource limits (`RLIMIT`, cgroups or equivalent) if resource budgets are to be enforced rather than only time and output.

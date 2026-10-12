@@ -1,8 +1,8 @@
 """Interactive terminal confirmation for controlled Codex probes.
 
-Library only: no CLI command, no persistence, no dispatch. `confirm_probe` shows the exact operation on the
-controlling terminal (`/dev/tty`) and returns a `ConfirmedProbe` only if the user types a phrase bound to
-that exact specification. Consent is never read from stdin, files, environment variables or arguments.
+Library only: no CLI command, no persistence, no dispatch. `run_controlled_probe` shows the exact operation
+on the controlling terminal (`/dev/tty`) and runs only if the user types a phrase bound to that exact
+specification. Consent is never read from stdin, files, environment variables or arguments.
 
 This is a process-local, same-user control. It cannot resist a malicious process running as the same user
 (which can drive the terminal, replace this module or call the runner directly), and it does not
@@ -21,10 +21,14 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from .codex_probe_runner import (
-    ALLOWED_COMMANDS, ProbeAuthorization, ProbeError, _CONSUMED, _CONSUMED_LOCK, _check_window, _preflight,
-    _run_probe)
+    ALLOWED_COMMANDS, ProbeAuthorization, ProbeError, _CONFIRMED_EXECUTION, _CONSUMED, _CONSUMED_LOCK,
+    _check_window, _preflight, _run_probe)
+
+__all__ = ["run_controlled_probe"]
 
 MAX_ANSWER_BYTES = 256
+MAX_DISPLAY_VALUE_CHARS = 512
+MAX_PROMPT_BYTES = 8192
 PHRASE_DIGITS = 12
 MAX_PENDING = 64
 _DECLINED = {"n", "no", "deny", "cancel"}
@@ -36,8 +40,8 @@ _PROMPT_LOCK = threading.Lock()
 
 
 @dataclass(frozen=True)
-class ConfirmedProbe:
-    """Proof that `confirm_probe` returned this authorization after a terminal approval, in this process.
+class _ConfirmedProbe:
+    """Proof that the internal confirmation step approved this authorization in this process.
 
     A hand-built or copied instance has no registry entry and is refused. Anything running in this process
     can still bypass the check, so this is a guard against mistakes and replay, not against hostile code.
@@ -60,14 +64,17 @@ def _phrase(digest: str) -> str:
 
 def _q(value: object) -> str:
     """Quote a value so control characters and look-alike text cannot alter the prompt."""
-    return json.dumps(value, ensure_ascii=True)
+    rendered = json.dumps(value, ensure_ascii=True)
+    if len(rendered) > MAX_DISPLAY_VALUE_CHARS:
+        raise ProbeError("display_value_too_long")
+    return rendered
 
 
 def _render(authorization: ProbeAuthorization, repo: Path, protected: tuple[Path, ...],
             identity: dict, digest: str) -> str:
     remaining = int(authorization.expires_at - time.time())
     commands = "  |  ".join(" ".join(args) for args in ALLOWED_COMMANDS)
-    return "\n".join([
+    prompt = "\n".join([
         "", "=== Synapse: authorize ONE controlled Codex probe ===",
         "Nothing runs unless you type the exact phrase at the bottom.", "",
         f"Executable   : {_q(identity['path'])}", f"SHA-256      : {identity['sha256']}",
@@ -78,6 +85,8 @@ def _render(authorization: ProbeAuthorization, repo: Path, protected: tuple[Path
         f"Limits       : {authorization.command_timeout_seconds}s per command, "
         f"{authorization.total_timeout_seconds}s total, {authorization.max_output_bytes} output bytes per command",
         f"Probe id     : {_q(authorization.probe_id)}   Valid for: {remaining}s   Mode: read_only (declared)",
+        f"Issued at    : {_q(authorization.issued_at)}",
+        f"Expires at   : {_q(authorization.expires_at)}",
         "Model calls  : 0 authorized. No authentication and no task is sent.",
         f"Spec digest  : {digest}", "",
         "NOT guaranteed (unknown or unenforced):",
@@ -89,6 +98,9 @@ def _render(authorization: ProbeAuthorization, repo: Path, protected: tuple[Path
         "  - This prompt cannot detect a malicious process running as your user.",
         "This approval is for this one run in this process only and is not saved.", "",
         f"To authorize this exact run, type:  {_phrase(digest)}", "Anything else cancels.", "> "])
+    if len(prompt.encode("utf-8")) > MAX_PROMPT_BYTES:
+        raise ProbeError("confirmation_prompt_too_long")
+    return prompt
 
 
 def _open_terminal() -> int:
@@ -156,15 +168,15 @@ def _ask(text: str) -> str:
         os.close(fd)
 
 
-def confirm_probe(authorization: ProbeAuthorization, *, repo_root: Path) -> ConfirmedProbe:
-    """Show the exact operation on the controlling terminal and return a ConfirmedProbe only on approval.
+def _confirm_probe(authorization: ProbeAuthorization, *, repo_root: Path) -> _ConfirmedProbe:
+    """Show the exact operation and return a process-local confirmation only on approval.
 
     Raises ProbeError with a closed reason code on any refusal. Nothing is executed, consumed or stored on
     disk. The authorization is validated before the prompt and again after the user answers.
     """
     if os.name != "posix":
         raise ProbeError("unsupported_platform")
-    if not isinstance(authorization, ProbeAuthorization):
+    if type(authorization) is not ProbeAuthorization:
         raise ProbeError("authorization_missing")
     _check_window(authorization)
     repo, protected, _, _, identity, _, _ = _preflight(authorization, repo_root)
@@ -187,14 +199,15 @@ def confirm_probe(authorization: ProbeAuthorization, *, repo_root: Path) -> Conf
         if len(_ISSUED) >= MAX_PENDING:
             raise ProbeError("confirmation_registry_full")
         _ISSUED[nonce] = (digest, str(repo), authorization.expires_at)
-    return ConfirmedProbe(authorization, nonce)
+    return _ConfirmedProbe(authorization, nonce)
 
 
-def run_confirmed_probe(confirmed: ConfirmedProbe, *, cancel: threading.Event | None = None) -> dict[str, object]:
+def _run_confirmed_probe(confirmed: _ConfirmedProbe,
+                         *, cancel: threading.Event | None = None) -> dict[str, object]:
     """Run the probe the user approved, exactly once. Any mismatch is refused before a process exists."""
     if os.name != "posix":
         raise ProbeError("unsupported_platform")
-    if not isinstance(confirmed, ConfirmedProbe) or not isinstance(confirmed.nonce, str):
+    if type(confirmed) is not _ConfirmedProbe or type(confirmed.nonce) is not str:
         raise ProbeError("confirmation_missing")
     with _ISSUED_LOCK:
         entry = _ISSUED.pop(confirmed.nonce, None)
@@ -202,7 +215,7 @@ def run_confirmed_probe(confirmed: ConfirmedProbe, *, cancel: threading.Event | 
         raise ProbeError("confirmation_invalid_or_reused")
     digest, checkout, _ = entry
     authorization = confirmed.authorization
-    if not isinstance(authorization, ProbeAuthorization):
+    if type(authorization) is not ProbeAuthorization:
         raise ProbeError("authorization_missing")
     _check_window(authorization)
     try:
@@ -213,4 +226,16 @@ def run_confirmed_probe(confirmed: ConfirmedProbe, *, cancel: threading.Event | 
         raise ProbeError("specification_changed_after_confirmation") from exc
     if current != digest:
         raise ProbeError("specification_changed_after_confirmation")
-    return _run_probe(authorization, repo, cancel, "terminal_confirmed_process_local")
+    return _run_probe(authorization, repo, cancel, _CONFIRMED_EXECUTION)
+
+
+def run_controlled_probe(authorization: ProbeAuthorization, *, repo_root: Path,
+                         cancel: threading.Event | None = None) -> dict[str, object]:
+    """Confirm and run one exact zero-model-call probe in this process.
+
+    This is the only supported entry point. The split confirmation and runner functions remain private so
+    callers cannot accidentally separate approval from execution. Python visibility cannot constrain
+    hostile same-user code; see the architecture decision and module threat model.
+    """
+    confirmed = _confirm_probe(authorization, repo_root=repo_root)
+    return _run_confirmed_probe(confirmed, cancel=cancel)

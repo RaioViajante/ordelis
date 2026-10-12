@@ -140,9 +140,9 @@ Synapse never authenticates for the user, reads credential files, or logs prompt
 Steps 2, 4 and 5 now exist as a library, tested only with fake executables (see [the runner guide](codex-zero-model-probes.md) and [interactive authorization](interactive-probe-authorization.md)); no real probe has been run. Each remaining step needs its own explicitly authorized increment:
 
 1. Run `inspect-codex` and record the executable hash.
-2. The user writes a probe authorization bound to that hash with an empty scratch directory outside the checkout, and approves its exact values on the controlling terminal (`confirm_probe`, library only).
+2. The caller builds a `ProbeAuthorization` bound to that hash and an external scratch parent, then `run_controlled_probe` obtains exact terminal confirmation (library only).
 3. `check_probe_authorization` must return `probe_authorized: true`.
-4. A probe runner (new code) executes bounded probes in the scratch directory with an isolated home, no inherited API keys, hard deadlines, and process-group cleanup, as `inspect-codex` already does for help commands.
+4. The private probe runner executes the three bounded help/version commands in its own scratch directory with an isolated home, no inherited API keys, hard deadlines, and process-group cleanup.
 5. The runner builds `runtime_probe` and `external_check` records from its own observations, bound to the hash and `probe_id`, and passes them in memory to `evaluate_validation`.
 6. Persistence of any evidence goes to the external private state root and is a separate decision.
 
@@ -159,7 +159,7 @@ Steps 2, 4 and 5 now exist as a library, tested only with fake executables (see 
 - No real provider evidence exists. A probe runner exists but has only run against fake executables. Every real-provider capability is `unknown` today.
 - Evidence is unauthenticated (see the trust boundary). Producing it only from trusted code is a rule, not something the library can enforce.
 - The two valued capabilities accept arbitrary short tokens in `requested` and `observed`.
-- `check_probe_authorization` has no expiry or single-use marker. The runner enforces both for its own `ProbeAuthorization`, but single use is process-local and the origin of that object is unverified.
+- `check_probe_authorization` has no expiry or single-use marker. The controlled entry point enforces both for its own `ProbeAuthorization`, but single use and terminal-confirmation provenance are process-local and evidence remains unauthenticated.
 - The runner creates and owns a fresh 0700 scratch directory instead of accepting a pre-existing one, but it still uses pathnames rather than directory descriptors, so a check-then-use gap remains for the scratch parent. The emptiness check here is a pre-flight filter only.
 - Staleness covers only the executable file. Account entitlement, configuration, and operating-system changes are not tracked.
 - Environment exposure, cancellation, and descendant cleanup are properties of the runner. This library neither spawns nor signals processes, and the runner's descendant handling is process-group only.
