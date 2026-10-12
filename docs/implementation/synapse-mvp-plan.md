@@ -8,6 +8,8 @@ The implemented increment is `mco context preview`: an explicit external vault a
 
 An internal mock-only bridge now prepares selected vault context as a delimited, provenance-bearing task for MCO's existing invocation runtime. It validates required settings against a test-declared support snapshot and fake adapter before the workflow is called; required effort always fails because the shared invocation contract has no effort control. The bridge is not a CLI dispatch path and does not validate a real provider. See [mock plan](../../runtime/vault_mock_plan.py) and [integration tests](../../tests/test_vault_mock_plan.py). The preview command remains non-dispatching.
 
+The next increment adds [`mco context plan`](../guides/private-execution-plan.md): a versioned external JSON config, external private state location, and one deterministic task/context/policy plan. It reuses the vault reader and MCO adapter-policy declarations, but reports local model, effort, and read-only verification as unknown. It neither persists context nor dispatches. The command's blocked output must not be mistaken for a validated real-provider execution plan.
+
 Future work includes authenticated dispatch, central-agent coordination, durable continuity, and isolated code-writing workspaces. Existing MCO execution and session features should not be mistaken for an integrated Synapse coordinator.
 
 ## Inherited capability audit
@@ -34,9 +36,9 @@ The inherited [provider reference](../reference/providers.md) says ten built-in 
 
 ## Configuration and privacy boundary
 
-The only public vault configuration today is `mco context preview --vault <absolute external directory> --index <absolute external JSON file>`. It prints context to stdout and saves nothing; callers must not redirect that output into this public repository. The internal mock bridge uses explicitly supplied synthetic paths and the invocation runtime's temporary, non-persistent artifacts. It passes excerpts in the fake task prompt, enclosed in a JSON reference-data block with source paths and headings; note text cannot close that block. No context or execution artifact is written into the checkout. The synthetic index in the guide contains no private data.
+The vault-only preview uses `mco context preview --vault <absolute external directory> --index <absolute external JSON file>`. The new planning command uses an explicit versioned [external config](../guides/private-execution-plan.md) and rejects repo-overlapping config, vault, index, and state paths; neither command persists its stdout, so callers must not redirect output into this public repository. The internal mock bridge uses explicitly supplied synthetic paths and the invocation runtime's temporary, non-persistent artifacts. It passes excerpts in the fake task prompt, enclosed in a JSON reference-data block with source paths and headings; note text cannot close that block. No context or execution artifact is written into the checkout. The synthetic index in the guide contains no private data.
 
-For the future coordinator, define an external private configuration file (illustrative schema, **not** accepted by the current CLI) with these boundaries:
+The first accepted private configuration is documented in the [planning guide](../guides/private-execution-plan.md). The broader coordinator may later add routing and persistence controls; the following remains an illustrative future schema, **not** accepted by the current CLI:
 
 ```json
 {
@@ -68,7 +70,7 @@ Choose only after a side-by-side local matrix proves the required read-only boun
 | --- | --- | --- |
 | 0 — complete | Read-only indexed vault context preview and synthetic tests. | Bounds, traversal, symlink, UTF-8, exclusion, deterministic output, and no provider/vault mutation tests pass. |
 | 1 — this document | Source-based inherited capability audit, privacy boundaries, architecture, Kimi options, and local-check list. | Source links and issue #1 acceptance status reviewed; no private material included. |
-| 2 — mock slice complete; broader phase future | A mock-only context-to-task preparation function validates test-declared model/permission support, rejects required effort, and uses the existing bounded vault reader. External private config/state root, combined execution-plan schema, and real capability matrix remain future work. | Synthetic integration tests cover rejection before mock execution, unrelated-note exclusion, context budget inherited from preview, and no checkout or vault writes. |
+| 2 — private planning slice complete; real validation future | Mock-only task preparation plus a versioned external config and deterministic, non-dispatching unified plan. The plan distinguishes adapter-key support from unknown local CLI verification and blocks on required unknowns. Real capability verification remains future work. | Synthetic tests cover unsupported-setting rejection, unknown-setting blocking, exclusion, context budgets, external path boundaries, and no checkout or vault writes. |
 | 3 — mock slice complete; coordinator future | One fake adapter receives the selected context through MCO's existing invocation workflow; mock failure, cancellation, and deadline are tested with temporary artifacts. | Central-agent coordination, partial multi-provider failure, retries, usage provenance, and continuity reload remain future work. |
 | 4 — future | One locally validated provider at a time, including the Kimi option decision. | User-Mac probes and a separately authorized minimal authenticated smoke test prove effective settings and read-only behavior. |
 | 5 — future | Isolated writers and reviewed integration. | Separate worktrees, ownership boundaries, conflict handling, and cleanup are tested before parallel code-writing tasks. |
@@ -78,9 +80,9 @@ Choose only after a side-by-side local matrix proves the required read-only boun
 | Acceptance criterion | Status |
 | --- | --- |
 | Upstream capabilities and gaps with source-file references | Documented above from this fork; local CLI behavior is still unverified. |
-| MVP architecture, configuration, and phases | Proposed above; coordinator/config loader are not implemented. |
+| MVP architecture, configuration, and phases | Proposed above; the private planning config loader is implemented, but a coordinator is not. |
 | Contextual retrieval on a synthetic vault excluding unrelated notes | Implemented and tested in [`test_vault_context.py`](../../tests/test_vault_context.py). |
-| Preview agent, model, effort, context, and execution policy before dispatch | Implemented as **proposed, unvalidated** settings in vault preview; no unified, effective provider dispatch plan yet. |
+| Preview agent, model, effort, context, and execution policy before dispatch | Vault preview retains **proposed, unvalidated** settings. The new unified planning preview is also non-dispatching and blocked on unknown local CLI capability; no effective provider dispatch plan yet. |
 | Mock-provider orchestration before authenticated model calls | Completed for the issue's single-task mock criterion: [synthetic integration tests](../../tests/test_vault_mock_plan.py) prove selected context reaches a fake adapter through the existing workflow, unrelated notes are excluded, unsupported required settings fail before execution, and the vault stays unchanged. This is not central-agent coordination or authenticated dispatch. |
 | Checks requiring user's Mac and local vault | Listed below; none ran against the user's personal notes. |
 

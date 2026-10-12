@@ -178,6 +178,7 @@ Provider processes are isolated behind a shared adapter contract: detect, run, p
 | Config files and custom agents | [Configuration reference](./docs/reference/configuration.md) |
 | Synapse fork audit, MVP plan, and privacy boundaries | [Synapse MVP plan](./docs/implementation/synapse-mvp-plan.md) |
 | Read-only synthetic vault context preview | [Vault context preview](./docs/guides/vault-context-preview.md) |
+| Private, non-dispatching execution-plan preview | [Private execution plan](./docs/guides/private-execution-plan.md) |
 | Machine-readable error contract | [Error contract](./docs/contracts/errors-v0.1.x.md) |
 | Invocation and artifact contract | [Invocation contract](./docs/contracts/invocation-runtime-v1.md) |
 | Provider permission contract | [Permission contract](./docs/contracts/provider-permissions-v0.1.x.md) |
