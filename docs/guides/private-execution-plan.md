@@ -2,6 +2,8 @@
 
 `mco context plan` combines an explicit user task and agent selection with indexed vault excerpts and a versioned private configuration. It prints deterministic JSON; it never launches an agent, probes authentication, writes to the vault, or persists the task or excerpts. The output is a planning record, **not** permission to dispatch.
 
+The JSON's `workspace.repo_root` is the canonical resolved path of the required `--repo` target, so plans for different repositories identify different workspaces. CLI exit code `0` means the preview was produced successfully; it does **not** mean a plan with `validation.status: "blocked"` is executable. Invalid input returns exit code `2`.
+
 The command requires `--config` and `--repo`. The configuration, vault, index, and state directory must already exist at absolute paths outside the repository. The state directory must also be disjoint from the read-only vault. The command does not create state directories or fall back to MCO's repo-local `reports/review` or `.mco/sessions` defaults. It rejects symlinked config/state targets and any configured path overlapping the repository. Keep real paths and saved output private.
 
 ## Version 1 configuration

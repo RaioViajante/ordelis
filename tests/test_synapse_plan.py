@@ -98,6 +98,23 @@ class SynapsePlanTests(unittest.TestCase):
         self.assertEqual(list(self.state.iterdir()), [])
         self.assertEqual(list(self.repo.iterdir()), [])
 
+    def test_plan_identifies_each_canonical_target_workspace(self) -> None:
+        second_repo = self.root / "second-repo"
+        second_repo.mkdir()
+        alias = self.root / "repo-alias"
+        alias.symlink_to(self.repo, target_is_directory=True)
+
+        first = self.plan(repo_root=alias)
+        second = self.plan(repo_root=second_repo)
+
+        self.assertEqual(first["workspace"], {"repo_root": str(self.repo.resolve())})
+        self.assertEqual(second["workspace"], {"repo_root": str(second_repo.resolve())})
+        self.assertNotEqual(first["workspace"], second["workspace"])
+        self.assertFalse(first["execution"]["dispatch"])
+        self.assertFalse(second["execution"]["dispatch"])
+        self.assertEqual(list(self.repo.iterdir()), [])
+        self.assertEqual(list(second_repo.iterdir()), [])
+
     def test_required_unsupported_settings_reject_and_unknown_effort_blocks(self) -> None:
         for changed in ({"adapter": NoModelFakeAdapter()},
                         {"adapter": NoPermissionFakeAdapter()},
@@ -205,7 +222,9 @@ class SynapsePlanTests(unittest.TestCase):
                                        "--index", str(self.index), "--project", "demo", "--agent", "pi",
                                        "--model", "synthetic-model", "--effort", "medium", "--json"]), 0)
         self.assertEqual(outputs[0], outputs[1])
-        self.assertEqual(json.loads(outputs[0])["validation"]["status"], "blocked")
+        plan = json.loads(outputs[0])
+        self.assertEqual(plan["workspace"], {"repo_root": str(self.repo.resolve())})
+        self.assertEqual(plan["validation"]["status"], "blocked")
         self.assertFalse(json.loads(old.getvalue())["execution"]["policy"]["dispatch"])
 
 

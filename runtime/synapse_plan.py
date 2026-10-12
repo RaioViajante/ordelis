@@ -74,7 +74,7 @@ def load_private_config(path: Path, repo_root: Path) -> dict[str, object]:
     state_root = _external_path(state["root"], repo, "state.root", directory=True)
     if state_root == vault_root or state_root in vault_root.parents or vault_root in state_root.parents:
         raise PlanError("state.root must not overlap the read-only vault")
-    return {"vault_root": vault_root, "index": index, "per_note_bytes": per_note,
+    return {"repo_root": repo, "vault_root": vault_root, "index": index, "per_note_bytes": per_note,
             "total_excerpt_bytes": total, "hard_timeout_seconds": deadline,
             "max_parallelism": parallelism, "max_retries": retries,
             "state_root": state_root}
@@ -117,6 +117,7 @@ def build_plan(*, config_path: Path, repo_root: Path, task: str, project: str | 
     result = {
         "schema_version": 1,
         "task": task,
+        "workspace": {"repo_root": str(config["repo_root"])},
         "selection": selected["selection"],
         "context": {**selected["context"], "vault_root": str(config["vault_root"])},
         "requested_settings": {"agent": agent, "model": model, "effort": effort,
