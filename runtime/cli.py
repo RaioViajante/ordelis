@@ -21,6 +21,7 @@ from .skill_health import check_skill_health
 from .skill_manager import read_bundled_skill, skill_status, sync_bundled_skill
 from . import __version__
 from .policy import ExecutionPreviewRequest, provider_policy_preview
+from .vault_context import VaultContextError, preview as vault_preview
 
 SUPPORTED_PROVIDERS = ("agy", "claude", "codex", "copilot", "cursor", "gemini", "grok", "hermes", "opencode", "pi", "qwen")
 SUPPORTED_PROVIDER_LIST = ",".join(SUPPORTED_PROVIDERS)
@@ -1285,6 +1286,20 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=_HelpFormatter,
     )
 
+    context = subparsers.add_parser("context", help="Preview indexed vault context", formatter_class=_HelpFormatter)
+    context_actions = context.add_subparsers(dest="context_action", required=True)
+    context_preview = context_actions.add_parser("preview", help="Print a read-only JSON preview")
+    context_preview.add_argument("--vault", type=Path, required=True, help="Explicit external Markdown vault")
+    context_preview.add_argument("--index", type=Path, required=True, help="Explicit JSON index")
+    context_preview.add_argument("--project", help="Indexed project ID")
+    context_preview.add_argument("--topic", help="Indexed topic ID")
+    context_preview.add_argument("--agent", required=True, help="Proposed agent ID")
+    context_preview.add_argument("--model", required=True, help="Proposed model name")
+    context_preview.add_argument("--effort", required=True, help="Proposed effort setting")
+    context_preview.add_argument("--per-note-bytes", type=int, default=2048)
+    context_preview.add_argument("--total-bytes", type=int, default=8192)
+    context_preview.add_argument("--json", action="store_true", help="Print JSON (default for preview)")
+
     doctor = subparsers.add_parser(
         "doctor",
         help="Check provider installation/auth readiness",
@@ -2005,6 +2020,17 @@ def main(argv: List[str] | None = None) -> int:
         return int(exc.code) if isinstance(exc.code, int) else 2
     if args.command == "version":
         print(__version__)
+        return 0
+
+    if args.command == "context":
+        try:
+            payload = vault_preview(args.vault, args.index, args.project, args.topic,
+                                    args.agent, args.model, args.effort,
+                                    args.per_note_bytes, args.total_bytes)
+        except (VaultContextError, OSError) as exc:
+            print(json.dumps(_error_envelope("input_error", str(exc)), ensure_ascii=True))
+            return 2
+        print(json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")))
         return 0
 
     if args.command == "doctor":
