@@ -226,8 +226,9 @@ class EvidenceTrustTests(unittest.TestCase):
     def test_validator_is_not_wired_into_any_other_runtime_module(self) -> None:
         runtime = Path(__file__).resolve().parent.parent / "runtime"
         for path in runtime.rglob("*.py"):
-            # The probe runner is the one trusted evidence producer; nothing else may consume the validator.
-            if path.name not in {"runtime_validation.py", "codex_probe_runner.py"}:
+            # The probe runner is the one trusted evidence producer and the non-executing safety gate the one
+            # reviewer of its records; nothing else may consume the validator.
+            if path.name not in {"runtime_validation.py", "codex_probe_runner.py", "execution_safety_gate.py"}:
                 with self.subTest(path=path.name):
                     self.assertNotIn("runtime_validation", path.read_text(encoding="utf-8"))
 
