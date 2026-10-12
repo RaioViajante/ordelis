@@ -6,6 +6,7 @@ import os
 import pty
 import re
 import select
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -17,6 +18,7 @@ from unittest.mock import patch
 
 from runtime import probe_confirmation as confirmation
 from runtime import codex_probe_runner as runner
+from runtime import probe_authorization_ledger as ledger
 from runtime.codex_probe_runner import ALLOWED_COMMANDS, ProbeAuthorization, ProbeError
 from runtime.probe_confirmation import (
     _ConfirmedProbe as ConfirmedProbe,
@@ -55,6 +57,33 @@ try:
 except ProbeError as exc:
     result = str(exc)
 open(out, "w").write(result)
+'''
+
+CONTROLLED_CHILD = r'''
+import json, os, re, sys
+from pathlib import Path
+from unittest.mock import patch
+sys.path.insert(0, sys.argv[1])
+from runtime import codex_probe_runner as runner
+from runtime import probe_confirmation as pc
+from runtime.codex_probe_runner import ProbeAuthorization, ProbeError
+
+mode, spec_json, repo = sys.argv[2:5]
+spec = json.loads(spec_json)
+spec["protected_roots"] = tuple(spec["protected_roots"])
+auth = ProbeAuthorization(**spec)
+def approve(prompt):
+    return re.search(r"type:  (authorize [0-9a-f]{12})\n", prompt).group(1)
+try:
+    with patch.object(pc, "_ask", approve):
+        if mode == "crash_after_consumption":
+            with patch.object(runner, "_create_scratch", side_effect=lambda *a: os._exit(91)):
+                pc.run_controlled_probe(auth, repo_root=Path(repo))
+        else:
+            pc.run_controlled_probe(auth, repo_root=Path(repo))
+    print("ran")
+except ProbeError as exc:
+    print(str(exc))
 '''
 
 
@@ -134,13 +163,13 @@ class ApprovalTests(ConfirmationCase):
         self.assertNoExecution()  # confirming alone executes nothing
         result = run_confirmed_probe(confirmed)
         self.assertEqual(self.argv_log(), [list(args) for args in ALLOWED_COMMANDS])
-        self.assertEqual(result["authorization"]["origin"], "terminal_confirmed_process_local")
+        self.assertEqual(result["authorization"]["origin"], "terminal_confirmed_private_ledger")
         self.assertIs(result["evidence_authenticated"], False)
         self.assertIs(result["dispatch_authorized"], False)
 
     def test_private_runner_result_keeps_the_confirmed_origin(self) -> None:
         result = run_codex_probe(self.authorization(), repo_root=self.repo)
-        self.assertEqual(result["authorization"]["origin"], "terminal_confirmed_process_local")
+        self.assertEqual(result["authorization"]["origin"], "terminal_confirmed_private_ledger")
 
     def test_typeahead_before_the_prompt_is_discarded(self) -> None:
         master, slave = pty.openpty()
@@ -602,7 +631,8 @@ class DisclosureTests(ConfirmationCase):
         self.approve(auth)
         text = self.prompts[0]
         for expected in (str(self.fake), auth.executable_sha256, "--version", "--help", "exec --help",
-                         str(self.parent), str(self.vault), str(self.repo), "5s per command", "20s total",
+                         str(self.parent), str(self.state), str(self.vault), str(self.repo),
+                         "5s per command", "20s total",
                          "4096 output bytes", auth.probe_id, f"Issued at    : {auth.issued_at}",
                          f"Expires at   : {auth.expires_at}", "0 authorized", "NOT guaranteed",
                          "Network: not restricted", "malicious process running as your user"):
@@ -651,6 +681,12 @@ class DisclosureTests(ConfirmationCase):
 
 
 class ControlledEntryPointTests(ConfirmationCase):
+    def controlled_child(self, authorization: ProbeAuthorization, mode: str = "run") -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, "-c", CONTROLLED_CHILD, str(ROOT), mode,
+             json.dumps(asdict(authorization)), str(self.repo)], cwd=ROOT,
+            text=True, capture_output=True, check=False)
+
     def test_supported_entry_point_confirms_and_runs_the_synthetic_probe(self) -> None:
         def approve(text: str) -> str:
             self.prompts.append(text)
@@ -659,7 +695,7 @@ class ControlledEntryPointTests(ConfirmationCase):
         with patch.object(confirmation, "_ask", approve):
             result = confirmation.run_controlled_probe(self.authorization(), repo_root=self.repo)
         self.assertEqual(self.argv_log(), [list(args) for args in ALLOWED_COMMANDS])
-        self.assertEqual(result["authorization"]["origin"], "terminal_confirmed_process_local")
+        self.assertEqual(result["authorization"]["origin"], "terminal_confirmed_private_ledger")
         self.assertIs(result["evidence_authenticated"], False)
         self.assertIs(result["dispatch_authorized"], False)
 
@@ -713,6 +749,46 @@ class ControlledEntryPointTests(ConfirmationCase):
         self.assertEqual(sum(isinstance(item, dict) for item in results), 1)
         self.assertEqual(sum(isinstance(item, ProbeError) for item in results), 1)
 
+    def test_two_processes_using_the_controlled_entry_point_have_one_winner(self) -> None:
+        auth = self.authorization()
+        argv = [sys.executable, "-c", CONTROLLED_CHILD, str(ROOT), "run",
+                json.dumps(asdict(auth)), str(self.repo)]
+        processes = [subprocess.Popen(argv, cwd=ROOT, text=True, stdout=subprocess.PIPE,
+                                      stderr=subprocess.PIPE) for _ in range(2)]
+        results = [process.communicate(timeout=20) for process in processes]
+        self.assertEqual([process.returncode for process in processes], [0, 0], results)
+        self.assertEqual(sorted(stdout.strip() for stdout, _ in results), ["authorization_reused", "ran"])
+        self.assertEqual(self.argv_log(), [list(args) for args in ALLOWED_COMMANDS])
+
+    def test_crash_after_consumption_leaves_the_authorization_spent(self) -> None:
+        auth = self.authorization()
+        crashed = self.controlled_child(auth, "crash_after_consumption")
+        self.assertEqual(crashed.returncode, 91, crashed.stderr)
+        refused = self.controlled_child(auth)
+        self.assertEqual(refused.returncode, 0, refused.stderr)
+        self.assertEqual(refused.stdout.strip(), "authorization_reused")
+        self.assertNoExecution()
+
+    def test_atomic_commit_failure_never_creates_scratch_or_launches(self) -> None:
+        def approve(text: str) -> str:
+            return phrase_in(text).decode().strip()
+
+        with patch.object(confirmation, "_ask", approve), \
+                patch.object(ledger, "_commit", side_effect=sqlite3.OperationalError("synthetic")):
+            with self.assertRaisesRegex(ProbeError, "authorization_ledger_unavailable"):
+                run_controlled_probe(self.authorization(), repo_root=self.repo)
+        self.assertNoExecution()
+
+    def test_missing_or_unsafe_state_root_never_prompts_or_launches(self) -> None:
+        missing = self.authorization(state_root=str(self.root / "missing-state"))
+        with self.assertRaisesRegex(ProbeError, "state_root"):
+            run_controlled_probe(missing, repo_root=self.repo)
+        self.state.chmod(0o755)
+        with self.assertRaisesRegex(ProbeError, "state_root_not_private"):
+            run_controlled_probe(self.authorization(), repo_root=self.repo)
+        self.assertEqual(self.opened, 0)
+        self.assertNoExecution()
+
 
 class NoBypassTests(ConfirmationCase):
     def test_raw_runner_is_not_a_supported_public_api(self) -> None:
@@ -724,6 +800,7 @@ class NoBypassTests(ConfirmationCase):
         source = (ROOT / "runtime" / "cli.py").read_text(encoding="utf-8")
         self.assertNotIn("run_controlled_probe", source)
         self.assertNotIn("probe_confirmation", source)
+        self.assertNotIn("probe_authorization_ledger", source)
 
     def test_public_api_has_no_parameter_that_can_carry_consent(self) -> None:
         self.assertEqual(list(inspect.signature(run_controlled_probe).parameters),

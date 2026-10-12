@@ -14,6 +14,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from runtime import codex_probe_runner as runner
+from runtime import probe_authorization_ledger as ledger
 from runtime.codex_probe_runner import ALLOWED_COMMANDS, ProbeAuthorization, ProbeError
 from runtime.runtime_validation import evaluate_validation, parse_evidence
 from runtime.synapse_plan import PlanError
@@ -102,10 +103,12 @@ class RunnerCase(unittest.TestCase):
         self.repo = self.root / "Repo"
         self.vault = self.root / "vault"
         self.parent = self.root / "scratch-parent"
+        self.state = self.root / "state"
         self.bin = self.root / "bin"
         self.side = self.root / "side"
-        for path in (self.repo, self.vault, self.parent, self.bin, self.side):
+        for path in (self.repo, self.vault, self.parent, self.state, self.bin, self.side):
             path.mkdir()
+        self.state.chmod(0o700)
         self.fake = self.bin / "codex"
         self.counter = 0
         self.addCleanup(self.reap_stray_processes)
@@ -136,7 +139,7 @@ class RunnerCase(unittest.TestCase):
         values = dict(
             probe_id=f"probe-{self.counter}-{time.monotonic_ns()}", executable_path=str(self.fake),
             executable_sha256=hashlib.sha256(self.fake.read_bytes()).hexdigest(),
-            scratch_parent=str(self.parent), protected_roots=(str(self.vault),),
+            scratch_parent=str(self.parent), state_root=str(self.state), protected_roots=(str(self.vault),),
             execution_mode="read_only", max_model_calls=0, command_timeout_seconds=5,
             total_timeout_seconds=20, max_output_bytes=4096, issued_at=now - 1, expires_at=now + 300)
         values.update(overrides)
@@ -243,10 +246,10 @@ class AuthorizationTests(RunnerCase):
         auth = self.authorization()
         first = run_codex_probe(auth, repo_root=self.repo)
         self.assertEqual(first["commands"][0]["status"], "nonzero_exit")
-        for attempt in (auth, replace(auth, command_timeout_seconds=2)):
-            with self.subTest(attempt=attempt.command_timeout_seconds), \
-                    self.assertRaisesRegex(ProbeError, "authorization_reused"):
-                run_codex_probe(attempt, repo_root=self.repo)
+        with self.assertRaisesRegex(ProbeError, "authorization_reused"):
+            run_codex_probe(auth, repo_root=self.repo)
+        with self.assertRaisesRegex(ProbeError, "authorization_specification_mismatch"):
+            run_codex_probe(replace(auth, command_timeout_seconds=2), repo_root=self.repo)
         self.assertEqual(len(self.argv_log()), 1)
 
     def test_probe_id_stays_consumed_after_the_first_authorization_expires(self) -> None:
@@ -256,16 +259,27 @@ class AuthorizationTests(RunnerCase):
         later = time.time() + 2000
         second = self.authorization(probe_id="replay-1", issued_at=later - 1, expires_at=later + 300)
         with patch.object(runner.time, "time", return_value=later):
-            with self.assertRaisesRegex(ProbeError, "authorization_reused"):
+            with self.assertRaisesRegex(ProbeError, "authorization_specification_mismatch"):
                 run_codex_probe(second, repo_root=self.repo)
 
-    def test_refused_run_after_validation_still_consumes_the_authorization(self) -> None:
+    def test_preflight_refusal_does_not_create_or_consume_ledger_state(self) -> None:
         self.write_fake()
         auth = self.authorization(executable_sha256="0" * 64)
-        with self.assertRaisesRegex(ProbeError, "executable_hash_mismatch"):
-            run_codex_probe(auth, repo_root=self.repo)
+        for _ in range(2):
+            with self.assertRaisesRegex(ProbeError, "executable_hash_mismatch"):
+                run_codex_probe(auth, repo_root=self.repo)
+        self.assertEqual(list(self.state.iterdir()), [])
+
+    def test_consumption_is_committed_before_scratch_creation_and_cannot_be_undone(self) -> None:
+        self.write_fake()
+        auth = self.authorization()
+        with patch.object(runner, "_create_scratch", side_effect=OSError("synthetic scratch failure")):
+            with self.assertRaisesRegex(OSError, "synthetic scratch failure"):
+                run_codex_probe(auth, repo_root=self.repo)
         with self.assertRaisesRegex(ProbeError, "authorization_reused"):
             run_codex_probe(auth, repo_root=self.repo)
+        self.assertEqual(self.argv_log(), [])
+        self.assertEqual(list(self.parent.iterdir()), [])
 
     def test_out_of_range_or_unsafe_fields_are_rejected(self) -> None:
         self.write_fake()
@@ -277,7 +291,8 @@ class AuthorizationTests(RunnerCase):
             {"max_output_bytes": 0}, {"max_output_bytes": 65537}, {"protected_roots": ()},
             {"protected_roots": [str(self.vault)]}, {"protected_roots": ("relative",)},
             {"probe_id": "has space"}, {"executable_sha256": "abc"}, {"executable_path": "codex"},
-            {"scratch_parent": "relative/dir"}, {"issued_at": "now"}, {"expires_at": None},
+            {"scratch_parent": "relative/dir"}, {"state_root": "relative/dir"},
+            {"issued_at": "now"}, {"expires_at": None},
         ]
         for overrides in bad:
             with self.subTest(overrides=overrides), self.assertRaises(PlanError):
@@ -424,10 +439,10 @@ class ScratchPathTests(RunnerCase):
         self.write_fake()
         real_mkdir = os.mkdir
 
-        def fail_on_second_isolation_directory(path, mode=0o777):
+        def fail_on_second_isolation_directory(path, mode=0o777, *, dir_fd=None):
             if Path(path).name == "codex-home":
                 raise OSError("synthetic setup failure")
-            return real_mkdir(path, mode)
+            return real_mkdir(path, mode, dir_fd=dir_fd)
 
         with patch.object(runner.os, "mkdir", side_effect=fail_on_second_isolation_directory):
             with self.assertRaisesRegex(OSError, "synthetic setup failure"):
@@ -707,10 +722,12 @@ class FilesystemObservationTests(RunnerCase):
 
     def test_clean_run_leaves_nothing_and_writes_nothing_into_the_checkout(self) -> None:
         before = sorted(str(path) for path in self.root.rglob("*") if self.side not in path.parents
-                        and self.bin not in path.parents and path not in (self.side, self.bin))
+                        and self.bin not in path.parents and self.state not in path.parents
+                        and path not in (self.side, self.bin, self.state))
         result = self.run_probe()
         after = sorted(str(path) for path in self.root.rglob("*") if self.side not in path.parents
-                       and self.bin not in path.parents and path not in (self.side, self.bin))
+                       and self.bin not in path.parents and self.state not in path.parents
+                       and path not in (self.side, self.bin, self.state))
         self.assertEqual(before, after)
         self.assertEqual(result["isolation"]["scratch_unexpected_entries"], 0)
         self.assertEqual(result["isolation"]["cleanup"], "complete")
@@ -791,8 +808,8 @@ class EvidenceTests(RunnerCase):
         result = self.run_probe()
         self.assertIs(result["evidence_authenticated"], False)
         self.assertIs(result["dispatch_authorized"], False)
-        self.assertEqual(result["authorization"]["origin"], "terminal_confirmed_process_local")
-        self.assertEqual(result["authorization"]["single_use_scope"], "process")
+        self.assertEqual(result["authorization"]["origin"], "terminal_confirmed_private_ledger")
+        self.assertEqual(result["authorization"]["single_use_scope"], "cooperating_processes")
         self.assertEqual(result["isolation"]["kind"], "temporary_directory_not_os_sandbox")
         verification = result["verification"]
         self.assertEqual(verification["network_restriction"], "unknown")
@@ -849,6 +866,15 @@ class EvidenceTests(RunnerCase):
         self.assertEqual(result["limits"]["declared_execution_mode"], "read_only")
         self.assertIs(result["limits"]["execution_mode_enforced"], False)
         self.assertEqual({tuple(item["argv"]) for item in result["commands"]}, set(ALLOWED_COMMANDS))
+
+    def test_ledger_never_persists_provider_output_vault_data_or_paths(self) -> None:
+        vault_secret = "VAULT-CONTENT-MARKER-8127"
+        (self.vault / "private.md").write_text(vault_secret)
+        self.run_probe()
+        raw = ledger.database_path(self.state).read_bytes()
+        for forbidden in (SECRET_MARKER, vault_secret, str(self.repo), str(self.vault), str(self.parent),
+                          str(self.fake)):
+            self.assertNotIn(forbidden.encode(), raw)
 
 
 class IntegrationBoundaryTests(unittest.TestCase):
