@@ -6,6 +6,12 @@ The JSON's `workspace.repo_root` is the canonical resolved path of the required 
 
 The command requires `--config` and `--repo`. The configuration, vault, index, and state directory must already exist at absolute paths outside the repository. The state directory must also be disjoint from the read-only vault. The command does not create state directories or fall back to MCO's repo-local `reports/review` or `.mco/sessions` defaults. It rejects symlinked config/state targets and any configured path overlapping the repository. Keep real paths and saved output private.
 
+### Path overlap checks
+
+Overlap with the repository, and between the vault and the state directory, is decided by file identity (`st_dev` and `st_ino`) of each path and its ancestors, not by comparing path text. A path spelled with different letter case on a case-insensitive filesystem (the macOS and Windows default), or reached through a symlinked ancestor, is therefore rejected as overlapping. The same check guards the probe `scratch_root`. If a path cannot be inspected, the command fails with an input error instead of treating it as non-overlapping.
+
+Limits: the checks are point-in-time and do not close the gap between validation and later use. A directory exposed under a different device number (for example the same directory mounted twice) is not detected as the same.
+
 ## Version 1 configuration
 
 The JSON file must contain exactly these fields; unknown or missing fields, duplicate keys, invalid UTF-8, and files over 64 KiB are rejected:
