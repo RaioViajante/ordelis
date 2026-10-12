@@ -1,6 +1,6 @@
 # Interactive probe authorization
 
-`runtime/probe_confirmation.py` owns the **library-only** controlled entry point in front of the [Codex zero-model-call probe runner](codex-zero-model-probes.md). The exact operation is shown on the controlling terminal and a digest-bound phrase must be typed before `run_controlled_probe` invokes the private runner. It has no CLI command, persists nothing, and does not authorize dispatch. See the [design decision](../implementation/controlled-probe-entry-point.md).
+`runtime/probe_confirmation.py` owns the **library-only** controlled entry point in front of the [Codex zero-model-call probe runner](codex-zero-model-probes.md). The exact operation is shown on the controlling terminal and a digest-bound phrase must be typed before `run_controlled_probe` invokes the private runner. It has no CLI command and does not authorize dispatch. After confirmation it persists only authorization-consumption metadata in the [private ledger](../implementation/private-authorization-ledger.md). See also the [entry-point decision](../implementation/controlled-probe-entry-point.md).
 
 **No real Codex probe has run.** All tests use synthetic fake executables and pseudo-terminals. No provider was authenticated, no credential was read, no model task ran, and no personal vault was touched.
 
@@ -19,29 +19,30 @@ The function raises `ProbeError` on any refusal. Path and executable validation 
 ## Flow
 
 1. `run_controlled_probe` refuses non-POSIX platforms, any value whose exact type is not `ProbeAuthorization`, and an authorization that is expired or not yet valid. Subclasses are rejected before their attributes are read.
-2. It runs the runner's own path and executable validation (resolved path, no symlinks, no overlap with the checkout, protected roots or scratch parent, SHA-256 matches the real file) and refuses a `probe_id` that was already used, so nobody is asked to approve a run that cannot start. Nothing is created or consumed.
+2. It runs the runner's own path, private-state and executable validation (resolved paths, no symlinks, safe state ownership/mode, no overlap among the checkout, state root, protected roots or scratch parent, SHA-256 matches the real file). An existing ledger is checked for replay, specification conflict, corruption and capacity, so nobody is asked to approve a run that cannot start. A first-use ledger is not initialized before confirmation.
 3. It takes a process-wide prompt lock (one prompt at a time, so concurrent callers cannot interleave on one terminal), opens `/dev/tty`, and refuses unless that is a terminal in line mode (`ICANON`) whose foreground process group is this process's group. Standard input and output are never read or written. Terminal attributes are never changed, so there is nothing to restore.
 4. It discards pending type-ahead, writes the prompt, and reads one line.
 5. It accepts only the exact phrase `authorize <first 12 hex digits of the specification digest>`. Anything else, including `yes`, `y`, a blank line, a different case, extra spaces, a partial line, a non-UTF-8 or overlong line, EOF, Ctrl-C or an I/O error, denies. `n`/`no` report `declined`.
 6. After the answer it re-checks the expiry window and re-runs step 2. If the executable, a protected root or any displayed value changed while the prompt was open, it denies.
 7. On approval the internal confirmation step records a random nonce in a process-local registry (bounded at 64, expired entries pruned).
-8. The internal execution step removes the nonce, re-checks expiry, recomputes the specification digest, and calls the private runner with a module-owned capability. The runner applies all its checks, including `probe_id` single use and a full executable re-hash before every command, and stamps `authorization.origin: "terminal_confirmed_process_local"`.
+8. The internal execution step removes the nonce, re-checks expiry, recomputes the specification digest, and calls the private runner with a module-owned capability.
+9. The runner revalidates paths and expiry, atomically commits the `probe_id` and digest to the private SQLite ledger, then—and only then—creates scratch. It fully re-hashes the executable before every command and stamps `authorization.origin: "terminal_confirmed_private_ledger"` and `single_use_scope: "cooperating_processes"`.
 
 Every refusal by the confirmation layer happens before a scratch directory or process exists; the tests assert that no command was logged and the scratch parent is empty after each negative case.
 
 ## What the user sees
 
-The prompt shows, before asking anything: resolved executable path and SHA-256, the three commands in order, the scratch parent (a new private subdirectory is created and removed), protected roots and the excluded checkout, per-command and total timeouts, output limit, probe id, exact issue and expiry timestamps, remaining validity, `read_only` as a declared mode, **zero** model calls, the full specification digest, and a list of what is **not** guaranteed: filesystem access, network access, native-binary identity, swap-after-check, descendants outside the process group, resource limits, and malicious same-user processes.
+The prompt shows, before asking anything: resolved executable path and SHA-256, the three commands in order, the scratch parent (a new private subdirectory is created and removed), the private state root, protected roots and the excluded checkout, per-command and total timeouts, output limit, probe id, exact issue and expiry timestamps, remaining validity, `read_only` as a declared mode, **zero** model calls, the full specification digest, and a list of what is **not** guaranteed: filesystem access, network access, native-binary identity, swap-after-check, descendants outside the process group, resource limits, and malicious same-user processes. It also says that approval durably consumes the id before scratch creation and lists what is not stored.
 
 Every dynamic value is printed as an ASCII-escaped JSON string, so control characters and escape sequences in a path cannot clear the screen or fake a second prompt. Each displayed value is limited to 512 rendered characters and the complete prompt to 8,192 UTF-8 bytes. An oversized exact value is rejected; it is never truncated. The prompt reads no file contents and no environment values; vault contents and secrets cannot appear in it because nothing reads them.
 
 ## Specification binding
 
-The digest is a SHA-256 over the whole `ProbeAuthorization`, the allowlisted command vectors, the resolved protected roots and the resolved checkout. The typed phrase embeds its prefix, so an answer typed for one specification does not approve another. At run time the digest is recomputed from the authorization object passed in, so a `dataclasses.replace` copy, an in-place `object.__setattr__` change, a swapped authorization, or a retargeted symlink in a protected root is refused. A refused run still spends the confirmation.
+The digest is a SHA-256 over the whole `ProbeAuthorization` (including the private state root), the allowlisted command vectors, the resolved protected roots and the resolved checkout. The typed phrase embeds its prefix, so an answer typed for one specification does not approve another. At run time the digest is recomputed from the authorization object passed in, so a `dataclasses.replace` copy, an in-place `object.__setattr__` change, a swapped authorization, or a retargeted symlink in a protected root is refused. A refused run still spends the confirmation. A committed row with the same id and another digest is a specification conflict, never a new authorization.
 
 ## Reason codes
 
-`unsupported_platform`, `authorization_missing`, `authorization_not_yet_valid`, `authorization_expired`, `display_value_too_long`, `confirmation_prompt_too_long`, `no_controlling_terminal`, `terminal_not_foreground`, `terminal_not_line_mode`, `terminal_io_failed`, `eof`, `interrupted`, `declined`, `not_confirmed`, `specification_changed_during_confirmation`, `specification_changed_after_confirmation`, `confirmation_missing`, `confirmation_invalid_or_reused`, `confirmation_registry_full`, `authorization_reused`, plus the runner's own refusals (`executable_hash_mismatch` and so on).
+`unsupported_platform`, `authorization_missing`, `authorization_not_yet_valid`, `authorization_expired`, `display_value_too_long`, `confirmation_prompt_too_long`, `no_controlling_terminal`, `terminal_not_foreground`, `terminal_not_line_mode`, `terminal_io_failed`, `eof`, `interrupted`, `declined`, `not_confirmed`, `specification_changed_during_confirmation`, `specification_changed_after_confirmation`, `confirmation_missing`, `confirmation_invalid_or_reused`, `confirmation_registry_full`, `authorization_reused`, `authorization_specification_mismatch`, and the closed `state_root_*` / `authorization_ledger_*` ledger refusals, plus the runner's other refusals (`executable_hash_mismatch` and so on).
 
 ## Threat model and trust boundaries
 
@@ -52,13 +53,14 @@ The digest is a SHA-256 over the whole `ProbeAuthorization`, the allowlisted com
 | Provider output | Untrusted data. Never read here; the runner only hashes and counts it. |
 | Repository content, vault notes | Untrusted. Never read or displayed by the confirmation. |
 | Environment variables, config files, JSON files, redirected stdin | Never consent. The module does not read them (a test scans the source and a real child process with piped input and flag variables is denied). |
-| `ProbeAuthorization`, internal confirmation objects | Process-local data. Subclasses and hand-built confirmation objects are refused. They are **not** independently authenticated. |
+| `ProbeAuthorization`, internal confirmation objects | Caller data plus a process-local nonce. Subclasses and hand-built confirmation objects are refused. They are **not** independently authenticated. |
+| Private SQLite ledger | The cooperating-process single-use authority. It is private local state, not proof of human identity and not resistant to hostile same-user modification or deletion. |
 
 ### Guarantees
 
 - No approval without a matching phrase read from the controlling terminal and bound to the displayed specification.
 - Default deny on every failure path listed above, before any process creation.
-- Approval is not persisted, exported to the environment, or reusable: one confirmation, one run, and `probe_id` stays single use per process.
+- The terminal answer and prompt are not persisted or exported. A committed `probe_id` stays single use across cooperating processes using the same ledger.
 - Any change to a displayed value between approval and the start of the run is refused. This is a point-in-time check: the executable is still started by pathname and can be swapped after the last check (see the runner guide).
 
 ### Non-guarantees
@@ -69,7 +71,8 @@ The digest is a SHA-256 over the whole `ProbeAuthorization`, the allowlisted com
 - The approval records that this process wrote the prompt and read the matching phrase; it proves neither human presence nor identity.
 - Evidence stays unauthenticated (`evidence_authenticated: false`); dispatch stays unauthorized.
 - Filesystem, network, native-binary identity and race-freedom remain as limited as in the [runner guide](codex-zero-model-probes.md).
-- Single use is per process. A new process can reuse a `probe_id`, and confirmations are lost on exit by design.
+- Pending confirmations are lost on exit. Committed consumption survives exit and crashes, but deletion or rollback of the private ledger is a trust reset that can make old ids reusable.
+- SQLite atomicity is supported only on suitable local filesystems; arbitrary network shares and hostile same-user filesystem races are outside the guarantee.
 
 ## Supported platforms
 
@@ -77,7 +80,7 @@ POSIX with a controlling terminal: macOS and Linux, exercised locally on macOS a
 
 ## Future public CLI integration
 
-A later, separately reviewed increment may add a command after cross-process replay and private state are designed. It would:
+A later, separately reviewed increment may add a command now that cross-process replay and private state have a library-only design. It would:
 
 1. build the `ProbeAuthorization` from values the user passes explicitly (never from model output or a config file) and the existing `inspect-codex` hash;
 2. call `run_controlled_probe` and, on `ProbeError`, print only the reason code and exit non-zero;
@@ -89,4 +92,4 @@ No such command exists. Adding it now would make an installed Codex launcher rea
 
 ## Why real Codex execution is still disabled
 
-The confirmation records that the exact phrase arrived through the controlling terminal; it does not prove a human was present. It does not make the probe sandboxed, authenticate its evidence, or prevent cross-process replay. The runner remains library-only, nothing calls the entry point outside tests, `context plan` still reports `blocked`, and a test asserts the public CLI does not reference the confirmation module. A real probe additionally needs the prerequisites in [the runner guide](codex-zero-model-probes.md#prerequisites-for-a-controlled-real-probe).
+The confirmation records that the exact phrase arrived through the controlling terminal; it does not prove a human was present. The ledger prevents replay among cooperating processes, but it does not make the probe sandboxed, authenticate its evidence, or resist hostile same-user code. The runner remains library-only, nothing calls the entry point outside tests, `context plan` still reports `blocked`, and a test asserts the public CLI does not reference the confirmation module. A real probe additionally needs the prerequisites in [the runner guide](codex-zero-model-probes.md#prerequisites-for-a-controlled-real-probe).
