@@ -42,7 +42,7 @@ The allowlist is `ALLOWED_COMMANDS`, enforced in code: `_run_command` raises `Pr
 1. **Default deny.** `None`, a dictionary or any non-`ProbeAuthorization` value is refused (`authorization_missing`). Nothing is read from files, environment variables, model responses or provider output.
 2. **Construction** validates the shape: read-only mode, zero model calls, bounded timeouts and output budget, at least one protected root, absolute paths, and a lifetime above 0 and at most 900 seconds. The object is frozen.
 3. **Run time** refuses a not-yet-valid (`issued_at` in the future) or expired authorization.
-4. **Consumption.** A valid, unexpired authorization is recorded as used before any filesystem or process work. Later refusals (hash mismatch, bad paths, a failed command) still consume it. A second attempt with the same `probe_id`, even with different fields, fails with `authorization_reused`.
+4. **Consumption.** A valid, unexpired authorization is recorded as used before any filesystem or process work. Later refusals (hash mismatch, bad paths, a failed command) still consume it. A second attempt with the same `probe_id`, even with different fields or after the first authorization expired, fails with `authorization_reused`. Ids are never pruned; the registry holds at most 4096 and then refuses new runs (`authorization_registry_full`). Expiry is checked once, at the start: a run may finish up to the total timeout after `expires_at`, and the check uses the wall clock.
 5. **Scope of single use: one process.** The registry is in memory, so a new process can reuse a `probe_id`. Cross-process single use would require persistence, which is deliberately not done here.
 
 ### The missing user-origin trust boundary
@@ -70,9 +70,9 @@ What it does **not** do: a temporary directory is **not an OS security sandbox**
 ## Process isolation
 
 - Argument arrays only, no shell. `stdin` is `/dev/null`. The child starts in a new session and process group.
-- The environment is an allowlist: `PATH` plus the five isolated variables. API keys, tokens, proxies and every other inherited variable are dropped, and the environment is re-checked (`environment_not_isolated`) before any spawn. `PATH` is inherited because launcher scripts such as `#!/usr/bin/env node` need it; entries on `PATH` can therefore influence which interpreter a launcher uses.
+- The environment is an allowlist: `PATH` plus the five isolated variables. API keys, tokens, proxies and every other inherited variable are dropped, and the environment is re-checked (`environment_not_isolated`) before any spawn. `PATH` is inherited because launcher scripts such as `#!/usr/bin/env node` need it, but only absolute, existing entries outside the checkout, the protected roots and the scratch parent are kept (empty or relative entries would resolve launchers from the working directory); an empty result becomes `/usr/bin:/bin`. The remaining entries, and any interpreter a launcher selects from them, are not verified or hashed, so a writable `PATH` directory can still change what a launcher runs.
 - Per-command and total wall-clock limits and a per-command output limit are enforced. On timeout, output overflow, cancellation or error the whole process group receives `SIGKILL`.
-- After a command exits, a live process group or a pipe still held open is reported as `descendant_survived`, the group is killed, and `process.group_cleanup` records whether it disappeared (`verified` or `failed`).
+- After a command exits, a live process group or a pipe still held open is reported as `descendant_survived`, the group is killed, and `process.group_cleanup` records whether it disappeared (`verified` or `failed`). It is also `failed` if a pipe is still held open after the kill, which means a descendant outside the group survived.
 - **Descendant containment is process-group only.** A descendant that starts its own session or group is invisible to this check and is not killed. A test documents this. No cgroup, job object or sandbox is used. No `RLIMIT` limits are applied; the CPU, memory and disk budgets are not enforced.
 
 ## Executable identity
@@ -93,7 +93,7 @@ Only this module builds the records, and they pass `parse_evidence`. Provider ou
 | `session_persistence` fail (`session_data_written`) | any entry appeared in the scratch directory | `external_check` |
 | `read_only_filesystem` fail (`write_succeeded`) | the scratch parent's entries changed | `external_check` |
 
-Because they are not tied to a task, the runner **never emits a pass** for anything but `executable_identity`. Absence of a failure from one help command is not enforcement. Records remain unauthenticated: another component could build the same dictionaries, so the trusted-construction rule in [Runtime-validation foundations](runtime-validation-foundations.md#evidence-trust-boundary) still applies.
+The result's `limits.declared_execution_mode` echoes the authorization and `execution_mode_enforced` is `false`: nothing enforces read-only behavior. Because they are not tied to a task, the runner **never emits a pass** for anything but `executable_identity`. Absence of a failure from one help command is not enforcement. Records remain unauthenticated: another component could build the same dictionaries, so the trusted-construction rule in [Runtime-validation foundations](runtime-validation-foundations.md#evidence-trust-boundary) still applies.
 
 Evaluating a clean run with `evaluate_validation` yields `executable_identity: satisfied` and `unknown` for model acceptance, read-only filesystem, output format, process termination and session persistence, so `validation.status` stays `blocked`. Tests also show that provider-labeled passes for isolation stay `insufficient_evidence`.
 
