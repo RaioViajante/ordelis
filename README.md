@@ -180,6 +180,7 @@ Provider processes are isolated behind a shared adapter contract: detect, run, p
 | Read-only synthetic vault context preview | [Vault context preview](./docs/guides/vault-context-preview.md) |
 | Private, non-dispatching execution-plan preview | [Private execution plan](./docs/guides/private-execution-plan.md) |
 | Explicit, non-authenticating Codex CLI help inspection | [Codex capability inspection](./docs/guides/codex-cli-capability-inspection.md) |
+| Provider runtime-validation evidence model (library only, no dispatch) | [Runtime-validation foundations](./docs/guides/runtime-validation-foundations.md) |
 | Machine-readable error contract | [Error contract](./docs/contracts/errors-v0.1.x.md) |
 | Invocation and artifact contract | [Invocation contract](./docs/contracts/invocation-runtime-v1.md) |
 | Provider permission contract | [Permission contract](./docs/contracts/provider-permissions-v0.1.x.md) |
