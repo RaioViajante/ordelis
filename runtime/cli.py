@@ -22,6 +22,7 @@ from .skill_manager import read_bundled_skill, skill_status, sync_bundled_skill
 from . import __version__
 from .policy import ExecutionPreviewRequest, provider_policy_preview
 from .vault_context import VaultContextError, preview as vault_preview
+from .synapse_plan import PlanError, build_plan as synapse_plan
 
 SUPPORTED_PROVIDERS = ("agy", "claude", "codex", "copilot", "cursor", "gemini", "grok", "hermes", "opencode", "pi", "qwen")
 SUPPORTED_PROVIDER_LIST = ",".join(SUPPORTED_PROVIDERS)
@@ -1299,6 +1300,16 @@ def build_parser() -> argparse.ArgumentParser:
     context_preview.add_argument("--per-note-bytes", type=int, default=2048)
     context_preview.add_argument("--total-bytes", type=int, default=8192)
     context_preview.add_argument("--json", action="store_true", help="Print JSON (default for preview)")
+    context_plan = context_actions.add_parser("plan", help="Print a private, non-dispatching execution plan")
+    context_plan.add_argument("--config", type=Path, required=True, help="Absolute external Synapse JSON config")
+    context_plan.add_argument("--repo", type=Path, required=True, help="Repository to keep private state outside")
+    context_plan.add_argument("--project", help="Indexed project ID")
+    context_plan.add_argument("--topic", help="Indexed topic ID")
+    context_plan.add_argument("--task", required=True, help="User task (not persisted by this command)")
+    context_plan.add_argument("--agent", required=True, help="Explicit provider ID")
+    context_plan.add_argument("--model", required=True, help="Required model name")
+    context_plan.add_argument("--effort", help="Optional required effort setting")
+    context_plan.add_argument("--json", action="store_true", help="Print JSON (default for plan)")
 
     doctor = subparsers.add_parser(
         "doctor",
@@ -2024,10 +2035,18 @@ def main(argv: List[str] | None = None) -> int:
 
     if args.command == "context":
         try:
-            payload = vault_preview(args.vault, args.index, args.project, args.topic,
-                                    args.agent, args.model, args.effort,
-                                    args.per_note_bytes, args.total_bytes)
-        except (VaultContextError, OSError) as exc:
+            if args.context_action == "preview":
+                payload = vault_preview(args.vault, args.index, args.project, args.topic,
+                                        args.agent, args.model, args.effort,
+                                        args.per_note_bytes, args.total_bytes)
+            else:
+                adapters = adapter_registry()
+                if args.agent not in adapters:
+                    raise PlanError(f"unknown agent: {args.agent}")
+                payload = synapse_plan(config_path=args.config, repo_root=args.repo, task=args.task,
+                                       project=args.project, topic=args.topic, agent=args.agent,
+                                       model=args.model, effort=args.effort, adapter=adapters[args.agent])
+        except (VaultContextError, PlanError, OSError) as exc:
             print(json.dumps(_error_envelope("input_error", str(exc)), ensure_ascii=True))
             return 2
         print(json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")))
