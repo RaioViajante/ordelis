@@ -137,10 +137,10 @@ Synapse never authenticates for the user, reads credential files, or logs prompt
 
 ## Future controlled-probe workflow
 
-Steps 4 and 5 now exist as a library, tested only with fake executables (see [the runner guide](codex-zero-model-probes.md)); no real probe has been run. Each remaining step needs its own explicitly authorized increment:
+Steps 2, 4 and 5 now exist as a library, tested only with fake executables (see [the runner guide](codex-zero-model-probes.md) and [interactive authorization](interactive-probe-authorization.md)); no real probe has been run. Each remaining step needs its own explicitly authorized increment:
 
 1. Run `inspect-codex` and record the executable hash.
-2. The user writes a probe authorization bound to that hash with an empty scratch directory outside the checkout.
+2. The user writes a probe authorization bound to that hash with an empty scratch directory outside the checkout, and approves its exact values on the controlling terminal (`confirm_probe`, library only).
 3. `check_probe_authorization` must return `probe_authorized: true`.
 4. A probe runner (new code) executes bounded probes in the scratch directory with an isolated home, no inherited API keys, hard deadlines, and process-group cleanup, as `inspect-codex` already does for help commands.
 5. The runner builds `runtime_probe` and `external_check` records from its own observations, bound to the hash and `probe_id`, and passes them in memory to `evaluate_validation`.

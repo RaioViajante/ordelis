@@ -182,6 +182,7 @@ Provider processes are isolated behind a shared adapter contract: detect, run, p
 | Explicit, non-authenticating Codex CLI help inspection | [Codex capability inspection](./docs/guides/codex-cli-capability-inspection.md) |
 | Provider runtime-validation evidence model (library only, no dispatch) | [Runtime-validation foundations](./docs/guides/runtime-validation-foundations.md) |
 | Authorization-gated Codex zero-model-call probe runner (library only, fake-executable tests) | [Codex zero-model probes](./docs/guides/codex-zero-model-probes.md) |
+| Interactive terminal authorization for controlled probes (library only, fake-executable tests) | [Interactive probe authorization](./docs/guides/interactive-probe-authorization.md) |
 | Machine-readable error contract | [Error contract](./docs/contracts/errors-v0.1.x.md) |
 | Invocation and artifact contract | [Invocation contract](./docs/contracts/invocation-runtime-v1.md) |
 | Provider permission contract | [Permission contract](./docs/contracts/provider-permissions-v0.1.x.md) |

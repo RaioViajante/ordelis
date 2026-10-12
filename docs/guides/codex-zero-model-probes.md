@@ -1,6 +1,6 @@
 # Codex zero-model-call probe runner
 
-`runtime/codex_probe_runner.py` is a **library-only** runner that executes three non-model Codex CLI commands against one explicitly authorized executable and returns bounded, structured, **unauthenticated** evidence. It has no CLI command, persists nothing, and does not authorize dispatch. `mco context preview`, `mco context plan` and `mco context inspect-codex` do not call it, and a test pins that no other runtime module references it.
+`runtime/codex_probe_runner.py` is a **library-only** runner that executes three non-model Codex CLI commands against one explicitly authorized executable and returns bounded, structured, **unauthenticated** evidence. It has no CLI command, persists nothing, and does not authorize dispatch. `mco context preview`, `mco context plan` and `mco context inspect-codex` do not call it, and a test pins that no other runtime module references it except the [confirmation module](interactive-probe-authorization.md).
 
 **This increment ran no real Codex probe.** All tests use synthetic fake executables. No provider was authenticated, no credential file was read, no model task ran, and no personal vault was touched.
 
@@ -47,13 +47,13 @@ The allowlist is `ALLOWED_COMMANDS`, enforced in code: `_run_command` raises `Pr
 
 ### The missing user-origin trust boundary
 
-**This increment cannot establish that a human approved a probe.** `ProbeAuthorization` is a plain object: any code in the process, including code a model agent influenced, can construct one. A file, flag or environment variable would be no stronger, since the party being constrained could write it. Therefore:
+**`run_codex_probe` cannot establish that a human approved a probe.** `ProbeAuthorization` is a plain object: any code in the process, including code a model agent influenced, can construct one. A file, flag or environment variable would be no stronger, since the party being constrained could write it. Therefore:
 
 - The API is **non-authorizing in the trust sense**. Results state `authorization.origin: "caller_asserted_unverified"`.
 - Evidence stays `evidence_authenticated: false` and `dispatch_authorized: false`.
 - The caller is responsible for obtaining real approval of the exact executable path, hash, scratch parent, protected roots and limits.
 
-A genuine boundary needs an action the agent cannot perform, such as the runner itself prompting on a controlling terminal with the exact values and requiring a typed confirmation, or approval via an out-of-process channel. That is a separate, explicitly reviewed increment.
+A genuine boundary needs an action the agent cannot perform. [Interactive probe authorization](interactive-probe-authorization.md) adds one for library callers: `confirm_probe` prompts on the controlling terminal with the exact values and `run_confirmed_probe` runs only what was typed-approved (`authorization.origin: "terminal_confirmed_process_local"`). It is still a same-user, process-local control and `run_codex_probe` remains directly callable, so the guarantees above are unchanged for direct callers.
 
 ## Filesystem isolation
 
@@ -111,7 +111,7 @@ A completed probe shows, at most, that three help commands behaved on one execut
 
 ## Prerequisites for a controlled real probe
 
-1. A real user-origin approval mechanism (for example a terminal confirmation owned by the runner) that shows the exact values.
+1. A trusted CLI entry point that uses the [terminal confirmation](interactive-probe-authorization.md) (implemented as a library, not yet reachable) and keeps `run_codex_probe` from being called directly.
 2. A decision on cross-process single use, which requires a small private store.
 3. An explicit user-approved run against the real binary, with the user's own installation, still with zero model calls.
 4. Independent isolation witnesses before any claim about filesystem, network or session behavior: an OS-level mechanism applied by Synapse, canary writes and read attempts, and network observation outside the provider process.
