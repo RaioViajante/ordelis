@@ -349,6 +349,20 @@ class ProbeAuthorizationTests(unittest.TestCase):
             with self.subTest(root=root.name), self.assertRaises(PlanError):
                 self.check(self.authorization(scratch_root=variant))
 
+    def test_scratch_with_only_a_case_variant_repo_prefix_is_rejected_as_checkout(self) -> None:
+        inside_repo = self.repo / "scratch"
+        inside_repo.mkdir()
+        variant = self.root / self.repo.name.upper() / "scratch"
+        if not variant.exists():
+            self.skipTest("filesystem is case-sensitive")
+        for path in (variant, variant.parent):
+            with self.subTest(path=str(path)), self.assertRaisesRegex(PlanError, "scratch_root overlaps the repository$"):
+                self.check(self.authorization(scratch_root=str(path)))
+
+    def test_identity_comparison_error_denies_instead_of_accepting(self) -> None:
+        with patch("os.path.samestat", side_effect=OSError("stat failed")), self.assertRaises(PlanError):
+            self.check(self.authorization())
+
     def test_symlinked_parent_into_protected_root_is_rejected(self) -> None:
         (self.vault / "scratch").mkdir()
         (self.root / "link").symlink_to(self.vault)

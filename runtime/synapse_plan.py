@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 from .config import ReviewPolicy
@@ -31,6 +32,18 @@ def _integer(value: object, minimum: int, maximum: int, label: str) -> int:
     return value
 
 
+def _overlaps(first: Path, second: Path) -> bool:
+    """True if the paths are the same or one contains the other, decided by file identity.
+
+    Comparing path text is wrong on case-insensitive filesystems. Raises OSError if a path cannot be
+    inspected; callers must treat that as a failure, never as "no overlap".
+    """
+    first_chain = [os.stat(path) for path in (first, *first.parents)]
+    second_chain = [os.stat(path) for path in (second, *second.parents)]
+    return (any(os.path.samestat(found, second_chain[0]) for found in first_chain)
+            or any(os.path.samestat(found, first_chain[0]) for found in second_chain))
+
+
 def _external_path(raw: object, repo: Path, label: str, *, directory: bool) -> Path:
     if not isinstance(raw, str) or not raw or not Path(raw).is_absolute():
         raise PlanError(f"{label} must be an absolute external path")
@@ -38,7 +51,11 @@ def _external_path(raw: object, repo: Path, label: str, *, directory: bool) -> P
     if path.is_symlink() or not (path.is_dir() if directory else path.is_file()):
         raise PlanError(f"{label} must be an existing, non-symlink {'directory' if directory else 'file'}")
     resolved = path.resolve(strict=True)
-    if resolved == repo or resolved in repo.parents or repo in resolved.parents:
+    try:
+        overlaps = _overlaps(resolved, repo)
+    except OSError as exc:
+        raise PlanError(f"{label} could not be compared with the repository") from exc
+    if overlaps:
         raise PlanError(f"{label} overlaps the repository")
     return resolved
 
@@ -72,7 +89,11 @@ def load_private_config(path: Path, repo_root: Path) -> dict[str, object]:
     retries = _integer(execution["max_retries"], 0, 0, "max retries")
     state = _keys(config["state"], {"root"}, "state")
     state_root = _external_path(state["root"], repo, "state.root", directory=True)
-    if state_root == vault_root or state_root in vault_root.parents or vault_root in state_root.parents:
+    try:
+        overlaps = _overlaps(state_root, vault_root)
+    except OSError as exc:
+        raise PlanError("state.root could not be compared with the read-only vault") from exc
+    if overlaps:
         raise PlanError("state.root must not overlap the read-only vault")
     return {"repo_root": repo, "vault_root": vault_root, "index": index, "per_note_bytes": per_note,
             "total_excerpt_bytes": total, "hard_timeout_seconds": deadline,
