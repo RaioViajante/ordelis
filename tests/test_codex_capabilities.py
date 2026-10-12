@@ -115,6 +115,59 @@ class CodexCapabilityTests(unittest.TestCase):
         self.assertIn("adapter_flag_not_advertised:--ask-for-approval",
                       result["inspection"]["blocking_reasons"])
 
+    def test_required_values_under_unrelated_options_do_not_count(self) -> None:
+        root = ROOT_HELP.replace("          - never: Never ask for approval\n", "")
+        root += "      --unrelated <VALUE>\n          - never: unrelated value\n"
+        exec_help = EXEC_HELP.replace(
+            "          [possible values: read-only, workspace-write, danger-full-access]\n", "")
+        exec_help += "      --unrelated <VALUE>\n          [possible values: read-only, other]\n"
+        self.fake_cli(root=root, exec_help=exec_help)
+
+        result = inspect_codex_cli(str(self.binary))
+
+        self.assertTrue(result["observed_cli_controls"]["--sandbox"])
+        self.assertTrue(result["observed_cli_controls"]["--ask-for-approval"])
+        self.assertFalse(result["observed_required_values"]["sandbox_read_only"])
+        self.assertFalse(result["observed_required_values"]["approval_never"])
+        self.assertIn("required_value_not_advertised:sandbox=read-only",
+                      result["inspection"]["blocking_reasons"])
+        self.assertIn("required_value_not_advertised:approval_policy=never",
+                      result["inspection"]["blocking_reasons"])
+
+    def test_section_heading_terminates_option_section(self) -> None:
+        root = ("Codex CLI\n"
+                "Usage: codex [OPTIONS] [PROMPT]\n"
+                "Options:\n"
+                "  -a, --ask-for-approval <POLICY>\n"
+                "  -c, --config <key=value>\n"
+                "Commands:\n"
+                "  never   Subcommand coincidentally named never\n")
+        exec_help = ("Run Codex non-interactively\n"
+                     "Usage: codex exec [OPTIONS] [PROMPT]\n"
+                     "Options:\n"
+                     "  -C, --cd <DIR>\n"
+                     "  -m, --model <MODEL>\n"
+                     "      --skip-git-repo-check\n"
+                     "      --json\n"
+                     "      --output-schema <FILE>\n"
+                     "      --output-last-message <FILE>\n"
+                     "      --ephemeral\n"
+                     "  -s, --sandbox <MODE>\n"
+                     "Environment:\n"
+                     "  [possible values: read-only, other]\n")
+        self.fake_cli(root=root, exec_help=exec_help)
+
+        result = inspect_codex_cli(str(self.binary))
+
+        self.assertTrue(result["observed_cli_controls"]["--sandbox"])
+        self.assertTrue(result["observed_cli_controls"]["--ask-for-approval"])
+        self.assertFalse(result["observed_required_values"]["sandbox_read_only"])
+        self.assertFalse(result["observed_required_values"]["approval_never"])
+        self.assertIn("required_value_not_advertised:sandbox=read-only",
+                      result["inspection"]["blocking_reasons"])
+        self.assertIn("required_value_not_advertised:approval_policy=never",
+                      result["inspection"]["blocking_reasons"])
+
     def test_malformed_version_help_utf8_and_path_rejected(self) -> None:
         for changed in ({"version": "not codex"}, {"root": "garbage"},
                         {"exec_help": "garbage"}, {"behavior": "invalid_utf8"}):

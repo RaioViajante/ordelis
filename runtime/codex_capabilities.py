@@ -23,6 +23,8 @@ MAX_HELP_BYTES = 65536
 MAX_VERSION_BYTES = 256
 PROBE_TIMEOUT_SECONDS = 5
 _VERSION = re.compile(r"^codex-cli (\d+)\.(\d+)\.(\d+)(?:-[A-Za-z0-9.-]+)?$")
+_OPTION_LINE = re.compile(r"^ {2,6}(?:(-[A-Za-z0-9]),\s+)?(--[a-z][a-z0-9-]*)(?=[\s,]|$)")
+_SECTION_HEADING = re.compile(r"^[A-Za-z][A-Za-z ]+:$")
 _CONTROLS = (
     "--model", "--config", "--sandbox", "--ask-for-approval", "--json",
     "--output-schema", "--output-last-message", "--skip-git-repo-check",
@@ -137,8 +139,20 @@ def _help_command(binary: Path, args: tuple[str, ...], limit: int, cwd: str,
         raise CapabilityInspectionError("Codex help output is not UTF-8") from exc
 
 
+def _option_section(help_text: str, flag: str) -> str:
+    lines = help_text.splitlines()
+    start: int | None = None
+    for index, line in enumerate(lines):
+        option = _OPTION_LINE.match(line)
+        if start is not None and (option or _SECTION_HEADING.match(line)):
+            return "\n".join(lines[start:index])
+        if option and flag in option.groups():
+            start = index
+    return "\n".join(lines[start:]) if start is not None else ""
+
+
 def _advertised(help_text: str, flag: str) -> bool:
-    return re.search(r"(?m)^\s+(?:-\w,\s+)?" + re.escape(flag) + r"(?=[\s,]|$)", help_text) is not None
+    return bool(_option_section(help_text, flag))
 
 
 def inspect_codex_cli(binary: str | None = None) -> dict[str, object]:
@@ -171,9 +185,11 @@ def inspect_codex_cli(binary: str | None = None) -> dict[str, object]:
     before_exec = command.index("exec")
     missing = [flag for flag in required if not _advertised(
         root_help if command.index(flag) < before_exec else exec_help, flag)]
-    read_only_advertised = re.search(r"\[possible values:[^\]]*\bread-only\b", exec_help,
+    sandbox_section = _option_section(exec_help, "--sandbox")
+    approval_section = _option_section(root_help, "--ask-for-approval")
+    read_only_advertised = re.search(r"\[possible values:[^\]]*\bread-only\b", sandbox_section,
                                      re.IGNORECASE) is not None
-    never_advertised = re.search(r"(?m)^\s+-?\s*never(?:\s|:|$)", root_help) is not None
+    never_advertised = re.search(r"(?m)^\s+-?\s*never(?:\s|:|$)", approval_section) is not None
     minimum = adapter.capabilities().min_supported_version
     assert minimum is not None
     version_supported = tuple(map(int, match.groups())) >= tuple(map(int, minimum.split(".")))
