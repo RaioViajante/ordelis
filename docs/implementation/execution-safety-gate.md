@@ -56,7 +56,7 @@ Two layers of input are accepted, both unauthenticated caller data:
    per-capability rules, unchanged. They bind to an executable hash and a `probe_id` but carry neither a command nor
    a validity window.
 2. **Control attestations** are a new closed schema that adds what probe records lack: `origin`, `level`,
-   `mechanism`, command binding and a validity window.
+   `mechanism`, executable, command and platform binding, and a validity window.
 
 `origin` is one of `provider_reported`, `synapse_observed`, `synapse_enforced`. Only Synapse code may construct the
 last two, in the same process that evaluates them and from its own observations; the trusted-construction rule of
@@ -112,9 +112,18 @@ cooperating processes only.
 
 ## Evidence validity, staleness and conflict
 
-- **Binding order.** An attestation counts toward a control only if its executable hash, command digest and
-  `probe_id` all equal the request. Mismatches are counted separately (`stale_executable`, `command_mismatch`,
-  `unbound_probe`) and then ignored. A different executable or command can never authorize silently.
+- **Binding order.** An attestation counts toward a control only if its executable hash, command digest, platform
+  and `probe_id` all equal the request. Mismatches are counted separately (`stale_executable`, `command_mismatch`,
+  `platform_mismatch`, `unbound_probe`) and then ignored. A different executable, command or platform can never
+  authorize silently. Platform binding matters because a mechanism name such as `os_sandbox` denotes different
+  kernel facilities on different operating systems.
+- **Model and effort.** Enforcement attestations are not bound to a model or effort value: confinement is a property
+  of the executable, its argument vector and the platform. The model and effort a command requests appear in its
+  argument vector and are therefore bound through the command digest; the gate does not parse the vector to check
+  that it agrees with the `model` and `effort` inputs. Probe records bind a model and effort through `requested`.
+- **Policy version.** Every result carries `policy_version`, identifying the requirement and platform tables that
+  produced it. Attestations are not bound to it; a changed table changes the version, and results from different
+  versions must not be compared.
 - **Validity window.** A record is live when `issued_at <= now < expires_at`; `now` is an explicit input, never read
   from the clock, so results are reproducible. Windows longer than 900 seconds (the authorization cap) are
   rejected. Expired and not-yet-valid records do not count.
@@ -128,6 +137,15 @@ cooperating processes only.
   contradicting record blocks.
 - **Non-required controls.** A control a tier does not require is reported `not_required`, but failures against it
   still block.
+- **Scope of a failure.** A failure poisons only the exact executable, command, platform and `probe_id` it was
+  recorded for. A new probe run, a different command or a changed executable is a distinct configuration and is not
+  blocked by it. Probe records carry no command, so a probe-record failure applies to every command evaluated under
+  the same executable and `probe_id`; a single-use `probe_id` binds one specification, so this does not cross runs.
+- **Any party can only worsen a control.** Records from every origin, including `provider_reported`, take part in
+  failure and conflict detection, so a provider can turn a satisfied control into `conflicting` or `failed` but can
+  never improve one.
+- **Omission cannot be detected.** The gate sees only what the caller supplies. A caller who leaves out a failing
+  record gets a better result; this is part of why no result is authenticated.
 
 ## Help commands versus model tasks
 
@@ -147,29 +165,49 @@ be independently enforced. The gate is the only place where the two tiers are de
 
 ## Platform requirements
 
-The platform is an explicit input, never read from `os`. A platform not in the table is unsupported: it blocks both
-tiers, and no enforced control can be satisfied on it. These are the mechanisms the gate will *accept as evidence*;
-Synapse implements none of them yet.
+Four statements are kept apart, and the table below makes only the third and fourth:
+
+1. A mechanism **exists on the operating system** (for example Linux cgroups, Landlock, seccomp and namespaces;
+   macOS Seatbelt profiles; Windows job objects and AppContainer). This ADR does not survey or rely on that.
+2. Synapse **implements** it. It implements none yet.
+3. It was **independently verified in one execution**. That is what an attestation would claim, and only a trusted
+   producer could make it credible.
+4. It is **sufficient for this gate's threat model**. The table lists the mechanisms the gate currently *accepts* as
+   a basis for an `enforced` claim.
+
+The table is an accepted set, not a statement about what an operating system can or cannot do. Omitting a mechanism
+means "not yet evaluated, treated as unknown", and the resulting status `mechanism_insufficient` reads as "no
+accepted mechanism was named", never as "impossible". Accepting another mechanism is a change to this table and
+`POLICY_VERSION`, with its own review. The platform is an explicit input, never read from `os`; attestations are
+bound to it.
 
 | Platform | filesystem | network | process containment | cpu | memory | disk |
 | --- | --- | --- | --- | --- | --- | --- |
 | `linux` | `os_sandbox` | `os_sandbox` | `cgroup` | `rlimit`, `cgroup` | `cgroup` | `quota_volume` |
-| `darwin` | `os_sandbox` | `os_sandbox` | none accepted | `rlimit` | none accepted | `quota_volume` |
-| other (including `windows`) | unsupported | | | | | |
+| `darwin` | `os_sandbox` | `os_sandbox` | not evaluated | `rlimit` | not evaluated | `quota_volume` |
+| any other name, including `windows` | not evaluated; the gate reports the platform `unsupported` |
 
-macOS has no accepted descendant-containment or memory-cap mechanism: process groups are escapable and memory
-rlimits are not reliably enforced, so a macOS model task cannot satisfy the gate until a later reviewed ADR adds a
-mechanism. This is deliberate fail-closed behavior, not an oversight. Windows is unsupported because the probe
-runner is POSIX-only; job objects and AppContainer need their own design. Disk quotas need a size-bounded volume
-because `RLIMIT_FSIZE` caps single-file size, not total usage.
+- **Linux.** Other mechanisms may be adequate (for example PID or user namespaces for containment) but are not in
+  the accepted set; they are unknown to the gate, not rejected on their merits.
+- **macOS.** Descendant containment and memory limits are *not evaluated*. Process groups can be left by a
+  descendant, which is why `process_group` is not accepted for enforcement; whether another macOS facility could
+  meet the threat model is unknown here. Until a reviewed amendment names one, a macOS model task cannot satisfy
+  the gate.
+- **Windows.** Unsupported by policy for this increment because Synapse's probe runner is POSIX-only, not because
+  of a conclusion about Windows. Job objects and AppContainer are unevaluated.
+- **Disk.** `quota_volume` is named because `RLIMIT_FSIZE` bounds the size of a single file, not total usage; other
+  total-usage mechanisms are unevaluated.
+- Because macOS is the platform the project is developed on, a result of `mechanism_insufficient` there is the
+  designed outcome of an incomplete accepted set, not a defect to be silenced by adding unverified mechanisms.
 
 ## Contract
 
 `evaluate_execution_gate(task_kind=, executable_sha256=, command=, probe_id=, platform_name=, now=, evidence=,
-attestations=, model=None, effort=None)` has no defaults for security-significant values. `command` is the argument
+attestations=, model=None, effort=None)` (attestation fields: `control`, `level`, `origin`, `outcome`, `mechanism`,
+`observed`, `executable_sha256`, `command_sha256`, `probe_id`, `platform`, `issued_at`, `expires_at`) has no defaults for security-significant values. `command` is the argument
 vector after the executable, digested by `command_specification_sha256` (canonical JSON, so any inherited MCO
 vector can be bound). `model` is required for `model_task` and invalid for `help_command`; `effort` needs a model.
-Malformed input raises `PlanError`, matching the existing library; semantic problems (stale, forged, missing) are
+Malformed input, including non-finite or oversized numbers, raises `PlanError`, matching the existing library; semantic problems (stale, forged, missing) are
 decision reasons. The result lists every control in a fixed order with `required`, `minimum_level`, `status` and
 `highest_claimed_level`, evidence counts, and a `decision` holding the reasons in a fixed order: platform, probe
 records (capability order), controls (control order), then the permanent reasons.
@@ -179,7 +217,12 @@ records (capability order), controls (control order), then the permanent reasons
 - Everything is unauthenticated caller input. Hostile same-user code can fabricate a record that satisfies the
   requirements; the permanent reasons exist so that this is never read as permission.
 - No mechanism in the platform table is implemented, so no real provider can satisfy a model task.
-- Legacy probe records carry no window; their freshness is only as good as the `probe_evidence` attestation that
-  brackets the same `probe_id`.
+- Legacy probe records carry no window. Their freshness comes only from a live `probe_evidence` attestation for the
+  same `probe_id`, and that attestation names no digest of the records it covers: records reused under the same
+  `probe_id` within the window are indistinguishable from fresh ones. Single-use `probe_id`s limit this to
+  one run, but the gate cannot verify it.
+- Importing the gate transitively imports `runtime.config`, `runtime.policy` and `runtime.vault_context`. This was
+  audited to read only the `HOME` variable (to locate user configuration paths), open no file and import no runner,
+  ledger, confirmation, capability-inspection, CLI, adapter or session module; a test pins the import closure.
 - The ledger guarantee is the existing one (cooperating processes, local filesystems).
 - The gate is not wired into the CLI, planner, runner or ledger, and a test pins that.
