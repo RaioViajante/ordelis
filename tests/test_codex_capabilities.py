@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -80,7 +81,8 @@ class CodexCapabilityTests(unittest.TestCase):
                                                 "blocking_reasons": [], "dispatch_authorized": False})
         self.assertEqual(first["cli_version"], "codex-cli 0.162.1")
         self.assertEqual(first["binary"]["path"], str(self.binary.resolve()))
-        self.assertEqual(len(first["binary"]["sha256"]), 64)
+        self.assertEqual(first["binary"]["sha256"], hashlib.sha256(self.binary.read_bytes()).hexdigest())
+        self.assertEqual(first["binary"]["identity_scope"], "resolved_executable_file")
         self.assertTrue(first["observed_cli_controls"]["--model"])
         self.assertTrue(first["observed_cli_controls"]["--ask-for-approval"])
         self.assertEqual(first["observed_required_values"],

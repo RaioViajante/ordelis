@@ -65,7 +65,8 @@ def _binary_identity(binary: str | None) -> tuple[Path, dict[str, object]]:
     if read_bytes != before.st_size or (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (
             after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns):
         raise CapabilityInspectionError("Codex binary changed during inspection")
-    return resolved, {"path": str(resolved), "size_bytes": before.st_size,
+    return resolved, {"path": str(resolved), "identity_scope": "resolved_executable_file",
+                      "size_bytes": before.st_size,
                       "sha256": digest.hexdigest()}
 
 
