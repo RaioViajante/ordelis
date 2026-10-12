@@ -1,6 +1,6 @@
 # Provider runtime-validation foundations
 
-`runtime/runtime_validation.py` defines how Synapse will judge evidence about a real provider CLI **before** any dispatch is allowed. It is a library module only: it has no CLI command, runs no provider, starts no process, reads no credentials, and writes no files. `mco context preview`, `mco context plan`, and `mco context inspect-codex` are unchanged and remain non-dispatching, and the MCO invocation workflow is not wired into Synapse planning. A test pins that no other runtime module references this one except the [probe runner](codex-zero-model-probes.md).
+`runtime/runtime_validation.py` defines how Synapse will judge evidence about a real provider CLI **before** any dispatch is allowed. It is a library module only: it has no CLI command, runs no provider, starts no process, reads no credentials, and writes no files. `mco context preview`, `mco context plan`, and `mco context inspect-codex` are unchanged and remain non-dispatching, and the MCO invocation workflow is not wired into Synapse planning. A test pins that no other runtime module references this one except the [probe runner](codex-zero-model-probes.md) and the non-executing [safety gate](../implementation/execution-safety-gate.md), which reuses its parser and status rules unchanged.
 
 Evidence for a real provider does not exist yet. The tests use only synthetic records and a fake executable.
 

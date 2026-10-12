@@ -10,6 +10,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 ### Added
 - Added a library-only, authorization-gated Codex zero-model-call probe runner (`--version`, `--help`, `exec --help`) that builds bounded, unauthenticated runtime evidence; it is tested only with fake executables and does not enable dispatch.
 - Added library-only interactive terminal authorization for those probes (`/dev/tty` confirmation bound to the exact specification, default deny, no persistence); it is a same-user, process-local control, has no CLI command and enables no real provider execution.
+- Added a library-only, non-executing Execution Safety Gate that fails closed on missing, stale, mismatched, conflicting, provider-reported or unenforced evidence and always reports execution as unauthorized; no enforcement mechanism exists yet, there is no CLI command, and evidence stays unauthenticated.
 
 ### Fixed
 - Rejected case-aliased and symlink-aliased paths inside the checkout in `mco context plan` private path validation by deciding overlap with file identity instead of path text.
