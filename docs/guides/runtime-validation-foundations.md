@@ -128,7 +128,7 @@ A future probe needs an explicit authorization written by the user. No authoriza
 - `capabilities` lists the capabilities the probe may examine; duplicates, non-string items, and unknown names are rejected.
 - `execution_mode` must be `read_only`. There is no fallback to a less restrictive mode.
 - `max_model_calls` is 0 to 3. `network` must be `none` with zero model calls and `provider_endpoint_only` otherwise. Nothing else grants network access, and nothing installs dependencies.
-- `scratch_root` must be an absolute, existing, **empty**, non-symlink directory that does not overlap the repository checkout or any caller-supplied protected root (the vault, the private state root, and real project directories). Overlap is decided by file identity (`samefile`), not by comparing path text, so a path spelled in a different case on a case-insensitive filesystem cannot hide an overlap. Probes never run in the Synapse checkout, in a vault, or in a real project.
+- `scratch_root` must be an absolute, existing, **empty**, non-symlink directory that does not overlap the repository checkout or any caller-supplied protected root (the vault, the private state root, and real project directories). Overlap is decided by file identity (the shared check described in [Path overlap checks](private-execution-plan.md#path-overlap-checks)), not by comparing path text, so a path spelled in a different case on a case-insensitive filesystem cannot hide an overlap. Probes never run in the Synapse checkout, in a vault, or in a real project.
 - `hard_timeout_seconds` is 1 to 300.
 
 On success the result carries `probe_id`, the canonical `scratch_root`, and `path_checks: "point_in_time"`. The checks hold only at the moment of the call. Directories, symlinks, and contents can change afterwards, so a runner must not treat the result as a lasting guarantee. Authorization has no expiry yet (see follow-ups).
@@ -152,7 +152,7 @@ Not implemented here. Each step needs its own explicitly authorized increment:
 - MCO loads `<repo>/.mcorc.json`, `.mcorc.yaml`, `.mco/agents.yaml`, and global `~/.mco` settings. A provider run against an untrusted checkout can be influenced by that configuration.
 - The Codex adapter passes `-C <repo_root>` and does not pass `--ephemeral`, so where a real Codex run stores its own session data is unverified and is exactly what `session_persistence` evidence must establish.
 - Retries exist in the session path and the planning config accepts only zero retries; a probe must not reuse that retry path.
-- `runtime/synapse_plan.py` `_external_path` decides repository overlap by comparing path text. On a case-insensitive filesystem (the macOS default), `context plan` configuration paths spelled in a different case can pass that check while resolving inside the checkout. This predates the validation foundations, is not changed here, and is recorded as a follow-up.
+- Private path overlap in `runtime/synapse_plan.py` (`_external_path` and the vault/state check) is decided by file identity, so case aliases on case-insensitive filesystems are rejected. See [Private execution-plan preview](private-execution-plan.md#path-overlap-checks) for the limits.
 
 ## Known limitations and follow-ups
 

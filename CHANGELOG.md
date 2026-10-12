@@ -7,6 +7,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed
+- Rejected case-aliased and symlink-aliased paths inside the checkout in `mco context plan` private path validation by deciding overlap with file identity instead of path text.
+
 ## [0.12.1] - 2026-10-07
 
 ### Added

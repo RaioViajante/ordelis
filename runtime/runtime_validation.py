@@ -9,7 +9,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from .synapse_plan import PlanError, _external_path, _integer, _keys
+from .synapse_plan import PlanError, _external_path, _integer, _keys, _overlaps
 
 MAX_EVIDENCE_RECORDS = 64
 CAPABILITIES = (
@@ -143,12 +143,6 @@ def evaluate_validation(executable_sha256: str, evidence: object, *, probe_id: s
 
 def _denied(reason: str) -> dict[str, object]:
     return {"probe_authorized": False, "blocking_reasons": [reason], "dispatch_authorized": False}
-
-
-def _overlaps(first: Path, second: Path) -> bool:
-    """Compare by file identity so case-insensitive filesystems cannot hide an overlap."""
-    return (any(path.samefile(second) for path in (first, *first.parents))
-            or any(path.samefile(first) for path in (second, *second.parents)))
 
 
 def check_probe_authorization(raw: object, *, repo_root: Path, protected_roots: tuple[Path, ...],

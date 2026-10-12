@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -186,6 +187,118 @@ class SynapsePlanTests(unittest.TestCase):
         with self.assertRaisesRegex(PlanError, "read-only vault"):
             self.plan()
 
+    def case_variant(self, path: Path, anchor: Path) -> Path:
+        variant = anchor.with_name(anchor.name.upper()) / path.relative_to(anchor)
+        if not variant.exists() or str(variant) == str(path):
+            self.skipTest("filesystem is case-sensitive; case aliases cannot exist")
+        return variant
+
+    def set_paths(self, *, vault: Path | None = None, index: Path | None = None,
+                  state: Path | None = None) -> None:
+        self.raw["vault"]["root"] = str(vault or self.vault)
+        self.raw["vault"]["index"] = str(index or self.index)
+        self.raw["state"]["root"] = str(state or self.state)
+        self.write_config()
+
+    def test_case_variant_repo_paths_are_rejected(self) -> None:
+        inside = self.repo / "inside"
+        inside.mkdir()
+        local_config = self.repo / "config.json"
+        local_config.write_text(json.dumps(self.raw), encoding="utf-8")
+        local_index = inside / "index.json"
+        local_index.write_text("{}", encoding="utf-8")
+        directories = (self.case_variant(self.repo, self.repo), self.case_variant(inside, self.repo),
+                       self.case_variant(self.repo, self.root))
+        with self.assertRaisesRegex(PlanError, "configuration overlaps the repository"):
+            self.plan(config_path=self.case_variant(local_config, self.repo))
+        with self.assertRaisesRegex(PlanError, "vault.index overlaps the repository"):
+            self.set_paths(index=self.case_variant(local_index, self.repo))
+            self.plan()
+        for directory in directories:
+            with self.subTest(directory=str(directory)):
+                with self.assertRaisesRegex(PlanError, "vault.root overlaps the repository"):
+                    self.set_paths(vault=directory)
+                    self.plan()
+                with self.assertRaisesRegex(PlanError, "state.root overlaps the repository"):
+                    self.set_paths(state=directory)
+                    self.plan()
+
+    def test_vault_and_state_overlap_is_rejected_in_both_directions(self) -> None:
+        inner = self.vault / "inner"
+        inner.mkdir()
+        nested_vault = self.state / "vault"
+        nested_vault.mkdir()
+        cases = [(self.vault, inner), (self.vault, self.vault), (nested_vault, self.state)]
+        for vault, state in cases:
+            with self.subTest(vault=str(vault), state=str(state)):
+                with self.assertRaisesRegex(PlanError, "read-only vault"):
+                    self.set_paths(vault=vault, state=state)
+                    self.plan()
+
+    def test_case_variant_vault_and_state_overlap_is_rejected_in_both_directions(self) -> None:
+        inner = self.vault / "inner"
+        inner.mkdir()
+        nested_vault = self.state / "vault"
+        nested_vault.mkdir()
+        cases = [(self.vault, self.case_variant(inner, self.vault)),
+                 (self.vault, self.case_variant(self.vault, self.vault)),
+                 (self.case_variant(nested_vault, self.state), self.state),
+                 (self.vault, self.case_variant(self.private, self.private))]
+        for vault, state in cases:
+            with self.subTest(vault=str(vault), state=str(state)):
+                with self.assertRaisesRegex(PlanError, "read-only vault"):
+                    self.set_paths(vault=vault, state=state)
+                    self.plan()
+
+    def test_symlinked_ancestors_into_repo_or_vault_are_rejected(self) -> None:
+        (self.repo / "inside").mkdir()
+        (self.repo / "config.json").write_text(json.dumps(self.raw), encoding="utf-8")
+        (self.repo / "index.json").write_text("{}", encoding="utf-8")
+        (self.vault / "inner").mkdir()
+        repo_link = self.private / "repo-link"
+        repo_link.symlink_to(self.repo, target_is_directory=True)
+        vault_link = self.private / "vault-link"
+        vault_link.symlink_to(self.vault, target_is_directory=True)
+        with self.assertRaisesRegex(PlanError, "configuration overlaps the repository"):
+            self.plan(config_path=repo_link / "config.json")
+        with self.assertRaisesRegex(PlanError, "vault.root overlaps the repository"):
+            self.set_paths(vault=repo_link / "inside")
+            self.plan()
+        with self.assertRaisesRegex(PlanError, "vault.index overlaps the repository"):
+            self.set_paths(index=repo_link / "index.json")
+            self.plan()
+        with self.assertRaisesRegex(PlanError, "state.root overlaps the repository"):
+            self.set_paths(state=repo_link / "inside")
+            self.plan()
+        with self.assertRaisesRegex(PlanError, "read-only vault"):
+            self.set_paths(state=vault_link / "inner")
+            self.plan()
+        for direct in (repo_link, vault_link):
+            with self.subTest(direct=direct.name), self.assertRaisesRegex(PlanError, "non-symlink"):
+                self.set_paths(state=direct)
+                self.plan()
+
+    def test_identity_decides_overlap_when_path_text_differs(self) -> None:
+        alias = self.private / "alias"
+        alias.mkdir()
+        real = os.path.samestat
+
+        def same(first: os.stat_result, second: os.stat_result) -> bool:
+            controlled = {os.stat(self.repo).st_ino, os.stat(alias).st_ino}
+            return real(first, second) or {first.st_ino, second.st_ino} == controlled
+
+        with patch("os.path.samestat", side_effect=same):
+            with self.assertRaisesRegex(PlanError, "state.root overlaps the repository"):
+                self.set_paths(state=alias)
+                self.plan()
+            self.set_paths()
+            self.assertEqual(self.plan()["workspace"], {"repo_root": str(self.repo.resolve())})
+
+    def test_identity_comparison_errors_fail_closed(self) -> None:
+        with patch("os.path.samestat", side_effect=OSError("stat failed")):
+            with self.assertRaisesRegex(PlanError, "could not be compared"):
+                self.plan()
+
     def test_malformed_oversize_and_duplicate_config_rejected(self) -> None:
         for raw in (b"\xff", b"{", b" " * 65537,
                     b'{"schema_version":1,"schema_version":1}'):
@@ -226,6 +339,18 @@ class SynapsePlanTests(unittest.TestCase):
         self.assertEqual(plan["workspace"], {"repo_root": str(self.repo.resolve())})
         self.assertEqual(plan["validation"]["status"], "blocked")
         self.assertFalse(json.loads(old.getvalue())["execution"]["policy"]["dispatch"])
+
+    def test_cli_rejects_case_variant_config_inside_the_checkout(self) -> None:
+        local = self.repo / "config.json"
+        local.write_text(json.dumps(self.raw), encoding="utf-8")
+        variant = self.case_variant(local, self.repo)
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = main(["context", "plan", "--config", str(variant), "--repo", str(self.repo),
+                         "--project", "demo", "--task", "Summarize work.", "--agent", "pi",
+                         "--model", "synthetic-model", "--json"])
+        self.assertEqual(code, 2)
+        self.assertIn("overlaps the repository", output.getvalue())
 
 
 if __name__ == "__main__":
