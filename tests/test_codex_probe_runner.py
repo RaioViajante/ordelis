@@ -821,7 +821,7 @@ class IntegrationBoundaryTests(unittest.TestCase):
     def test_no_other_runtime_module_references_the_probe_runner(self) -> None:
         runtime = Path(__file__).resolve().parent.parent / "runtime"
         for path in runtime.rglob("*.py"):
-            if path.name != "codex_probe_runner.py":
+            if path.name not in ("codex_probe_runner.py", "probe_confirmation.py"):
                 with self.subTest(path=path.name):
                     self.assertNotIn("codex_probe_runner", path.read_text(encoding="utf-8"))
 

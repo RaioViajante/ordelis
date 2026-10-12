@@ -371,24 +371,16 @@ def _evidence(authorization: ProbeAuthorization, identity_ok: bool, observations
     return parse_evidence(records)
 
 
-def run_codex_probe(authorization: ProbeAuthorization, *, repo_root: Path,
-                    cancel: threading.Event | None = None) -> dict[str, object]:
-    """Run the three allowlisted non-model commands once and return bounded, unauthenticated evidence.
-
-    Raises ProbeError (or PlanError) on any refusal. A valid authorization is consumed before any
-    filesystem or process work, so a refused or failed run cannot be retried with the same probe id.
-    """
-    if os.name != "posix":
-        raise ProbeError("unsupported_platform")
-    if not isinstance(authorization, ProbeAuthorization):
-        raise ProbeError("authorization_missing")
+def _check_window(authorization: ProbeAuthorization) -> None:
     now = time.time()
     if authorization.issued_at > now:
         raise ProbeError("authorization_not_yet_valid")
     if authorization.expires_at <= now:
         raise ProbeError("authorization_expired")
-    _consume(authorization)
 
+
+def _preflight(authorization: ProbeAuthorization, repo_root: Path):
+    """Validate paths and bind the executable without creating anything. Raises on any refusal."""
     if not repo_root.is_dir():
         raise ProbeError("repository must be an existing directory")
     repo = repo_root.resolve(strict=True)
@@ -407,6 +399,29 @@ def run_codex_probe(authorization: ProbeAuthorization, *, repo_root: Path,
         parent_before = set(os.listdir(parent))
     except OSError as exc:
         raise ProbeError("scratch_parent could not be inspected") from exc
+    return repo, protected, parent, binary, identity, state, parent_before
+
+
+def run_codex_probe(authorization: ProbeAuthorization, *, repo_root: Path,
+                    cancel: threading.Event | None = None) -> dict[str, object]:
+    """Run the three allowlisted non-model commands once and return bounded, unauthenticated evidence.
+
+    Raises ProbeError (or PlanError) on any refusal. A valid authorization is consumed before any
+    filesystem or process work, so a refused or failed run cannot be retried with the same probe id.
+    """
+    return _run_probe(authorization, repo_root, cancel, "caller_asserted_unverified")
+
+
+def _run_probe(authorization: ProbeAuthorization, repo_root: Path, cancel: threading.Event | None,
+               origin: str) -> dict[str, object]:
+    if os.name != "posix":
+        raise ProbeError("unsupported_platform")
+    if not isinstance(authorization, ProbeAuthorization):
+        raise ProbeError("authorization_missing")
+    _check_window(authorization)
+    _consume(authorization)
+
+    repo, protected, parent, binary, identity, state, parent_before = _preflight(authorization, repo_root)
 
     scratch, scratch_id = _create_scratch(authorization, repo, protected, parent)
     commands: list[dict[str, object]] = []
@@ -479,7 +494,7 @@ def run_codex_probe(authorization: ProbeAuthorization, *, repo_root: Path,
         isolation["scratch_leftover"] = str(scratch)
     return {
         "schema_version": 1, "provider": "codex", "probe_id": authorization.probe_id,
-        "authorization": {"origin": "caller_asserted_unverified", "single_use_scope": "process",
+        "authorization": {"origin": origin, "single_use_scope": "process",
                           "expires_at": authorization.expires_at},
         "executable": {"path": identity["path"], "sha256": identity["sha256"],
                        "size_bytes": identity["size_bytes"], "identity_scope": identity["identity_scope"],
