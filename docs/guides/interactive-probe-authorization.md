@@ -15,13 +15,13 @@ confirmed = confirm_probe(proposal, repo_root=checkout)  # prompts on /dev/tty, 
 result = run_confirmed_probe(confirmed, cancel=event)    # runs the three allowlisted commands, once
 ```
 
-Both functions raise `ProbeError` with a closed reason code on any refusal. Neither accepts a boolean, callback, file, stream or environment value that could carry consent (a test pins the signatures). `repo_root` is bound at confirmation, so `run_confirmed_probe` takes no checkout argument.
+Both functions raise `ProbeError` on any refusal. Codes produced by the confirmation layer are the closed set below; path and executable validation reuses the runner's checks, which can raise `ProbeError` or `PlanError` with a descriptive message instead of a code. Neither accepts a boolean, callback, file, stream or environment value that could carry consent (a test pins the signatures). `repo_root` is bound at confirmation, so `run_confirmed_probe` takes no checkout argument.
 
 ## Flow
 
 1. `confirm_probe` refuses non-POSIX platforms, a non-`ProbeAuthorization` value, and an authorization that is expired or not yet valid.
-2. It runs the runner's own path and executable validation (resolved path, no symlinks, no overlap with the checkout, protected roots or scratch parent, SHA-256 matches the real file). Nothing is created or consumed.
-3. It opens `/dev/tty` and refuses unless that is a terminal whose foreground process group is this process's group. Standard input and output are never read or written.
+2. It runs the runner's own path and executable validation (resolved path, no symlinks, no overlap with the checkout, protected roots or scratch parent, SHA-256 matches the real file) and refuses a `probe_id` that was already used, so nobody is asked to approve a run that cannot start. Nothing is created or consumed.
+3. It takes a process-wide prompt lock (one prompt at a time, so concurrent callers cannot interleave on one terminal), opens `/dev/tty`, and refuses unless that is a terminal in line mode (`ICANON`) whose foreground process group is this process's group. Standard input and output are never read or written. Terminal attributes are never changed, so there is nothing to restore.
 4. It discards pending type-ahead, writes the prompt, and reads one line.
 5. It accepts only the exact phrase `authorize <first 12 hex digits of the specification digest>`. Anything else, including `yes`, `y`, a blank line, a different case, extra spaces, a partial line, a non-UTF-8 or overlong line, EOF, Ctrl-C or an I/O error, denies. `n`/`no` report `declined`.
 6. After the answer it re-checks the expiry window and re-runs step 2. If the executable, a protected root or any displayed value changed while the prompt was open, it denies.
@@ -42,7 +42,7 @@ The digest is a SHA-256 over the whole `ProbeAuthorization`, the allowlisted com
 
 ## Reason codes
 
-`unsupported_platform`, `authorization_missing`, `authorization_not_yet_valid`, `authorization_expired`, `no_controlling_terminal`, `terminal_not_foreground`, `terminal_io_failed`, `eof`, `interrupted`, `declined`, `not_confirmed`, `specification_changed_during_confirmation`, `specification_changed_after_confirmation`, `confirmation_missing`, `confirmation_invalid_or_reused`, `confirmation_registry_full`, plus the runner's own reasons (`executable_hash_mismatch`, `authorization_reused`, and so on).
+`unsupported_platform`, `authorization_missing`, `authorization_not_yet_valid`, `authorization_expired`, `no_controlling_terminal`, `terminal_not_foreground`, `terminal_not_line_mode`, `terminal_io_failed`, `eof`, `interrupted`, `declined`, `not_confirmed`, `specification_changed_during_confirmation`, `specification_changed_after_confirmation`, `confirmation_missing`, `confirmation_invalid_or_reused`, `confirmation_registry_full`, `authorization_reused`, plus the runner's own refusals (`executable_hash_mismatch` and so on).
 
 ## Threat model and trust boundaries
 
@@ -60,12 +60,13 @@ The digest is a SHA-256 over the whole `ProbeAuthorization`, the allowlisted com
 - No approval without a typed phrase read from the controlling terminal that matches the displayed specification.
 - Default deny on every failure path listed above, before any process creation.
 - Approval is not persisted, exported to the environment, or reusable: one confirmation, one run, and `probe_id` stays single use per process.
-- What was displayed is what runs: any later change to a displayed value is refused.
+- Any change to a displayed value between approval and the start of the run is refused. This is a point-in-time check: the executable is still started by pathname and can be swapped after the last check (see the runner guide).
 
 ### Non-guarantees
 
 - **Not resistant to a malicious process running as the same user.** Such a process can write to the terminal (for example with `TIOCSTI` where the OS still allows it), read its own prompt, replace this module, call `run_codex_probe` directly (which stays available and reports `caller_asserted_unverified`), or forge registry entries.
-- The terminal can be shared or recorded (remote shells, terminal multiplexers); Synapse cannot tell whether a human or a program typed the phrase.
+- Synapse cannot tell whether a human or a program typed the phrase. A controlling terminal is not proof of a person: agent harnesses and automation commonly run commands inside a pseudo-terminal that the controlling program reads and writes itself, and terminals can be shared or recorded (remote shells, multiplexers). Run the future CLI from a terminal you operate yourself.
+- A very long path or probe id can push the start of the prompt off screen; the phrase at the bottom is bound to all of it, but the guarantee list may not be visible.
 - The approval proves a person was prompted in this process, not who they were.
 - Evidence stays unauthenticated (`evidence_authenticated: false`); dispatch stays unauthorized.
 - Filesystem, network, native-binary identity and race-freedom remain as limited as in the [runner guide](codex-zero-model-probes.md).
