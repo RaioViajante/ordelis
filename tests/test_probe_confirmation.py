@@ -16,10 +16,16 @@ from pathlib import Path
 from unittest.mock import patch
 
 from runtime import probe_confirmation as confirmation
-from runtime.codex_probe_runner import ALLOWED_COMMANDS, ProbeAuthorization, ProbeError, run_codex_probe
-from runtime.probe_confirmation import ConfirmedProbe, confirm_probe, run_confirmed_probe
+from runtime import codex_probe_runner as runner
+from runtime.codex_probe_runner import ALLOWED_COMMANDS, ProbeAuthorization, ProbeError
+from runtime.probe_confirmation import (
+    _ConfirmedProbe as ConfirmedProbe,
+    _confirm_probe as confirm_probe,
+    _run_confirmed_probe as run_confirmed_probe,
+    run_controlled_probe,
+)
 from runtime.synapse_plan import PlanError
-from tests.test_codex_probe_runner import RunnerCase
+from tests.test_codex_probe_runner import RunnerCase, run_codex_probe
 
 ROOT = Path(__file__).resolve().parent.parent
 PROMPT_END = b"\n> "
@@ -44,7 +50,7 @@ if mode == "tty_stdin_consent":
     os.write(write_end, (pc._phrase(pc._digest(auth, checkout, protected)) + "\n").encode())
     os.dup2(read_end, 0)
 try:
-    pc.confirm_probe(auth, repo_root=Path(repo))
+    pc._confirm_probe(auth, repo_root=Path(repo))
     result = "approved"
 except ProbeError as exc:
     result = str(exc)
@@ -132,9 +138,9 @@ class ApprovalTests(ConfirmationCase):
         self.assertIs(result["evidence_authenticated"], False)
         self.assertIs(result["dispatch_authorized"], False)
 
-    def test_direct_runner_calls_keep_the_unverified_origin(self) -> None:
+    def test_private_runner_result_keeps_the_confirmed_origin(self) -> None:
         result = run_codex_probe(self.authorization(), repo_root=self.repo)
-        self.assertEqual(result["authorization"]["origin"], "caller_asserted_unverified")
+        self.assertEqual(result["authorization"]["origin"], "terminal_confirmed_process_local")
 
     def test_typeahead_before_the_prompt_is_discarded(self) -> None:
         master, slave = pty.openpty()
@@ -333,6 +339,32 @@ class ProvenanceTests(ConfirmationCase):
             with self.subTest(forged=type(forged).__name__):
                 with self.assertRaises(ProbeError):
                     run_confirmed_probe(forged)
+        self.assertNoExecution()
+
+    def test_stateful_confirmation_subclass_is_rejected_before_attribute_access(self) -> None:
+        class StatefulConfirmation(ConfirmedProbe):
+            armed = False
+            reads = 0
+
+            def __getattribute__(self, name: str):
+                if type(self).armed and name == "nonce":
+                    type(self).reads += 1
+                return super().__getattribute__(name)
+
+        confirmed = self.approve()
+        stateful = StatefulConfirmation(confirmed.authorization, confirmed.nonce)
+        StatefulConfirmation.armed = True
+        with self.assertRaisesRegex(ProbeError, "confirmation_missing"):
+            run_confirmed_probe(stateful)
+        self.assertEqual(StatefulConfirmation.reads, 0)
+        self.assertNoExecution()
+
+    def test_wrong_registered_confirmation_digest_is_refused(self) -> None:
+        confirmed = self.approve()
+        digest, checkout, expiry = confirmation._ISSUED[confirmed.nonce]
+        confirmation._ISSUED[confirmed.nonce] = ("0" * len(digest), checkout, expiry)
+        with self.assertRaisesRegex(ProbeError, "specification_changed_after_confirmation"):
+            run_confirmed_probe(confirmed)
         self.assertNoExecution()
 
     def test_authorization_swapped_into_a_real_confirmation_is_refused(self) -> None:
@@ -604,9 +636,97 @@ class DisclosureTests(ConfirmationCase):
         self.assertTrue(spoofed[0].startswith("Scratch"))  # only inside the quoted path, never a line of its own
         self.assertEqual(len(re.findall(r"^To authorize", text, re.M)), 1)
 
+    def test_oversized_display_value_is_rejected_instead_of_truncated_or_prompted(self) -> None:
+        long_parent = self.root
+        for index in range(12):
+            long_parent /= f"display-segment-{index:02d}-" + "x" * 28
+        long_parent.mkdir(parents=True)
+        auth = self.authorization(scratch_parent=str(long_parent))
+        with self.assertRaises(ProbeError) as caught:
+            confirm_probe(auth, repo_root=self.repo)
+        self.assertEqual(str(caught.exception), "display_value_too_long")
+        self.assertEqual(self.opened, 0)
+        self.assertNoExecution()
+
+
+class ControlledEntryPointTests(ConfirmationCase):
+    def test_supported_entry_point_confirms_and_runs_the_synthetic_probe(self) -> None:
+        def approve(text: str) -> str:
+            self.prompts.append(text)
+            return phrase_in(text).decode().strip()
+
+        with patch.object(confirmation, "_ask", approve):
+            result = confirmation.run_controlled_probe(self.authorization(), repo_root=self.repo)
+        self.assertEqual(self.argv_log(), [list(args) for args in ALLOWED_COMMANDS])
+        self.assertEqual(result["authorization"]["origin"], "terminal_confirmed_process_local")
+        self.assertIs(result["evidence_authenticated"], False)
+        self.assertIs(result["dispatch_authorized"], False)
+
+    def test_supported_entry_point_denies_without_exact_confirmation(self) -> None:
+        with patch.object(confirmation, "_ask", return_value="no"):
+            with self.assertRaisesRegex(ProbeError, "declined"):
+                confirmation.run_controlled_probe(self.authorization(), repo_root=self.repo)
+        self.assertNoExecution()
+
+    def test_supported_entry_point_defaults_to_deny_without_authorization(self) -> None:
+        with self.assertRaisesRegex(ProbeError, "authorization_missing"):
+            run_controlled_probe(None, repo_root=self.repo)  # type: ignore[arg-type]
+        self.assertNoExecution()
+
+    def test_stateful_authorization_subclass_is_rejected_before_attribute_access(self) -> None:
+        class StatefulAuthorization(ProbeAuthorization):
+            armed = False
+            reads = 0
+
+            def __getattribute__(self, name: str):
+                if type(self).armed and name == "expires_at":
+                    type(self).reads += 1
+                return super().__getattribute__(name)
+
+        auth = StatefulAuthorization(**asdict(self.authorization()))
+        StatefulAuthorization.armed = True
+        with self.assertRaisesRegex(ProbeError, "authorization_missing"):
+            confirmation.run_controlled_probe(auth, repo_root=self.repo)
+        self.assertEqual(StatefulAuthorization.reads, 0)
+        self.assertNoExecution()
+
+    def test_concurrent_reuse_of_one_confirmation_runs_at_most_once(self) -> None:
+        confirmed = self.approve()
+        barrier = threading.Barrier(3)
+        results: list[object] = []
+
+        def attempt() -> None:
+            barrier.wait()
+            try:
+                results.append(run_confirmed_probe(confirmed))
+            except BaseException as exc:  # noqa: BLE001 - asserted below
+                results.append(exc)
+
+        threads = [threading.Thread(target=attempt) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        barrier.wait()
+        for thread in threads:
+            thread.join(30)
+        self.assertEqual(len(self.argv_log()), 3)
+        self.assertEqual(sum(isinstance(item, dict) for item in results), 1)
+        self.assertEqual(sum(isinstance(item, ProbeError) for item in results), 1)
+
 
 class NoBypassTests(ConfirmationCase):
+    def test_raw_runner_is_not_a_supported_public_api(self) -> None:
+        self.assertFalse(hasattr(runner, "run_codex_probe"))
+        self.assertEqual(runner.__all__, ["ProbeAuthorization", "ProbeError"])
+        self.assertEqual(confirmation.__all__, ["run_controlled_probe"])
+
+    def test_public_cli_does_not_expose_the_controlled_probe(self) -> None:
+        source = (ROOT / "runtime" / "cli.py").read_text(encoding="utf-8")
+        self.assertNotIn("run_controlled_probe", source)
+        self.assertNotIn("probe_confirmation", source)
+
     def test_public_api_has_no_parameter_that_can_carry_consent(self) -> None:
+        self.assertEqual(list(inspect.signature(run_controlled_probe).parameters),
+                         ["authorization", "repo_root", "cancel"])
         self.assertEqual(list(inspect.signature(confirm_probe).parameters), ["authorization", "repo_root"])
         self.assertEqual(list(inspect.signature(run_confirmed_probe).parameters), ["confirmed", "cancel"])
 

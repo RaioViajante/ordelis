@@ -14,7 +14,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from runtime import codex_probe_runner as runner
-from runtime.codex_probe_runner import ALLOWED_COMMANDS, ProbeAuthorization, ProbeError, run_codex_probe
+from runtime.codex_probe_runner import ALLOWED_COMMANDS, ProbeAuthorization, ProbeError
 from runtime.runtime_validation import evaluate_validation, parse_evidence
 from runtime.synapse_plan import PlanError
 
@@ -25,6 +25,12 @@ LEAKY_ENV = {
     "https_proxy": "http://proxy.invalid", "ALL_PROXY": "http://proxy.invalid", "NO_PROXY": "x",
     "SYNAPSE_UNLISTED": "1", "CODEX_HOME": "/should/not/leak", "HOME": "/should/not/leak",
 }
+
+
+def run_codex_probe(authorization: ProbeAuthorization, *, repo_root: Path,
+                    cancel: threading.Event | None = None) -> dict[str, object]:
+    """Exercise the private runner with its module capability; supported callers use confirmation."""
+    return runner._run_probe(authorization, repo_root, cancel, runner._CONFIRMED_EXECUTION)
 
 FAKE_TEMPLATE = r'''#!{python}
 import json, os, subprocess, sys, time
@@ -185,6 +191,13 @@ class AllowlistTests(RunnerCase):
         with self.assertRaises(TypeError):
             run_codex_probe(self.authorization(), repo_root=self.repo, args=("exec", "hi"))  # type: ignore[call-arg]
         self.assertEqual(self.argv_log(), [])
+
+    def test_internal_runner_rejects_a_call_without_confirmation_capability(self) -> None:
+        self.write_fake()
+        with self.assertRaisesRegex(ProbeError, "confirmation_missing"):
+            runner._run_probe(self.authorization(), self.repo, None, object())
+        self.assertEqual(self.argv_log(), [])
+        self.assertEqual(list(self.parent.iterdir()), [])
 
 
 class AuthorizationTests(RunnerCase):
@@ -611,6 +624,13 @@ class ProcessTests(RunnerCase):
 
 
 class ExecutableIdentityTests(RunnerCase):
+    def test_identity_is_rehashed_before_every_command_and_after_the_run(self) -> None:
+        self.write_fake()
+        with patch.object(runner, "_bind_executable", wraps=runner._bind_executable) as bind:
+            result = run_codex_probe(self.authorization(), repo_root=self.repo)
+        self.assertEqual([item["status"] for item in result["commands"]], ["ok", "ok", "ok"])
+        self.assertEqual(bind.call_count, 5)  # preflight, each of three commands, final check
+
     def test_replacement_during_a_probe_is_detected(self) -> None:
         result = self.run_probe("replace_self")
         self.assertEqual(result["executable"]["identity_check"], "changed_during_probe")
@@ -757,7 +777,7 @@ class EvidenceTests(RunnerCase):
         result = self.run_probe()
         self.assertIs(result["evidence_authenticated"], False)
         self.assertIs(result["dispatch_authorized"], False)
-        self.assertEqual(result["authorization"]["origin"], "caller_asserted_unverified")
+        self.assertEqual(result["authorization"]["origin"], "terminal_confirmed_process_local")
         self.assertEqual(result["authorization"]["single_use_scope"], "process")
         self.assertEqual(result["isolation"]["kind"], "temporary_directory_not_os_sandbox")
         verification = result["verification"]
