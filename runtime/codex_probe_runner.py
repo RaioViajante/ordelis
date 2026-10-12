@@ -42,9 +42,10 @@ _VERIFICATION = {
     "filesystem_enforcement": "not_verified", "network_restriction": "unknown",
     "session_persistence": "not_verified", "cancellation": "not_verified",
 }
-# Process-local single-use registry: probe_id -> authorization expiry. Entries are pruned once expired,
-# which is safe because an expired authorization is refused before it reaches the registry.
-_CONSUMED: dict[str, float] = {}
+# Process-local single-use registry. Ids are never pruned, so a probe_id cannot be reused after its first
+# authorization expires; the registry is bounded and fails closed when full.
+MAX_CONSUMED_IDS = 4096
+_CONSUMED: set[str] = set()
 _CONSUMED_LOCK = threading.Lock()
 
 
@@ -107,13 +108,13 @@ class ProbeAuthorization:
             raise PlanError("authorization lifetime must be between 0 and 900 seconds")
 
 
-def _consume(authorization: ProbeAuthorization, now: float) -> None:
+def _consume(authorization: ProbeAuthorization) -> None:
     with _CONSUMED_LOCK:
-        for probe_id in [key for key, expires in _CONSUMED.items() if expires <= now]:
-            del _CONSUMED[probe_id]
         if authorization.probe_id in _CONSUMED:
             raise ProbeError("authorization_reused")
-        _CONSUMED[authorization.probe_id] = authorization.expires_at
+        if len(_CONSUMED) >= MAX_CONSUMED_IDS:
+            raise ProbeError("authorization_registry_full")
+        _CONSUMED.add(authorization.probe_id)
 
 
 def _file_state(path: Path) -> tuple[int, ...]:
@@ -147,17 +148,36 @@ def _bind_executable(authorization: ProbeAuthorization, forbidden: tuple[Path, .
     return binary, identity, after
 
 
-def _build_env(scratch: Path) -> dict[str, str]:
+def _safe_path(forbidden: tuple[Path, ...]) -> str:
+    """Keep only absolute, existing PATH entries outside the checkout, protected roots and scratch parent.
+
+    An empty or relative entry would make launcher lookups use the working directory.
+    """
+    kept = []
+    for entry in os.environ.get("PATH", "").split(os.pathsep):
+        if not entry or not os.path.isabs(entry):
+            continue
+        try:
+            if any(_overlaps(Path(entry), root) for root in forbidden):
+                continue
+        except OSError:
+            continue
+        kept.append(entry)
+    return os.pathsep.join(kept) or "/usr/bin:/bin"
+
+
+def _build_env(scratch: Path, forbidden: tuple[Path, ...]) -> dict[str, str]:
     isolated = {"HOME": scratch / "home", "CODEX_HOME": scratch / "codex-home", "TMPDIR": scratch / "tmp",
                 "TMP": scratch / "tmp", "TEMP": scratch / "tmp"}
-    return {"PATH": os.environ.get("PATH", ""), **{key: str(value) for key, value in isolated.items()}}
+    return {"PATH": _safe_path(forbidden), **{key: str(value) for key, value in isolated.items()}}
 
 
 def _check_env(env: dict[str, str], scratch: Path) -> None:
     """Fail closed unless the environment is exactly the allowlist with isolated paths under scratch."""
     prefix = str(scratch) + os.sep
     if set(env) != _ENV_KEYS or any(
-            not os.path.realpath(env[key]).startswith(prefix) for key in _ENV_KEYS - {"PATH"}):
+            not os.path.realpath(env[key]).startswith(prefix) for key in _ENV_KEYS - {"PATH"}) or not all(
+            os.path.isabs(entry) for entry in env["PATH"].split(os.pathsep)):
         raise ProbeError("environment_not_isolated")
 
 
@@ -236,6 +256,10 @@ def _run_command(binary: Path, args: tuple[str, ...], env: dict[str, str], cwd: 
         if status or survivors:
             _stop(process)
             cleanup = "verified" if _wait_group_gone(pgid) else "failed"
+            reader.join(PIPE_DRAIN_SECONDS)
+            if reader.is_alive():
+                # Something outside the killed group still holds the pipe: it was not cleaned up.
+                cleanup = "failed"
     finally:
         if process.poll() is None:
             _stop(process)
@@ -363,7 +387,7 @@ def run_codex_probe(authorization: ProbeAuthorization, *, repo_root: Path,
         raise ProbeError("authorization_not_yet_valid")
     if authorization.expires_at <= now:
         raise ProbeError("authorization_expired")
-    _consume(authorization, now)
+    _consume(authorization)
 
     if not repo_root.is_dir():
         raise ProbeError("repository must be an existing directory")
@@ -393,7 +417,7 @@ def run_codex_probe(authorization: ProbeAuthorization, *, repo_root: Path,
     group_survivors = False
     group_cleanup = "not_needed"
     try:
-        env = _build_env(scratch)
+        env = _build_env(scratch, (repo, *protected, parent))
         _check_env(env, scratch)
         total_deadline = time.monotonic() + authorization.total_timeout_seconds
         for args in ALLOWED_COMMANDS:
@@ -461,7 +485,8 @@ def run_codex_probe(authorization: ProbeAuthorization, *, repo_root: Path,
                        "size_bytes": identity["size_bytes"], "identity_scope": identity["identity_scope"],
                        "identity_check": "unchanged" if identity_ok else "changed_during_probe",
                        "native_binary_identity": "not_established", "race_free_enforcement": False},
-        "limits": {"max_model_calls": 0, "execution_mode": "read_only",
+        "limits": {"max_model_calls": 0, "declared_execution_mode": "read_only",
+                   "execution_mode_enforced": False,
                    "command_timeout_seconds": authorization.command_timeout_seconds,
                    "total_timeout_seconds": authorization.total_timeout_seconds,
                    "max_output_bytes": authorization.max_output_bytes},

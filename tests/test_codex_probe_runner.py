@@ -55,9 +55,11 @@ if BEHAVIOR == "bad_utf8":
     sys.exit(0)
 if BEHAVIOR == "nonzero":
     sys.exit(3)
-if BEHAVIOR in ("child_pipe", "child_quiet", "escape", "hang_with_child"):
-    kwargs = dict(stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) if BEHAVIOR != "child_pipe" else {{}}
-    if BEHAVIOR == "escape":
+if BEHAVIOR == "symlink_out":
+    os.symlink(os.path.join(SIDE, "victim"), os.path.join(os.environ["HOME"], "link"))
+if BEHAVIOR in ("child_pipe", "child_quiet", "escape", "escape_pipe", "hang_with_child"):
+    kwargs = dict(stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) if BEHAVIOR not in ("child_pipe", "escape_pipe") else {{}}
+    if BEHAVIOR in ("escape", "escape_pipe"):
         kwargs["start_new_session"] = True
     child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], stdin=subprocess.DEVNULL, **kwargs)
     with open(os.path.join(SIDE, "child.pid"), "a") as out:
@@ -233,6 +235,16 @@ class AuthorizationTests(RunnerCase):
                     self.assertRaisesRegex(ProbeError, "authorization_reused"):
                 run_codex_probe(attempt, repo_root=self.repo)
         self.assertEqual(len(self.argv_log()), 1)
+
+    def test_probe_id_stays_consumed_after_the_first_authorization_expires(self) -> None:
+        self.write_fake()
+        first = self.authorization(probe_id="replay-1")
+        run_codex_probe(first, repo_root=self.repo)
+        later = time.time() + 2000
+        second = self.authorization(probe_id="replay-1", issued_at=later - 1, expires_at=later + 300)
+        with patch.object(runner.time, "time", return_value=later):
+            with self.assertRaisesRegex(ProbeError, "authorization_reused"):
+                run_codex_probe(second, repo_root=self.repo)
 
     def test_refused_run_after_validation_still_consumes_the_authorization(self) -> None:
         self.write_fake()
@@ -419,13 +431,49 @@ class EnvironmentTests(RunnerCase):
         self.write_fake()
         real_build = runner._build_env
         for extra in ({"OPENAI_API_KEY": "sk"}, {"HTTPS_PROXY": "http://p"}, {"PATH": "x", "HOME": "/elsewhere"}):
-            def leaky(scratch: Path, extra=extra) -> dict[str, str]:
-                return {**real_build(scratch), **extra}
+            def leaky(scratch: Path, forbidden=(), extra=extra) -> dict[str, str]:
+                return {**real_build(scratch, forbidden), **extra}
             with self.subTest(extra=list(extra)), patch.object(runner, "_build_env", leaky):
                 with self.assertRaisesRegex(ProbeError, "environment_not_isolated"):
                     run_codex_probe(self.authorization(), repo_root=self.repo)
         self.assertEqual(self.argv_log(), [])
         self.assertEqual(list(self.parent.iterdir()), [])
+
+
+class PathTests(RunnerCase):
+    def child_path(self, value: str | None) -> list[str]:
+        env = {key: item for key, item in os.environ.items() if key != "PATH"}
+        if value is not None:
+            env["PATH"] = value
+        with patch.dict(os.environ, env, clear=True):
+            self.run_probe()
+        return json.loads((self.side / "env.json").read_text())["env"]["PATH"].split(os.pathsep)
+
+    def test_unsafe_path_entries_are_removed(self) -> None:
+        dirs = {name: base / "tools" for name, base in (("repo", self.repo), ("vault", self.vault),
+                                                         ("parent", self.parent))}
+        for directory in dirs.values():
+            directory.mkdir()
+        (self.root / "relative").mkdir()
+        elsewhere = self.root / "elsewhere"
+        elsewhere.mkdir()
+        raw = os.pathsep.join(["", ".", "relative", "missing/dir", str(dirs["repo"]), str(dirs["vault"]),
+                               str(dirs["parent"]), str(self.repo), str(elsewhere), "/usr/bin"])
+        self.assertEqual(self.child_path(raw), [str(elsewhere), "/usr/bin"])
+
+    def test_empty_or_missing_path_never_falls_back_to_the_working_directory(self) -> None:
+        for value in ("", None, ":", "."):
+            with self.subTest(value=value):
+                entries = self.child_path(value)
+                self.assertEqual(entries, ["/usr/bin", "/bin"])
+                self.assertTrue(all(os.path.isabs(entry) for entry in entries))
+
+    def test_relative_path_entry_fails_the_environment_check(self) -> None:
+        scratch = self.parent / "s"
+        env = runner._build_env(scratch, ())
+        env["PATH"] = "bin" + os.pathsep + env["PATH"]
+        with self.assertRaisesRegex(ProbeError, "environment_not_isolated"):
+            runner._check_env(env, scratch)
 
 
 class OutputTests(RunnerCase):
@@ -513,6 +561,14 @@ class ProcessTests(RunnerCase):
         except ProcessLookupError:
             return False
         return True
+
+    def test_escaped_descendant_holding_the_pipe_is_not_reported_as_cleaned_up(self) -> None:
+        result = self.run_probe("escape_pipe")
+        self.addCleanup(self.reap_stray_processes)
+        self.assertTrue(result["process"]["group_survivors_detected"])
+        self.assertEqual(result["process"]["group_cleanup"], "failed")
+        self.assertIn(("process_termination", "runtime_probe", "fail", "descendant_survived"),
+                      self.record_kinds(result))
 
     def test_group_cleanup_failure_is_reported(self) -> None:
         with patch.object(runner, "_group_alive", return_value=True), \
@@ -626,6 +682,31 @@ class FilesystemObservationTests(RunnerCase):
         self.assertEqual(result["isolation"]["cleanup"], "complete")
         self.assertNotIn("scratch_leftover", result["isolation"])
 
+    def test_symlink_created_in_scratch_is_not_followed_or_deleted_through(self) -> None:
+        victim = self.side / "victim"
+        victim.mkdir()
+        (victim / "precious.txt").write_text("keep")
+        result = self.run_probe("symlink_out")
+        self.assertEqual((victim / "precious.txt").read_text(), "keep")
+        self.assertGreaterEqual(result["isolation"]["scratch_unexpected_entries"], 1)
+        self.assertEqual(result["isolation"]["cleanup"], "complete")
+        self.assertEqual(list(self.parent.iterdir()), [])
+
+    def test_parent_swapped_for_a_symlink_into_a_protected_root_is_caught_after_creation(self) -> None:
+        self.write_fake()
+        real = tempfile.mkdtemp
+        moved = self.root / "moved-parent"
+
+        def swap_then_make(*args, **kwargs):
+            self.parent.rename(moved)
+            self.parent.symlink_to(self.vault)
+            return real(*args, **kwargs)
+        with patch.object(runner.tempfile, "mkdtemp", swap_then_make):
+            with self.assertRaises(PlanError):
+                run_codex_probe(self.authorization(), repo_root=self.repo)
+        self.assertEqual(list(self.vault.iterdir()), [])
+        self.assertEqual(self.argv_log(), [])
+
     def test_replaced_scratch_directory_is_not_deleted(self) -> None:
         victim = self.root / "victim"
         victim.mkdir()
@@ -730,7 +811,9 @@ class EvidenceTests(RunnerCase):
         self.assertEqual(sorted(path.name for path in self.side.iterdir()),
                          ["argv.log", "env.json", "pid"])
         self.assertEqual(result["limits"]["max_model_calls"], 0)
-        self.assertEqual(result["limits"]["execution_mode"], "read_only")
+        self.assertNotIn("execution_mode", result["limits"])
+        self.assertEqual(result["limits"]["declared_execution_mode"], "read_only")
+        self.assertIs(result["limits"]["execution_mode_enforced"], False)
         self.assertEqual({tuple(item["argv"]) for item in result["commands"]}, set(ALLOWED_COMMANDS))
 
 
