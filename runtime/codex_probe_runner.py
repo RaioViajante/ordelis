@@ -1,6 +1,7 @@
-"""Private bounded runner for confirmed zero-model-call Codex CLI probes.
+"""Private bounded runner for confirmed, durably consumed zero-model-call Codex CLI probes.
 
-Library only: no CLI command, no persistence, no dispatch. It runs exactly `--version`, `--help` and
+Library only: no CLI command and no dispatch. It persists only authorization-consumption metadata, then
+runs exactly `--version`, `--help` and
 `exec --help` against one explicitly authorized executable, inside a scratch directory it creates and owns.
 The scratch directory is a hygiene boundary, not an OS sandbox.
 
@@ -24,6 +25,8 @@ from pathlib import Path
 
 from .codex_capabilities import CapabilityInspectionError, MAX_HELP_BYTES, _binary_identity, _stop
 from .platform import prepare_spawn
+from .probe_authorization_ledger import (
+    LedgerError, authorization_specification_digest, consume_authorization, validate_state_root)
 from .runtime_validation import _sha256, _token, check_probe_authorization, parse_evidence
 from .synapse_plan import PlanError, _external_path, _integer, _overlaps
 
@@ -44,11 +47,6 @@ _VERIFICATION = {
     "filesystem_enforcement": "not_verified", "network_restriction": "unknown",
     "session_persistence": "not_verified", "cancellation": "not_verified",
 }
-# Process-local single-use registry. Ids are never pruned, so a probe_id cannot be reused after its first
-# authorization expires; the registry is bounded and fails closed when full.
-MAX_CONSUMED_IDS = 4096
-_CONSUMED: set[str] = set()
-_CONSUMED_LOCK = threading.Lock()
 # Imported only by the confirmation module and runner tests. Python module visibility is not a security
 # boundary: same-user code can import or replace this object and can execute the target without Synapse.
 _CONFIRMED_EXECUTION = object()
@@ -82,6 +80,7 @@ class ProbeAuthorization:
     executable_path: str
     executable_sha256: str
     scratch_parent: str
+    state_root: str
     protected_roots: tuple[str, ...]
     execution_mode: str
     max_model_calls: int
@@ -96,6 +95,7 @@ class ProbeAuthorization:
         _sha256(self.executable_sha256, "authorized executable hash")
         _absolute(self.executable_path, "executable_path")
         _absolute(self.scratch_parent, "scratch_parent")
+        _absolute(self.state_root, "state_root")
         if (not isinstance(self.protected_roots, tuple) or not 1 <= len(self.protected_roots) <= MAX_PROTECTED_ROOTS):
             raise PlanError("protected_roots must be a tuple of 1 to 8 absolute paths")
         for root in self.protected_roots:
@@ -111,15 +111,6 @@ class ProbeAuthorization:
         lifetime = _number(self.expires_at, "expiry") - _number(self.issued_at, "issue time")
         if not 0 < lifetime <= MAX_AUTHORIZATION_SECONDS:
             raise PlanError("authorization lifetime must be between 0 and 900 seconds")
-
-
-def _consume(authorization: ProbeAuthorization) -> None:
-    with _CONSUMED_LOCK:
-        if authorization.probe_id in _CONSUMED:
-            raise ProbeError("authorization_reused")
-        if len(_CONSUMED) >= MAX_CONSUMED_IDS:
-            raise ProbeError("authorization_registry_full")
-        _CONSUMED.add(authorization.probe_id)
 
 
 def _file_state(path: Path) -> tuple[int, ...]:
@@ -405,8 +396,11 @@ def _preflight(authorization: ProbeAuthorization, repo_root: Path):
     try:
         if any(_overlaps(parent, root) for root in protected):
             raise ProbeError("scratch_parent overlaps a protected root")
-        binary, identity, state = _bind_executable(authorization, (repo, *protected, parent))
+        state_root = validate_state_root(authorization.state_root, repo, protected, parent)
+        binary, identity, state = _bind_executable(authorization, (repo, *protected, parent, state_root))
         parent_before = set(os.listdir(parent))
+    except LedgerError as exc:
+        raise ProbeError(str(exc)) from exc
     except OSError as exc:
         raise ProbeError("scratch_parent could not be inspected") from exc
     return repo, protected, parent, binary, identity, state, parent_before
@@ -433,9 +427,16 @@ def _run_probe(authorization: ProbeAuthorization, repo_root: Path, cancel: threa
     if type(authorization) is not ProbeAuthorization:
         raise ProbeError("authorization_missing")
     _check_window(authorization)
-    _consume(authorization)
-
     repo, protected, parent, binary, identity, state, parent_before = _preflight(authorization, repo_root)
+    digest = authorization_specification_digest(authorization, repo, protected, ALLOWED_COMMANDS)
+    _check_window(authorization)
+    try:
+        consume_authorization(
+            state_root=authorization.state_root, authorization_id=authorization.probe_id,
+            specification_sha256=digest, expires_at=authorization.expires_at,
+            repo_root=repo, protected_roots=protected, scratch_parent=parent)
+    except LedgerError as exc:
+        raise ProbeError(str(exc)) from exc
 
     scratch, scratch_id = _create_scratch(authorization, repo, protected, parent)
     commands: list[dict[str, object]] = []
@@ -505,7 +506,8 @@ def _run_probe(authorization: ProbeAuthorization, repo_root: Path, cancel: threa
         isolation["scratch_leftover"] = str(scratch)
     return {
         "schema_version": 1, "provider": "codex", "probe_id": authorization.probe_id,
-        "authorization": {"origin": "terminal_confirmed_process_local", "single_use_scope": "process",
+        "authorization": {"origin": "terminal_confirmed_private_ledger",
+                          "single_use_scope": "cooperating_processes",
                           "expires_at": authorization.expires_at},
         "executable": {"path": identity["path"], "sha256": identity["sha256"],
                        "size_bytes": identity["size_bytes"], "identity_scope": identity["identity_scope"],

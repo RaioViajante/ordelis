@@ -1,28 +1,31 @@
 """Interactive terminal confirmation for controlled Codex probes.
 
-Library only: no CLI command, no persistence, no dispatch. `run_controlled_probe` shows the exact operation
+Library only: no CLI command and no dispatch. `run_controlled_probe` shows the exact operation
 on the controlling terminal (`/dev/tty`) and runs only if the user types a phrase bound to that exact
-specification. Consent is never read from stdin, files, environment variables or arguments.
+specification. Consent is never read from stdin, files, environment variables or arguments. After consent,
+only the authorization identity, specification digest and timestamps are persisted in the private ledger.
 
-This is a process-local, same-user control. It cannot resist a malicious process running as the same user
+Terminal confirmation is a process-local, same-user control; the private ledger coordinates cooperating
+processes. Neither can resist a malicious process running as the same user
 (which can drive the terminal, replace this module or call the runner directly), and it does not
 authenticate the evidence the runner returns.
 """
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import secrets
 import threading
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from .codex_probe_runner import (
-    ALLOWED_COMMANDS, ProbeAuthorization, ProbeError, _CONFIRMED_EXECUTION, _CONSUMED, _CONSUMED_LOCK,
+    ALLOWED_COMMANDS, ProbeAuthorization, ProbeError, _CONFIRMED_EXECUTION,
     _check_window, _preflight, _run_probe)
+from .probe_authorization_ledger import (
+    LedgerError, authorization_specification_digest, check_authorization_available)
 
 __all__ = ["run_controlled_probe"]
 
@@ -52,10 +55,18 @@ class _ConfirmedProbe:
 
 
 def _digest(authorization: ProbeAuthorization, repo: Path, protected: tuple[Path, ...]) -> str:
-    spec = asdict(authorization)
-    spec.update({"protected_roots": [str(root) for root in protected], "checkout": str(repo),
-                 "commands": [list(args) for args in ALLOWED_COMMANDS]})
-    return hashlib.sha256(json.dumps(spec, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    return authorization_specification_digest(authorization, repo, protected, ALLOWED_COMMANDS)
+
+
+def _check_ledger(authorization: ProbeAuthorization, digest: str, repo: Path,
+                  protected: tuple[Path, ...], parent: Path) -> None:
+    try:
+        check_authorization_available(
+            state_root=authorization.state_root, authorization_id=authorization.probe_id,
+            specification_sha256=digest, expires_at=authorization.expires_at,
+            repo_root=repo, protected_roots=protected, scratch_parent=parent)
+    except LedgerError as exc:
+        raise ProbeError(str(exc)) from exc
 
 
 def _phrase(digest: str) -> str:
@@ -80,6 +91,7 @@ def _render(authorization: ProbeAuthorization, repo: Path, protected: tuple[Path
         f"Executable   : {_q(identity['path'])}", f"SHA-256      : {identity['sha256']}",
         f"Commands     : {commands}   (in this order; nothing else)",
         f"Scratch      : new private subdirectory under {_q(authorization.scratch_parent)}",
+        f"State ledger : {_q(authorization.state_root)}",
         f"Protected    : {', '.join(_q(str(root)) for root in protected)}",
         f"Checkout     : {_q(str(repo))} (excluded)",
         f"Limits       : {authorization.command_timeout_seconds}s per command, "
@@ -96,7 +108,8 @@ def _render(authorization: ProbeAuthorization, repo: Path, protected: tuple[Path
         "  - The file is run by pathname, so it could be swapped between check and run.",
         "  - Descendants outside the process group are not tracked; CPU and memory are not limited.",
         "  - This prompt cannot detect a malicious process running as your user.",
-        "This approval is for this one run in this process only and is not saved.", "",
+        "If approved, the authorization id and specification digest are durably consumed before scratch",
+        "creation. No prompt, terminal answer, path, provider output or vault content is stored.", "",
         f"To authorize this exact run, type:  {_phrase(digest)}", "Anything else cancels.", "> "])
     if len(prompt.encode("utf-8")) > MAX_PROMPT_BYTES:
         raise ProbeError("confirmation_prompt_too_long")
@@ -179,19 +192,18 @@ def _confirm_probe(authorization: ProbeAuthorization, *, repo_root: Path) -> _Co
     if type(authorization) is not ProbeAuthorization:
         raise ProbeError("authorization_missing")
     _check_window(authorization)
-    repo, protected, _, _, identity, _, _ = _preflight(authorization, repo_root)
+    repo, protected, parent, _, identity, _, _ = _preflight(authorization, repo_root)
     digest = _digest(authorization, repo, protected)
-    with _CONSUMED_LOCK:
-        if authorization.probe_id in _CONSUMED:
-            raise ProbeError("authorization_reused")  # do not ask the user to approve a run that cannot start
+    _check_ledger(authorization, digest, repo, protected, parent)
     with _PROMPT_LOCK:
         answer = _ask(_render(authorization, repo, protected, identity, digest))
     if answer != _phrase(digest):
         raise ProbeError("declined" if answer.strip().lower() in _DECLINED else "not_confirmed")
     _check_window(authorization)
-    repo, protected, *_ = _preflight(authorization, repo_root)
+    repo, protected, parent, *_ = _preflight(authorization, repo_root)
     if _digest(authorization, repo, protected) != digest:
         raise ProbeError("specification_changed_during_confirmation")
+    _check_ledger(authorization, digest, repo, protected, parent)
     nonce = secrets.token_hex(16)
     with _ISSUED_LOCK:
         for key in [key for key, (_, _, expiry) in _ISSUED.items() if expiry <= time.time()]:
