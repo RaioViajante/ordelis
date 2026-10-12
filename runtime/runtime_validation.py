@@ -1,6 +1,7 @@
 """Evidence model and probe-authorization check for future provider runtime validation.
 
 Nothing here runs a provider, reads credentials, or writes files. It only judges supplied data.
+Evidence is unauthenticated caller input: a sufficient result is never a dispatch gate.
 """
 
 from __future__ import annotations
@@ -19,13 +20,18 @@ CAPABILITIES = (
 SOURCES = ("adapter_declaration", "cli_help", "runtime_probe", "external_check")
 LEVELS = ("adapter_declared", "cli_advertised", "runtime_observed", "independently_verified")
 OUTCOMES = ("pass", "fail", "unsupported")
+# Only these capabilities carry values; every other capability's records carry no values.
+_VALUED = {"model_acceptance", "reasoning_effort"}
+# Closed diagnostic vocabulary for failure details on capabilities without values.
+OBSERVATIONS = ("timeout", "cancelled", "descendant_survived", "write_succeeded", "network_reachable",
+                "session_data_written", "malformed_output")
 # Isolation properties cannot be inferred from a provider's own behavior or output.
 _ISOLATION = {"read_only_filesystem", "network_restriction", "session_persistence"}
 _MINIMUM_LEVEL = {name: 3 if name in _ISOLATION else 2 for name in CAPABILITIES}
 _TOKEN = re.compile(r"[A-Za-z0-9._:/@+=-]{1,128}")
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _RECORD_FIELDS = {"capability", "source", "outcome", "executable_sha256", "requested", "observed", "probe_id"}
-_AUTHORIZATION_FIELDS = {"schema_version", "executable_sha256", "capabilities", "scratch_root",
+_AUTHORIZATION_FIELDS = {"schema_version", "probe_id", "executable_sha256", "capabilities", "scratch_root",
                          "execution_mode", "max_model_calls", "network", "hard_timeout_seconds"}
 
 
@@ -56,11 +62,16 @@ def parse_evidence(raw: object) -> list[dict[str, object]]:
             raise PlanError("invalid evidence source")
         if record["outcome"] not in OUTCOMES:
             raise PlanError("invalid evidence outcome")
+        requested = _token(record["requested"], "evidence requested value", optional=True)
+        observed = _token(record["observed"], "evidence observed value", optional=True)
+        if record["capability"] not in _VALUED:
+            if requested is not None or (observed is not None and (
+                    observed not in OBSERVATIONS or record["outcome"] == "pass")):
+                raise PlanError("invalid values for a capability without values")
         records.append({
             "capability": record["capability"], "source": record["source"], "outcome": record["outcome"],
             "executable_sha256": _sha256(record["executable_sha256"], "evidence executable hash"),
-            "requested": _token(record["requested"], "evidence requested value", optional=True),
-            "observed": _token(record["observed"], "evidence observed value", optional=True),
+            "requested": requested, "observed": observed,
             "probe_id": _token(record["probe_id"], "evidence probe id"),
         })
     return sorted(records, key=lambda record: tuple(str(record[key]) for key in sorted(_RECORD_FIELDS)))
@@ -75,8 +86,7 @@ def _capability_status(capability: str, wanted: str | None,
     highest_level = LEVELS[highest] if highest is not None else None
     if any(record["outcome"] == "fail" for record in relevant):
         return "failed", highest_level
-    if wanted is not None and any(record["requested"] == wanted and record["observed"] not in (None, wanted)
-                                  for record in passed):
+    if wanted is not None and any(record["observed"] not in (None, wanted) for record in passed):
         return "mismatch", highest_level
     if any(record["outcome"] == "unsupported" for record in relevant):
         return "unsupported", highest_level
@@ -87,10 +97,14 @@ def _capability_status(capability: str, wanted: str | None,
     return ("insufficient_evidence" if passed else "unknown"), highest_level
 
 
-def evaluate_validation(executable_sha256: str, evidence: object, *, model: str, effort: str | None = None,
-                        require_network_restriction: bool = False) -> dict[str, object]:
-    """Judge supplied evidence for the current executable. It never authorizes dispatch."""
+def evaluate_validation(executable_sha256: str, evidence: object, *, probe_id: str, model: str,
+                        effort: str | None = None, require_network_restriction: bool = False) -> dict[str, object]:
+    """Judge supplied evidence for one executable and one probe run. It never authorizes dispatch.
+
+    The evidence is unauthenticated: this function cannot tell a trusted probe runner from a forged record.
+    """
     current_hash = _sha256(executable_sha256, "executable hash")
+    run_id = _token(probe_id, "probe id")
     required: dict[str, str | None] = {
         "executable_identity": None, "model_acceptance": _token(model, "model"),
         "read_only_filesystem": None, "output_format": None, "process_termination": None,
@@ -102,12 +116,13 @@ def evaluate_validation(executable_sha256: str, evidence: object, *, model: str,
         required["network_restriction"] = None
     records = parse_evidence(evidence)
     current = [record for record in records if record["executable_sha256"] == current_hash]
+    bound = [record for record in current if record["probe_id"] == run_id]
     capabilities = {}
     reasons = []
     for capability in CAPABILITIES:
         status, highest_level = _capability_status(
             capability, required.get(capability),
-            [record for record in current if record["capability"] == capability])
+            [record for record in bound if record["capability"] == capability])
         capabilities[capability] = {"required": capability in required, "requested": required.get(capability),
                                     "minimum_level": LEVELS[_MINIMUM_LEVEL[capability]],
                                     "highest_level": highest_level, "status": status}
@@ -116,11 +131,24 @@ def evaluate_validation(executable_sha256: str, evidence: object, *, model: str,
     return {
         "schema_version": 1,
         "executable_sha256": current_hash,
+        "probe_id": run_id,
         "capabilities": capabilities,
         "stale_evidence": len(records) - len(current),
-        "validation": {"status": "blocked" if reasons else "validated", "blocking_reasons": reasons,
+        "unbound_evidence": len(current) - len(bound),
+        "validation": {"status": "blocked" if reasons else "evidence_sufficient",
+                       "evidence_authenticated": False, "blocking_reasons": reasons,
                        "dispatch_authorized": False},
     }
+
+
+def _denied(reason: str) -> dict[str, object]:
+    return {"probe_authorized": False, "blocking_reasons": [reason], "dispatch_authorized": False}
+
+
+def _overlaps(first: Path, second: Path) -> bool:
+    """Compare by file identity so case-insensitive filesystems cannot hide an overlap."""
+    return (any(path.samefile(second) for path in (first, *first.parents))
+            or any(path.samefile(first) for path in (second, *second.parents)))
 
 
 def check_probe_authorization(raw: object, *, repo_root: Path, protected_roots: tuple[Path, ...],
@@ -131,15 +159,16 @@ def check_probe_authorization(raw: object, *, repo_root: Path, protected_roots: 
     """
     current_hash = _sha256(executable_sha256, "executable hash")
     if raw is None:
-        return {"probe_authorized": False, "blocking_reasons": ["no_authorization_supplied"],
-                "dispatch_authorized": False}
+        return _denied("no_authorization_supplied")
     auth = _keys(raw, _AUTHORIZATION_FIELDS, "probe authorization")
     if type(auth["schema_version"]) is not int or auth["schema_version"] != 1:
         raise PlanError("unsupported probe authorization schema version")
+    run_id = _token(auth["probe_id"], "authorized probe id")
     authorized_hash = _sha256(auth["executable_sha256"], "authorized executable hash")
     capabilities = auth["capabilities"]
-    if (not isinstance(capabilities, list) or not capabilities or len(set(capabilities)) != len(capabilities)
-            or any(item not in CAPABILITIES for item in capabilities)):
+    if (not isinstance(capabilities, list) or not capabilities
+            or any(item not in CAPABILITIES for item in capabilities)
+            or len(set(capabilities)) != len(capabilities)):
         raise PlanError("invalid probe authorization capabilities")
     if auth["execution_mode"] != "read_only":
         raise PlanError("probe authorization must use read_only execution")
@@ -151,14 +180,15 @@ def check_probe_authorization(raw: object, *, repo_root: Path, protected_roots: 
         raise PlanError("repository must be an existing directory")
     repo = repo_root.resolve(strict=True)
     scratch = _external_path(auth["scratch_root"], repo, "scratch_root", directory=True)
-    for protected in protected_roots:
-        try:
-            root = protected.resolve(strict=True)
-        except OSError as exc:
-            raise PlanError("protected root must exist") from exc
-        if scratch == root or scratch in root.parents or root in scratch.parents:
-            raise PlanError("scratch_root overlaps a protected root")
-    if any(scratch.iterdir()):
-        raise PlanError("scratch_root must be an empty directory")
-    reasons = [] if authorized_hash == current_hash else ["authorization_executable_mismatch"]
-    return {"probe_authorized": not reasons, "blocking_reasons": reasons, "dispatch_authorized": False}
+    try:
+        for protected in (repo, *protected_roots):
+            if _overlaps(scratch, protected.resolve(strict=True)):
+                raise PlanError("scratch_root overlaps the repository or a protected root")
+        if any(scratch.iterdir()):
+            raise PlanError("scratch_root must be an empty directory")
+    except OSError as exc:
+        raise PlanError("scratch_root and protected roots must be readable existing directories") from exc
+    if authorized_hash != current_hash:
+        return _denied("authorization_executable_mismatch")
+    return {"probe_authorized": True, "probe_id": run_id, "scratch_root": str(scratch),
+            "path_checks": "point_in_time", "blocking_reasons": [], "dispatch_authorized": False}
