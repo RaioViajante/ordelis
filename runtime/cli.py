@@ -23,6 +23,7 @@ from . import __version__
 from .policy import ExecutionPreviewRequest, provider_policy_preview
 from .vault_context import VaultContextError, preview as vault_preview
 from .synapse_plan import PlanError, build_plan as synapse_plan
+from .codex_capabilities import CapabilityInspectionError, inspect_codex_cli
 
 SUPPORTED_PROVIDERS = ("agy", "claude", "codex", "copilot", "cursor", "gemini", "grok", "hermes", "opencode", "pi", "qwen")
 SUPPORTED_PROVIDER_LIST = ",".join(SUPPORTED_PROVIDERS)
@@ -1310,6 +1311,9 @@ def build_parser() -> argparse.ArgumentParser:
     context_plan.add_argument("--model", required=True, help="Required model name")
     context_plan.add_argument("--effort", help="Optional required effort setting")
     context_plan.add_argument("--json", action="store_true", help="Print JSON (default for plan)")
+    context_inspect = context_actions.add_parser("inspect-codex", help="Inspect Codex CLI version and help only")
+    context_inspect.add_argument("--binary", type=Path, help="Absolute Codex CLI path (default: PATH lookup)")
+    context_inspect.add_argument("--json", action="store_true", help="Print JSON (default for inspection)")
 
     doctor = subparsers.add_parser(
         "doctor",
@@ -2039,6 +2043,8 @@ def main(argv: List[str] | None = None) -> int:
                 payload = vault_preview(args.vault, args.index, args.project, args.topic,
                                         args.agent, args.model, args.effort,
                                         args.per_note_bytes, args.total_bytes)
+            elif args.context_action == "inspect-codex":
+                payload = inspect_codex_cli(str(args.binary) if args.binary is not None else None)
             else:
                 adapters = adapter_registry()
                 if args.agent not in adapters:
@@ -2046,7 +2052,7 @@ def main(argv: List[str] | None = None) -> int:
                 payload = synapse_plan(config_path=args.config, repo_root=args.repo, task=args.task,
                                        project=args.project, topic=args.topic, agent=args.agent,
                                        model=args.model, effort=args.effort, adapter=adapters[args.agent])
-        except (VaultContextError, PlanError, OSError) as exc:
+        except (VaultContextError, PlanError, CapabilityInspectionError, OSError) as exc:
             print(json.dumps(_error_envelope("input_error", str(exc)), ensure_ascii=True))
             return 2
         print(json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")))
