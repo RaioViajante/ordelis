@@ -409,6 +409,81 @@ class ProvenanceTests(ConfirmationCase):
         self.assertEqual(len(confirmation._ISSUED), 1)
 
 
+class ReviewRegressionTests(ConfirmationCase):
+    def test_concurrent_confirmations_never_share_the_terminal(self) -> None:
+        active = peak = 0
+        guard = threading.Lock()
+        pairs: list[tuple[int, int]] = []
+
+        def drive(master: int) -> None:
+            nonlocal active, peak
+            data = b""
+            while PROMPT_END not in data:
+                if select.select([master], [], [], 0.1)[0]:
+                    data += os.read(master, 4096)
+            with guard:
+                active += 1
+                peak = max(peak, active)
+            time.sleep(0.3)
+            with guard:
+                active -= 1
+            os.write(master, phrase_in(data.decode("utf-8", "replace").replace("\r\n", "\n")))
+
+        def opener() -> int:  # patched once: each call gets its own pty pair
+            master, slave = pty.openpty()
+            pairs.append((master, slave))
+            threading.Thread(target=drive, args=(master,), daemon=True).start()
+            return os.dup(slave)
+
+        results: list[object] = []
+        auths = [self.authorization() for _ in range(3)]
+
+        def attempt(auth: ProbeAuthorization) -> None:
+            try:
+                results.append(confirm_probe(auth, repo_root=self.repo))
+            except BaseException as exc:  # noqa: BLE001 - recorded for the assertion below
+                results.append(exc)
+
+        with patch.object(confirmation, "_open_terminal", opener):
+            threads = [threading.Thread(target=attempt, args=(auth,)) for auth in auths]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(30)
+        for master, slave in pairs:
+            os.close(master)
+            os.close(slave)
+        self.assertEqual(peak, 1)  # prompts are serialized, one at a time
+        self.assertEqual(len(results), 3)
+        self.assertTrue(all(isinstance(item, ConfirmedProbe) for item in results), results)
+
+    def test_already_consumed_probe_id_is_refused_before_prompting(self) -> None:
+        auth = self.authorization()
+        run_codex_probe(auth, repo_root=self.repo)
+        opened = self.opened
+        with self.assertRaises(ProbeError) as caught:
+            self.confirm(lambda text: phrase_in(text), auth)
+        self.assertEqual(str(caught.exception), "authorization_reused")
+        self.assertEqual(self.opened, opened)  # the user was never asked to approve a doomed run
+
+    def test_terminal_not_in_line_mode_denies(self) -> None:
+        import termios
+
+        master, slave = pty.openpty()
+        attrs = termios.tcgetattr(slave)
+        attrs[3] &= ~termios.ICANON  # e.g. left raw by another program: Enter sends \r, no line ever ends
+        termios.tcsetattr(slave, termios.TCSANOW, attrs)
+        try:
+            with patch.object(confirmation, "_open_terminal", lambda: os.dup(slave)):
+                with self.assertRaises(ProbeError) as caught:
+                    confirm_probe(self.authorization(), repo_root=self.repo)
+        finally:
+            os.close(slave)
+            os.close(master)
+        self.assertEqual(str(caught.exception), "terminal_not_line_mode")
+        self.assertNoExecution()
+
+
 class ExpiryAndConflictTests(ConfirmationCase):
     def test_expired_authorization_is_refused_before_any_prompt(self) -> None:
         now = time.time()

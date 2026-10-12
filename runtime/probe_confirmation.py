@@ -21,7 +21,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from .codex_probe_runner import (
-    ALLOWED_COMMANDS, ProbeAuthorization, ProbeError, _check_window, _preflight, _run_probe)
+    ALLOWED_COMMANDS, ProbeAuthorization, ProbeError, _CONSUMED, _CONSUMED_LOCK, _check_window, _preflight,
+    _run_probe)
 
 MAX_ANSWER_BYTES = 256
 PHRASE_DIGITS = 12
@@ -30,6 +31,8 @@ _DECLINED = {"n", "no", "deny", "cancel"}
 # Process-local registry of confirmations this module issued: nonce -> (spec digest, checkout, expiry).
 _ISSUED: dict[str, tuple[str, str, float]] = {}
 _ISSUED_LOCK = threading.Lock()
+# One prompt at a time: interleaved prompts on one terminal could let an answer meant for one reach another.
+_PROMPT_LOCK = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -137,6 +140,8 @@ def _ask(text: str) -> str:
 
     fd = _open_terminal()
     try:
+        if not termios.tcgetattr(fd)[3] & termios.ICANON:
+            raise ProbeError("terminal_not_line_mode")  # Enter would not end a line; the answer is ambiguous
         termios.tcflush(fd, termios.TCIFLUSH)  # type-ahead typed before the prompt must not count
         _write_all(fd, text)
         try:
@@ -164,7 +169,11 @@ def confirm_probe(authorization: ProbeAuthorization, *, repo_root: Path) -> Conf
     _check_window(authorization)
     repo, protected, _, _, identity, _, _ = _preflight(authorization, repo_root)
     digest = _digest(authorization, repo, protected)
-    answer = _ask(_render(authorization, repo, protected, identity, digest))
+    with _CONSUMED_LOCK:
+        if authorization.probe_id in _CONSUMED:
+            raise ProbeError("authorization_reused")  # do not ask the user to approve a run that cannot start
+    with _PROMPT_LOCK:
+        answer = _ask(_render(authorization, repo, protected, identity, digest))
     if answer != _phrase(digest):
         raise ProbeError("declined" if answer.strip().lower() in _DECLINED else "not_confirmed")
     _check_window(authorization)
