@@ -1,6 +1,6 @@
 # Provider runtime-validation foundations
 
-`runtime/runtime_validation.py` defines how Synapse will judge evidence about a real provider CLI **before** any dispatch is allowed. It is a library module only: it has no CLI command, runs no provider, starts no process, reads no credentials, and writes no files. `mco context preview`, `mco context plan`, and `mco context inspect-codex` are unchanged and remain non-dispatching, and the MCO invocation workflow is not wired into Synapse planning. A test pins that no other runtime module references this one.
+`runtime/runtime_validation.py` defines how Synapse will judge evidence about a real provider CLI **before** any dispatch is allowed. It is a library module only: it has no CLI command, runs no provider, starts no process, reads no credentials, and writes no files. `mco context preview`, `mco context plan`, and `mco context inspect-codex` are unchanged and remain non-dispatching, and the MCO invocation workflow is not wired into Synapse planning. A test pins that no other runtime module references this one except the [probe runner](codex-zero-model-probes.md).
 
 Evidence for a real provider does not exist yet. The tests use only synthetic records and a fake executable.
 
@@ -87,7 +87,7 @@ Result for `model="model-1"`, `probe_id="run-1"`:
 
 **Trusted construction rule.** Records with source `runtime_probe` or `external_check` may only be built by reviewed Synapse probe-runner code, in the same process and invocation that evaluates them, from the runner's own observations. They must not be read from a file, a command-line argument, an environment variable, a prompt, a vault note, or provider output. Following that rule is what makes `evidence_sufficient` meaningful. A simpler trusted construction boundary like this is enough for the planned runner; cryptographic signing would only be needed if evidence ever had to cross a trust boundary, which is not planned.
 
-**No component is currently trusted as a producer**, because none exists. The only trusted inputs today are the repository's own code and the user's own authorization file.
+**The only evidence producer is the [zero-model-call probe runner](codex-zero-model-probes.md)**, and it is trusted by construction rule, not by any mechanism: its records are still plain dictionaries and `evidence_authenticated` stays `false`. The runner's authorization is a caller-asserted in-memory object; this library still cannot tell who approved a probe.
 
 **Why `dispatch_authorized` stays false.** Three separate decisions exist and none implies another:
 
@@ -131,13 +131,13 @@ A future probe needs an explicit authorization written by the user. No authoriza
 - `scratch_root` must be an absolute, existing, **empty**, non-symlink directory that does not overlap the repository checkout or any caller-supplied protected root (the vault, the private state root, and real project directories). Overlap is decided by file identity (the shared check described in [Path overlap checks](private-execution-plan.md#path-overlap-checks)), not by comparing path text, so a path spelled in a different case on a case-insensitive filesystem cannot hide an overlap. Probes never run in the Synapse checkout, in a vault, or in a real project.
 - `hard_timeout_seconds` is 1 to 300.
 
-On success the result carries `probe_id`, the canonical `scratch_root`, and `path_checks: "point_in_time"`. The checks hold only at the moment of the call. Directories, symlinks, and contents can change afterwards, so a runner must not treat the result as a lasting guarantee. Authorization has no expiry yet (see follow-ups).
+On success the result carries `probe_id`, the canonical `scratch_root`, and `path_checks: "point_in_time"`. The checks hold only at the moment of the call. Directories, symlinks, and contents can change afterwards, so a runner must not treat the result as a lasting guarantee. The library check has no expiry. The runner's own `ProbeAuthorization` adds a 15-minute cap and process-local single use (see [the runner guide](codex-zero-model-probes.md#authorization-lifecycle)).
 
 Synapse never authenticates for the user, reads credential files, or logs prompts. A probe may only use the provider's own existing local login, and only when `max_model_calls` is above zero. Authorization permits a probe; it never permits dispatch.
 
 ## Future controlled-probe workflow
 
-Not implemented here. Each step needs its own explicitly authorized increment:
+Steps 4 and 5 now exist as a library, tested only with fake executables (see [the runner guide](codex-zero-model-probes.md)); no real probe has been run. Each remaining step needs its own explicitly authorized increment:
 
 1. Run `inspect-codex` and record the executable hash.
 2. The user writes a probe authorization bound to that hash with an empty scratch directory outside the checkout.
@@ -156,10 +156,10 @@ Not implemented here. Each step needs its own explicitly authorized increment:
 
 ## Known limitations and follow-ups
 
-- No real provider evidence exists and no probe runner exists. Every real-provider capability is `unknown` today.
+- No real provider evidence exists. A probe runner exists but has only run against fake executables. Every real-provider capability is `unknown` today.
 - Evidence is unauthenticated (see the trust boundary). Producing it only from trusted code is a rule, not something the library can enforce.
 - The two valued capabilities accept arbitrary short tokens in `requested` and `observed`.
-- Authorization has no expiry or single-use marker. `probe_id` binding limits replay but a stale authorization file can be reused for the same run id. The runner increment must define expiry and consumption.
-- The runner must create and own its scratch directory (private parent, restrictive mode, descriptor-based operations that refuse symlinks) instead of accepting a pre-existing one, to remove the check-then-use gap. The point-in-time scratch emptiness check is a pre-flight filter only.
+- `check_probe_authorization` has no expiry or single-use marker. The runner enforces both for its own `ProbeAuthorization`, but single use is process-local and the origin of that object is unverified.
+- The runner creates and owns a fresh 0700 scratch directory instead of accepting a pre-existing one, but it still uses pathnames rather than directory descriptors, so a check-then-use gap remains for the scratch parent. The emptiness check here is a pre-flight filter only.
 - Staleness covers only the executable file. Account entitlement, configuration, and operating-system changes are not tracked.
-- Environment exposure, cancellation, and descendant cleanup are properties of the future runner. The library neither spawns nor signals processes.
+- Environment exposure, cancellation, and descendant cleanup are properties of the runner. This library neither spawns nor signals processes, and the runner's descendant handling is process-group only.

@@ -7,6 +7,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added
+- Added a library-only, authorization-gated Codex zero-model-call probe runner (`--version`, `--help`, `exec --help`) that builds bounded, unauthenticated runtime evidence; it is tested only with fake executables and does not enable dispatch.
+
 ### Fixed
 - Rejected case-aliased and symlink-aliased paths inside the checkout in `mco context plan` private path validation by deciding overlap with file identity instead of path text.
 
