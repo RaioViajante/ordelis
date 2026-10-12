@@ -41,7 +41,13 @@ def _read_bounded(path: Path, limit: int) -> bytes:
 
 
 def _text(value: object, label: str, maximum: int) -> str:
-    if not isinstance(value, str) or not value or len(value.encode("utf-8")) > maximum or any(ord(c) < 32 for c in value):
+    if not isinstance(value, str) or not value or any(ord(c) < 32 for c in value):
+        raise VaultContextError(f"invalid {label}")
+    try:
+        length = len(value.encode("utf-8"))
+    except UnicodeError as exc:
+        raise VaultContextError(f"invalid {label}") from exc
+    if length > maximum:
         raise VaultContextError(f"invalid {label}")
     return value
 
@@ -60,7 +66,9 @@ def _load_index(path: Path) -> dict[str, dict[str, list[dict[str, str]]]]:
         raise VaultContextError("index must be a regular file")
     try:
         data = json.loads(_read_bounded(path, MAX_INDEX_BYTES).decode("utf-8"), object_pairs_hook=_unique_object)
-    except (UnicodeError, json.JSONDecodeError) as exc:
+    except VaultContextError:
+        raise
+    except (UnicodeError, ValueError, RecursionError) as exc:
         raise VaultContextError("index must be valid UTF-8 JSON") from exc
     if not isinstance(data, dict) or set(data) != {"projects", "topics"}:
         raise VaultContextError("index must contain projects and topics maps")
@@ -119,7 +127,20 @@ def _section(note: str, heading: str) -> tuple[str, bool]:
     lines = note.splitlines(keepends=True)
     start = None
     level = 0
+    fence_char = ""
+    fence_length = 0
     for index, line in enumerate(lines):
+        fence = re.match(r"^ {0,3}(`{3,}|~{3,})(.*)$", line.rstrip("\r\n"))
+        if fence:
+            marker = fence.group(1)
+            if not fence_char:
+                fence_char, fence_length = marker[0], len(marker)
+                continue
+            if marker[0] == fence_char and len(marker) >= fence_length and not fence.group(2).strip():
+                fence_char = ""
+                continue
+        if fence_char:
+            continue
         match = re.match(r"^ {0,3}(#{1,6})[ \t]+(.+?)[ \t]*#*[ \t]*(?:\r?\n)?$", line)
         if not match:
             continue
@@ -176,7 +197,9 @@ def preview(vault_path: Path, index_path: Path, project: str | None, topic: str 
     result = {"schema_version": 1, "selection": {"project": project, "topic": topic},
               "context": {"kind": "reference_data", "excerpts": excerpts,
                           "total_excerpt_bytes": total_bytes - remaining},
-              "execution": {"agent": agent, "model": model, "effort": effort,
+              "execution": {"proposed_agent": agent, "proposed_model": model,
+                            "proposed_effort": effort, "model_validated": False,
+                            "effort_validated": False,
                             "policy": {"dispatch": False, "vault_access": "read_only"},
                             "validated_provider_settings": False}}
     if len(json.dumps(result, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")) > MAX_OUTPUT_BYTES:
