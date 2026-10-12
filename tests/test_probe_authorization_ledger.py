@@ -192,6 +192,79 @@ class InitializationRecoveryTests(LedgerCase):
             connection.close()
 
 
+class CrashRecoveryTests(LedgerCase):
+    def test_process_killed_mid_transaction_leaves_nothing_consumed_and_recovers(self) -> None:
+        self.consume()
+        script = (
+            "import os, sys\n"
+            "from runtime import probe_authorization_ledger as ledger\n"
+            "from pathlib import Path\n"
+            "c = ledger._connect(Path(sys.argv[1]))\n"
+            "c.execute('BEGIN IMMEDIATE')\n"
+            "c.execute(\"INSERT INTO consumptions VALUES ('killed-mid-transaction', ?, 1, 1)\", ('a' * 64,))\n"
+            "c.execute('PRAGMA cache_spill = 1')\n"
+            "os._exit(92)\n")
+        crashed = subprocess.run([sys.executable, "-c", script, str(ledger.database_path(self.state))],
+                                 cwd=ROOT, text=True, capture_output=True, check=False)
+        self.assertEqual(crashed.returncode, 92, crashed.stderr)
+        self.consume(authorization_id="killed-mid-transaction")
+        with self.assertRaisesRegex(ledger.LedgerError, "authorization_reused"):
+            self.consume(authorization_id="killed-mid-transaction")
+
+
+class PeerJournalTests(LedgerCase):
+    """A concurrent writer's transient rollback journal is normal and must not deny or un-record a consumption."""
+
+    def journal(self) -> Path:
+        return ledger.database_path(self.state).with_name(f"{ledger._DATABASE_NAME}-journal")
+
+    def test_peer_journal_appearing_after_commit_does_not_fail_a_recorded_consumption(self) -> None:
+        values = self.values()
+        real_commit = ledger._commit
+
+        def commit_then_peer_journal(connection) -> None:
+            real_commit(connection)
+            self.journal().touch(mode=0o600)
+
+        with patch.object(ledger, "_commit", side_effect=commit_then_peer_journal):
+            ledger.consume_authorization(**values)
+        self.journal().unlink()
+        with self.assertRaisesRegex(ledger.LedgerError, "authorization_reused"):
+            ledger.consume_authorization(**values)
+
+    def test_peer_journal_deleted_between_listing_and_inspection_is_not_an_error(self) -> None:
+        ledger.consume_authorization(**self.values())
+        self.journal().touch(mode=0o600)
+        real = ledger._private_file
+
+        def peer_finishes(path, label):
+            if label == "authorization_ledger_journal":
+                path.unlink()
+            return real(path, label)
+
+        with patch.object(ledger, "_private_file", side_effect=peer_finishes):
+            ledger.consume_authorization(**self.values())
+
+    def test_connection_requests_full_synchronous_and_fullfsync_durability(self) -> None:
+        self.consume()
+        connection = ledger._connect(ledger.database_path(self.state))
+        try:
+            self.assertEqual(connection.execute("PRAGMA synchronous").fetchone(), (2,))
+            self.assertEqual(connection.execute("PRAGMA fullfsync").fetchone(), (1,))
+            self.assertEqual(connection.execute("PRAGMA journal_mode").fetchone(), ("delete",))
+        finally:
+            connection.close()
+
+    def test_many_processes_consuming_distinct_identities_all_succeed(self) -> None:
+        for _ in range(3):
+            batch = [self.values() for _ in range(8)]
+            processes = [subprocess.Popen([sys.executable, "-c", CHILD, self.child_values(values)], cwd=ROOT,
+                                          text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                         for values in batch]
+            results = [process.communicate(timeout=30) for process in processes]
+            self.assertEqual([stdout.strip() for stdout, _ in results], ["consumed"] * 8, results)
+
+
 class StateValidationTests(LedgerCase):
     def test_missing_state_root_fails_closed(self) -> None:
         with self.assertRaisesRegex(ledger.LedgerError, "state_root"):

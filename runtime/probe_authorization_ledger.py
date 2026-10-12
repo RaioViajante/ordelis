@@ -195,6 +195,7 @@ def _connect(database: Path) -> sqlite3.Connection:
         if connection.execute("PRAGMA journal_mode = DELETE").fetchone() != ("delete",):
             _fail("authorization_ledger_unavailable")
         connection.execute("PRAGMA synchronous = FULL")
+        connection.execute("PRAGMA fullfsync = ON")  # macOS fsync alone does not reach stable storage
         page_size = connection.execute("PRAGMA page_size").fetchone()
         if not page_size or type(page_size[0]) is not int or page_size[0] <= 0:
             _fail("authorization_ledger_corrupt")
@@ -323,8 +324,14 @@ def _operate(*, state_root: str, authorization_id: str, specification_sha256: st
         before = _private_file(database, "authorization_ledger")
         if before.st_size > MAX_LEDGER_BYTES:
             _fail("authorization_ledger_full")
-        if f"{_DATABASE_NAME}-journal" in _directory_entries(directory):
-            _private_file(directory / f"{_DATABASE_NAME}-journal", "authorization_ledger_journal")
+        journal = directory / f"{_DATABASE_NAME}-journal"
+        if journal.name in _directory_entries(directory):
+            try:
+                _private_file(journal, "authorization_ledger_journal")
+            except LedgerError as exc:
+                # A peer finishing its own transaction removes its journal; only a vanished journal is benign.
+                if not isinstance(exc.__cause__, FileNotFoundError):
+                    raise
         connection = _connect(database)
         if _INITIALIZED_NAME not in entries:
             _begin(connection)
@@ -358,8 +365,6 @@ def _operate(*, state_root: str, authorization_id: str, specification_sha256: st
         _commit(connection)
         os.fsync(ledger_fd)
         _validate_database_identity(database, before)
-        if _directory_entries(directory) - {_DATABASE_NAME, _INITIALIZED_NAME}:
-            _fail("authorization_ledger_unexpected_files")
     except LedgerError:
         if connection is not None:
             _rollback(connection)

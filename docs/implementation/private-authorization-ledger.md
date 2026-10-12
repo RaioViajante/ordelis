@@ -12,7 +12,7 @@ The alternatives were rejected for this increment:
 
 | Design | Concurrent processes | Crash and filesystem failure | Recovery |
 | --- | --- | --- | --- |
-| SQLite with `BEGIN IMMEDIATE` and a unique primary key | One writer commits an authorization identity; later contenders observe the committed row. SQLite supplies locking instead of a Python-only mutex. | A committed transaction is durable with `synchronous=FULL`; an interrupted transaction is rolled back or recovered from its journal. Corruption, locking errors and uncertain commit results fail closed. | Schema and integrity checks are deterministic. The database and rollback journal must be backed up and restored as one state unit. |
+| SQLite with `BEGIN IMMEDIATE` and a unique primary key | One writer commits an authorization identity; later contenders observe the committed row. SQLite supplies locking instead of a Python-only mutex. | A committed transaction is durable with `synchronous=FULL`; an interrupted transaction is rolled back or recovered from its journal. Corruption, locking errors and uncertain commit results fail closed. | Schema and integrity checks are deterministic. Backup and restore are not implemented (see below). |
 | One exclusive-create file per identity | `O_CREAT | O_EXCL` can select one winner on a supported local filesystem. | File creation is small, but safely binding metadata, syncing the containing directory, detecting partial files, validating every pathname and enumerating a large directory add a bespoke recovery protocol. | Permanent tombstones create unbounded directory fan-out, and partial-file recovery needs another trusted marker. |
 | Append-only journal | Appends alone do not define one winner; cooperating writers still need a cross-process lock and duplicate scan. | Torn or reordered tail writes need framing, checksums, sync rules and truncation recovery. | Replay time and file size grow forever, while compaction reintroduces a transactional database problem. |
 
@@ -96,9 +96,27 @@ It enforces fixed row and database-byte limits and fails closed for every new id
 recorded identities remain denied. A future bounded-history design needs an explicit epoch carried by
 authorizations and a trusted migration that preserves the retired epochs.
 
-Backup must copy the private ledger using SQLite-aware backup while no probe consumption is active, and must
-preserve ownership and modes. Restoring an older backup can lose tombstones and permit replay, so rollback is
-not a safe recovery operation. Corruption, a missing initialized database or a full ledger requires explicit
-operator recovery. Deleting the ledger is an authorization-state reset and can make old identities reusable;
+Backup and restore are **deferred**: this increment implements, tests and supports neither. Copying
+`ledger.sqlite3` and its rollback journal with file tools is not a crash-consistent backup (the pair can be torn
+by a concurrent writer, and a journal copied without its database state is meaningless), and Synapse does not
+describe it as one. A future increment must specify a SQLite-aware, quiesced snapshot, verify it, and define
+restore. Until then, restoring any older copy can lose tombstones and permit replay, so rollback is not a safe
+recovery operation. Corruption, a missing initialized database or a full ledger requires explicit operator
+recovery. Deleting the ledger is an authorization-state reset and can make old identities reusable;
 it is never automatic and must be treated like issuing a new trust epoch. Synapse provides no reset command in
 this increment.
+
+## Concurrency and durability guarantees
+
+- Another process's transient rollback journal is normal. Journal inspection tolerates one that disappears,
+  and no directory check runs after a commit, so a recorded consumption is never reported as a failure because
+  of a peer's journal (an earlier revision could spend an identity yet deny the run, or reject a still-unspent one).
+- A process killed mid-transaction leaves nothing consumed; SQLite rolls back a hot journal on the next open.
+  A process killed after commit leaves the identity spent.
+- The connection requests `synchronous=FULL` and `fullfsync=ON`; on macOS plain `fsync` does not guarantee a
+  flush to stable storage, so power-loss durability depends on the drive honoring `F_FULLFSYNC`. The marker
+  and directory syncs use plain `fsync`; losing the marker fails closed (`authorization_ledger_incomplete`) and
+  never revives an identity. Crash tests kill a real process; power loss, disk-full and I/O faults are covered
+  only by fail-closed error mapping and mocks, not by fault injection.
+- Database replacement between validation and opening is detected best-effort by file identity checks around
+  the transaction; it is not prevented against hostile code running as the same user.
