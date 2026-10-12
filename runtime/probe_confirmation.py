@@ -85,6 +85,8 @@ def _render(authorization: ProbeAuthorization, repo: Path, protected: tuple[Path
         f"Limits       : {authorization.command_timeout_seconds}s per command, "
         f"{authorization.total_timeout_seconds}s total, {authorization.max_output_bytes} output bytes per command",
         f"Probe id     : {_q(authorization.probe_id)}   Valid for: {remaining}s   Mode: read_only (declared)",
+        f"Issued at    : {_q(authorization.issued_at)}",
+        f"Expires at   : {_q(authorization.expires_at)}",
         "Model calls  : 0 authorized. No authentication and no task is sent.",
         f"Spec digest  : {digest}", "",
         "NOT guaranteed (unknown or unenforced):",

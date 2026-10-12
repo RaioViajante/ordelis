@@ -334,6 +334,7 @@ def _cleanup(scratch: Path, identity: tuple[int, int]) -> str:
 def _create_scratch(authorization: ProbeAuthorization, repo: Path, protected: tuple[Path, ...],
                     parent: Path) -> tuple[Path, tuple[int, int]]:
     scratch = Path(tempfile.mkdtemp(prefix="synapse-codex-probe-", dir=parent))
+    owned_identity: tuple[int, int] | None = None
     try:
         created = os.lstat(scratch)
         if not stat.S_ISDIR(created.st_mode) or stat.S_IMODE(created.st_mode) != 0o700:
@@ -346,13 +347,17 @@ def _create_scratch(authorization: ProbeAuthorization, repo: Path, protected: tu
             repo_root=repo, protected_roots=protected, executable_sha256=authorization.executable_sha256)
         if not check["probe_authorized"]:
             raise ProbeError("scratch_authorization_denied")
+        owned_identity = (created.st_dev, created.st_ino)
         for name in _ISOLATED_DIRS:
             os.mkdir(scratch / name, 0o700)
     except BaseException:
-        try:
-            os.rmdir(scratch)
-        except OSError:
-            pass
+        if owned_identity is not None:
+            _cleanup(scratch, owned_identity)
+        else:
+            try:
+                os.rmdir(scratch)
+            except OSError:
+                pass
         raise
     return scratch, (created.st_dev, created.st_ino)
 

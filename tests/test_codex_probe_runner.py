@@ -420,6 +420,20 @@ class ScratchPathTests(RunnerCase):
         self.assertEqual(stat.S_IMODE(leftover.stat().st_mode), 0o700)
         runner.shutil.rmtree(leftover)
 
+    def test_partial_scratch_setup_is_removed_when_directory_creation_fails(self) -> None:
+        self.write_fake()
+        real_mkdir = os.mkdir
+
+        def fail_on_second_isolation_directory(path, mode=0o777):
+            if Path(path).name == "codex-home":
+                raise OSError("synthetic setup failure")
+            return real_mkdir(path, mode)
+
+        with patch.object(runner.os, "mkdir", side_effect=fail_on_second_isolation_directory):
+            with self.assertRaisesRegex(OSError, "synthetic setup failure"):
+                run_codex_probe(self.authorization(), repo_root=self.repo)
+        self.assertEqual(list(self.parent.iterdir()), [])
+
 
 class EnvironmentTests(RunnerCase):
     def test_child_sees_only_the_minimal_isolated_environment(self) -> None:

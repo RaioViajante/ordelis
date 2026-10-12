@@ -603,7 +603,8 @@ class DisclosureTests(ConfirmationCase):
         text = self.prompts[0]
         for expected in (str(self.fake), auth.executable_sha256, "--version", "--help", "exec --help",
                          str(self.parent), str(self.vault), str(self.repo), "5s per command", "20s total",
-                         "4096 output bytes", auth.probe_id, "0 authorized", "NOT guaranteed",
+                         "4096 output bytes", auth.probe_id, f"Issued at    : {auth.issued_at}",
+                         f"Expires at   : {auth.expires_at}", "0 authorized", "NOT guaranteed",
                          "Network: not restricted", "malicious process running as your user"):
             with self.subTest(expected=expected):
                 self.assertIn(expected, text)
