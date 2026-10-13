@@ -1,13 +1,16 @@
 import { useRef, useState, type KeyboardEvent } from "react";
 import { useSampleData } from "../app/SampleData";
 import { ROUTES } from "../app/routes";
-import { Empty, PageTitle, SecHead, Vision } from "../components/ui";
+import type { RuntimeErrorCode } from "../app/runtimeStatus";
+import { useRuntimeStatus } from "../app/useRuntimeStatus";
+import { Button, Empty, Evidence, PageTitle, SecHead, Vision, type EvidenceLevel } from "../components/ui";
 
 const TABS = [
   { id: "preferences", label: "Preferences" },
   { id: "limits", label: "Limits" },
   { id: "notifications", label: "Notifications" },
   { id: "security", label: "Security policies" },
+  { id: "runtime", label: "Runtime" },
 ] as const;
 type TabId = (typeof TABS)[number]["id"];
 
@@ -62,6 +65,7 @@ export function Settings() {
           </Empty>
         )}
         {tab === "security" && <Security />}
+        {tab === "runtime" && <Runtime />}
       </div>
     </div>
   );
@@ -162,5 +166,114 @@ function Security() {
         </div>
       </section>
     </>
+  );
+}
+
+// Fixed copy for every outcome. Nothing the native side sends is shown except the validated identity fields.
+const OUTCOMES: Record<RuntimeErrorCode | "unreadable", { level: EvidenceLevel; title: string; detail: string }> = {
+  runtime_not_installed: {
+    level: "unk",
+    title: "Not available in this build",
+    detail:
+      "Release builds never include the development runtime. A development build needs the dev-runtime feature and a configured interpreter.",
+  },
+  unsupported_platform: {
+    level: "unk",
+    title: "Not supported on this platform",
+    detail: "The development runtime bridge runs on macOS only.",
+  },
+  runtime_busy: {
+    level: "unk",
+    title: "Another query is running",
+    detail: "Only one runtime query runs at a time. Refresh again in a moment.",
+  },
+  runtime_unsupported_version: {
+    level: "bad",
+    title: "Unsupported runtime version",
+    detail: "The configured Python or the runtime’s answer format isn’t supported. Python 3.10 or newer is required.",
+  },
+  runtime_timeout: { level: "bad", title: "The runtime didn’t answer in time", detail: "The query was stopped after 5 seconds." },
+  runtime_output_too_large: {
+    level: "bad",
+    title: "The runtime’s answer was too large",
+    detail: "It was discarded without being shown.",
+  },
+  runtime_output_malformed: {
+    level: "bad",
+    title: "The runtime’s answer wasn’t understood",
+    detail: "It didn’t match the expected format and was discarded.",
+  },
+  runtime_failed: { level: "bad", title: "The runtime query failed", detail: "The runtime exited with an error." },
+  unreadable: {
+    level: "bad",
+    title: "Status couldn’t be read",
+    detail: "The desktop app answered with something this version doesn’t recognise, so nothing is shown.",
+  },
+};
+
+const timeOf = (ms: number) =>
+  new Date(ms).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+
+function Runtime() {
+  const { desktop, loading, result, refresh } = useRuntimeStatus();
+  const outcome = result && result.kind !== "ok" ? OUTCOMES[result.kind === "error" ? result.code : "unreadable"] : null;
+  const status = result?.kind === "ok" ? result.status : null;
+
+  const state: { level: EvidenceLevel; title: string } = !desktop
+    ? { level: "unk", title: "Browser preview" }
+    : loading
+      ? { level: "unk", title: "Checking the runtime…" }
+      : status
+        ? { level: "ver", title: "Answered by the runtime" }
+        : (outcome ?? OUTCOMES.unreadable);
+
+  return (
+    <section aria-labelledby="runtime-h" aria-busy={loading}>
+      <SecHead title={<span id="runtime-h">Runtime</span>} meta="local development environment">
+        {desktop ? (
+          <Button small aria-disabled={loading} onClick={refresh}>
+            Refresh
+          </Button>
+        ) : (
+          <Button small reason="Runtime status can only be read inside the desktop app.">
+            Refresh
+          </Button>
+        )}
+      </SecHead>
+      <div className="runtime">
+        <p role="status" aria-atomic="true">
+          <Evidence level={state.level}>{state.title}</Evidence>
+        </p>
+        {!desktop && (
+          <p className="ink2">
+            This page is running in a browser, which has no connection to the desktop app, so no runtime was queried.
+          </p>
+        )}
+        {outcome && <p className="ink2">{outcome.detail}</p>}
+        {status && (
+          <dl className="kv2">
+            <dt>Runtime version</dt>
+            <dd>{status.runtime.version}</dd>
+            <dt>Python</dt>
+            <dd>{status.runtime.python}</dd>
+            <dt>Gate policy</dt>
+            <dd>
+              version {status.gate.policy_version}
+              <span className="meta">Execution Safety Gate policy version. Metadata only: it authorizes nothing.</span>
+            </dd>
+            <dt>Source</dt>
+            <dd>Python runtime · development checkout</dd>
+            <dt>Observed</dt>
+            <dd>
+              {timeOf(status.provenance.observed_at_ms)} · answered in {status.provenance.duration_ms} ms
+            </dd>
+          </dl>
+        )}
+        <p className="meta">
+          Read once when this tab opens and again only when you press Refresh. Other pages show sample data; this section
+          never does. It doesn’t check agents, providers or models, and the runtime bridge is not a sandbox.
+        </p>
+      </div>
+    </section>
   );
 }
