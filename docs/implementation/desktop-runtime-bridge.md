@@ -67,16 +67,45 @@ React (main window) ──ACL: allow-get-runtime-status──▶ Rust command (a
 
 `build.rs` reads the file only when `dev-runtime` is enabled, rejects control characters (they could inject `cargo:` directives) and relative paths, tells Cargo to watch the file (`rerun-if-changed`, which also fires when it is first created) and bakes the path and the checkout root into the debug binary. There is no run-time lookup, no `PATH` search, no fallback to `/usr/bin/python3` and no override variable.
 
-At each request the path is checked again, because the file system may have changed after the build: it must be absolute; it is **canonicalized once** (symlinks such as Homebrew's or a virtualenv's `python` are resolved and the resolved file is what runs, so a venv symlink runs its base interpreter, which `-I -S` makes irrelevant); the target must be a regular executable file owned by the current user or root and not group- or world-writable; and its directory must be owned by the user or root and not group- or world-writable. Any failure is `runtime_not_installed`.
+At each request the path is checked again, because the file system may have changed after the build: it must be absolute; it is **canonicalized once** (symlinks such as Homebrew's or a virtualenv's `python` are resolved and the resolved file is what runs, so a venv symlink runs its base interpreter, which `-I -S` makes irrelevant); the target must be a regular file with an execute bit; and every component of the canonical path, from the file up to `/`, must be owned by the current user or root. The file and its directory must also be writable by no group or other user. Each further ancestor must not be world-writable (a sticky bit does not make one acceptable). Any failure is `runtime_not_installed`.
 
-This rejects some common installs: the python.org macOS framework package is owned by root but group-writable by `admin`, so `/Library/Frameworks/Python.framework/Versions/3.x/bin/python3.x` and its `bin` directory fail the check. Use a Homebrew or other user-owned interpreter, or run `sudo chmod g-w` on the binary and its `bin` directory. The Desktop workflow does the latter on its ephemeral runner.
+Group-writable ancestors above the interpreter's directory are accepted on purpose. Homebrew's own layout has them: `/opt/homebrew/Cellar` is `drwxrwxr-x` owned by the user, group `admin`. Rejecting them would reject the most common development interpreter on macOS. The consequence is that **every member of such a group is trusted as much as the owner**: anyone who can write that ancestor could rename the directories below it and substitute an interpreter. For `admin` that adds little, since its members can already use `sudo`; for any other group it is a real widening of trust, and choosing an interpreter under such a directory is the developer's decision.
+
+### Choosing an interpreter
+
+Use an interpreter that you own and that no one else can write:
+
+| Option | Passes the check | Trust it adds |
+| --- | --- | --- |
+| Homebrew (`/opt/homebrew/opt/python@3.x/bin/python3.x`) | Yes (verified locally) | Your account and the `admin` group (Homebrew's `Cellar` is group-writable) |
+| pyenv or uv-managed Python under your home directory | Expected yes (not verified here) | Your account only |
+| A virtualenv | Only if its base interpreter passes: the venv's `python` symlink is resolved and its base interpreter runs | Whatever the base interpreter needs |
+| python.org framework package (`/Library/Frameworks/Python.framework/...`) | No: owned by root but group-writable by `admin` | n/a |
+| Apple's `/usr/bin/python3` | Passes ownership, but is a 3.9 shim on many systems and then reports `runtime_unsupported_version` | System |
+
+Do not change the permissions of a shared installation such as the python.org framework to make it pass. That affects every account and every installer that expects to write there, and it hides the condition the check exists to report. The Desktop workflow does tighten that framework on its runner, because the runner is a throwaway VM; that adjustment is CI-only.
 
 ## Release isolation
 
 - `dev-runtime` is **off by default** and is the only feature.
 - The process code (`runtime_bridge/process.rs`) is compiled only with `dev-runtime` on macOS (and in tests). Without it `get_runtime_status` returns `runtime_not_installed` and there is no spawn code, interpreter path or checkout path in the binary.
 - `dev-runtime` with a release profile fails the build: `build.rs` checks Cargo's `PROFILE`, and `lib.rs` has a `compile_error!` for builds without debug assertions. `debug_assertions` alone is not the gate, because a profile can turn it on.
-- A debug `.app` built with `dev-runtime` contains the interpreter and checkout paths. **It must never be distributed.** `desktop/scripts/verify-release-isolation.sh` detects this: it searches the bundle for the checkout path, any configured interpreter path and the bridge's marker strings, rejects Python files, and rejects non-system libraries. It was run against the real `pnpm tauri build --bundles app` output (passes) and against a `dev-runtime` debug binary (fails, as intended).
+- A debug `.app` built with `dev-runtime` contains the interpreter and checkout paths and the process code. **It must never be distributed.** Nothing in the repository stops someone running `pnpm tauri build --debug --features dev-runtime --bundles app,dmg` and handing out the result: the build succeeds by design, since that is how the bridge is developed. Preventing that on every distribution path needs a packaging and signing control (for example a release pipeline that only signs or notarizes artifacts the verifier accepted), which is a separate increment. Until then the guarantee is: the documented release build cannot contain the bridge, and the verifier below detects one that does.
+
+### Artifact verifier
+
+`desktop/scripts/verify-release-isolation.sh <Synapse.app>` exits 0 only after inspecting the executable that `Contents/Info.plist` names, which must be `synapse-desktop`, a regular non-symlink readable executable, and Mach-O (`lipo -archs`). It exits 2 if the bundle cannot be inspected: bad layout, missing or invalid executable, or any failure of `PlistBuddy`, `lipo`, `otool`, `nm`, `grep`, `find` or `shasum`. It exits 1 on any of these independent kinds of evidence:
+
+1. **Paths and markers** anywhere in the bundle: the checkout path, the configured interpreter path, `.dev-python`, `runtime-bridge`, `status.py`, `SYNAPSE_DEV_PYTHON`, `SYNAPSE_DEV_CHECKOUT` and the source path `runtime_bridge/process.rs` (present through panic locations whenever that module is compiled).
+2. **Imported `_killpg`.** Only the bridge's cleanup code uses it. The release binary imports none, and the `dev-runtime` binary does.
+3. **Python files** of any kind.
+4. **Non-system libraries** in `otool -L`.
+
+On success it prints the executable's name, SHA-256 and the number of libraries and imported symbols inspected.
+
+What these checks cannot establish: that the release binary can start no process at all. Tauri and std already import `posix_spawnp`, `setpgid` and `poll` in the release binary, so their absence is not a usable signal. The proof that the bridge's spawn path is absent is the `cfg` gating at compile time. The artifact checks are an independent tripwire for regressions of that gating, not a substitute for it. A deliberately obfuscated build would evade string and symbol scans.
+
+`desktop/scripts/test-verify-release-isolation.sh` tests the verifier with fixture bundles: missing or symlinked executable, empty `Contents/MacOS`, missing `Contents` or `Info.plist`, an unexpected executable name, a non-Mach-O or unreadable executable, `nm` and `otool` failing (with and without partial output), `nm` reporting no symbols, an unreadable file inside the bundle, and each kind of evidence on its own. Given a real bundle built with `--features dev-runtime`, it also requires the verifier to reject that bundle through the `_killpg`, source-marker and checkout-path checks. CI runs both against the real artifacts.
 - Nothing bundles Python or the checkout; `tauri.conf.json` resources are unchanged.
 - Windows and Linux builds (with or without the feature) answer `unsupported_platform`. The bridge code is Unix-only and has only been exercised on macOS.
 
@@ -95,6 +124,7 @@ This rejects some common installs: the python.org macOS framework package is own
 | UI thread | never blocked: the command is `async` and the work runs on `spawn_blocking` |
 | process group | the child leads its own group (`process_group(0)`) |
 | failure cleanup | `SIGKILL` to the group, then `wait` to reap, before returning the error |
+| success | the direct child has exited and been reaped; the group is **not** signalled, so a descendant that closed stdout and kept running would outlive the request (the shipped script starts none, and the Python tests forbid process creation) |
 
 `-I` (isolated), `-S` (no `site`) and `-B` (no bytecode) narrow what Python loads and writes. They are not OS sandboxing.
 
@@ -102,17 +132,17 @@ No reader thread exists, so none can be abandoned. The 5 s figure is the deadlin
 
 ## Import closure
 
-The query imports `runtime/__init__` (which imports `artifacts` and `contracts`) and `runtime.execution_safety_gate` for `POLICY_VERSION`. The gate is deliberately unchanged, and its own imports bring in `runtime_validation`, `synapse_plan`, `config`, `vault_context`, `policy`, `execution_modes`, `answer_transport` and `types`. That closure is **not reduced**: the only way to avoid it without editing the gate would be to scrape the constant out of the source text, which is worse than importing the real value. Importing these modules reads nothing from a vault, project or configuration. The exact 12-module closure is pinned in `tests/test_runtime_status_bridge.py`; adding a module fails the test and needs review.
+The query imports `runtime/__init__` (which imports `artifacts` and `contracts`) and `runtime.execution_safety_gate` for `POLICY_VERSION`. The gate is deliberately unchanged, and its own imports bring in `runtime_validation`, `synapse_plan`, `config`, `vault_context`, `policy`, `execution_modes`, `answer_transport` and `types`. That closure is **not reduced**: the only way to avoid it without editing the gate would be to scrape the constant out of the source text, which is worse than importing the real value. Importing these modules reads nothing from a vault, project or configuration file. One import-time side effect exists: `runtime/config.py` computes its default `~/.mco` path with `os.path.expanduser("~")`, which reads the `HOME` variable (the value only; no file is opened, and the output never contains it). The Python tests pin environment access to exactly `HOME`. The exact 12-module closure is pinned in `tests/test_runtime_status_bridge.py`; adding a module fails the test and needs review.
 
 ## Evidence
 
 | Area | Tests |
 | --- | --- |
-| Python (`tests/test_runtime_status_bridge.py`, 9) | exact keys and values; no path/env/provenance in output; unsupported version before runtime imports; bootstrap syntax; pinned import closure; no CLI/adapter/session/MCP modules; audit-hook tripwire for socket, subprocess, exec/fork, ctypes, mutation and write opens with canary files and variables; only checkout `runtime/`, the bridge directory and the standard library are read; no bytecode written |
-| Rust bridge (`runtime_bridge/process/tests.rs`) | valid report; Rust-set provenance; child-supplied provenance, unknown, duplicate, missing and mistyped fields, bad strings, trailing data rejected; unsupported schema; exit 78; other failures never echo output; missing interpreter; oversize stops and reaps the child; exact-limit boundary; timeout reaps the child **and** its same-group descendant; early-closed stdout still times out; 4 MB stderr flood; cleared hostile environment, `cwd` `/`, null stdin; non-CLOEXEC descriptor not inherited; second concurrent call is busy then recovers; fixed error messages; serialized shape; interpreter validation (relative, missing, directory, non-executable, writable file or directory, symlink resolution) |
+| Python (`tests/test_runtime_status_bridge.py`, 11) | exact keys and values; no path/env/provenance in output; unsupported version before runtime imports; bootstrap syntax; pinned import closure; no CLI/adapter/session/MCP modules; audit-hook tripwire for socket, subprocess, exec/fork, ctypes, mutation and write opens; opens and directory listings resolved against the child's own working directory, with canary files in the cwd and `HOME`; directory listings limited to the import system's search of the standard library, the checkout root and `runtime/`; environment reads limited to `HOME` (see below); only checkout `runtime/`, the bridge directory and the standard library are read; no bytecode written |
+| Rust bridge (`runtime_bridge/process/tests.rs`) | valid report; Rust-set provenance; child-supplied provenance, unknown, duplicate, missing and mistyped fields, bad strings, trailing data rejected; unsupported schema; exit 78; other failures never echo output; missing interpreter; oversize stops and reaps the child; exact-limit boundary; timeout reaps the child **and** its same-group descendant; early-closed stdout still times out; 4 MB stderr flood; cleared hostile environment, `cwd` `/`, null stdin; non-CLOEXEC descriptor not inherited; second concurrent call is busy then recovers; fixed error messages; serialized shape; interpreter validation (relative, missing, directory, non-executable, writable file or directory, symlink resolution, world-writable grandparent, Homebrew-like group-writable ancestor, foreign owner at every depth, world-writable `/`); child stderr goes to `/dev/null` and a stderr canary never reaches the parent's fd 2; zero `policy_version` rejected |
 | Rust with `--features dev-runtime` | fixed argv; real end-to-end call against the configured interpreter, checking the version against `pyproject.toml` |
 | Tauri ACL (`lib.rs`) | both commands callable from `tauri://localhost` in `main`; unlisted and unknown commands, other windows, remote origins and core/plugin commands denied; grant removal denies both; payload ignored; exact generated permission files; manifest, handler and capability name the same two commands |
-| Release | `cargo test --release` (default features) returns the unavailable error; `verify-release-isolation.sh` on the real release bundle; `dev-runtime` + release profile fails to build |
+| Release | `cargo test --release` (default features) returns the unavailable error; `verify-release-isolation.sh` accepts the real release bundle; `test-verify-release-isolation.sh` with fixtures and the real `dev-runtime` bundle; `dev-runtime` + release profile fails to build |
 
 CI (`.github/workflows/desktop.yml`) installs Python 3.10, runs these, and triggers on `runtime/**` as well as `desktop/**`. `gate.yml` still runs the full Python suite, Node tests, version and skill checks and the npm packaging smoke on every pull request; that smoke does not validate the desktop crate.
 
@@ -124,4 +154,6 @@ CI (`.github/workflows/desktop.yml`) installs Python 3.10, runs these, and trigg
 - Audit-hook tests are regression tripwires inside Python, not proof of confinement. Native extension code can bypass them.
 - Only Python 3.14 was run locally; CI uses 3.10, the supported minimum. Unsupported-version handling on a real old interpreter was tested through the function with a stand-in version tuple, not a real 3.9 binary.
 - macOS only. Release builds were not signed or notarized.
+- The interpreter checks accept group-writable ancestors above its directory, trusting those groups (see [Choosing an interpreter](#choosing-an-interpreter)).
+- A `dev-runtime` debug bundle can still be built and handed out; see [Release isolation](#release-isolation).
 - Closing inherited descriptors relies on marking, which assumes no descriptor 3–`OPEN_MAX` is needed after exec.
