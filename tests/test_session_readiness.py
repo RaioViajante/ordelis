@@ -17,7 +17,7 @@ import types
 import unittest
 from unittest.mock import patch
 
-from runtime.session.client import queue_status, stop_session
+from runtime.session.client import queue_status, send_prompt, stop_session
 from runtime.session.daemon import run_daemon, _socket_path
 from runtime.session.state import SessionState, load_state, save_state
 from tests.session_helpers import wait_for_daemon_ready
@@ -162,6 +162,14 @@ class TestSequentialStartups(_DaemonReadinessTestCase):
             status = queue_status(self.tmp, _NAME)
             self.assertEqual(status["running"], None)
             self.assertEqual(status["queued"], 0)
+
+            # The first real request still gets the first request id and is dispatched once.
+            with patch("runtime.session.daemon._dispatch_prompt") as mock_dispatch:
+                mock_dispatch.return_value = {"success": True, "response": "ok", "wall_clock_seconds": 0.0}
+                result = send_prompt(self.tmp, _NAME, "hello")
+            self.assertEqual(result["status"], "ok")
+            self.assertEqual(result["request_id"], 1)
+            self.assertEqual(mock_dispatch.call_count, 1)
 
             stop_session(self.tmp, _NAME)
             t.join(timeout=_WAIT)
