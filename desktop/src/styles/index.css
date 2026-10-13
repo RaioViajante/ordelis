@@ -1261,6 +1261,19 @@
     padding: 0 4px 10px;
     border-bottom-color: var(--line-200);
   }
+  .runtime {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    max-width: 720px;
+  }
+  .runtime .kv2 > dd {
+    overflow-wrap: anywhere;
+  }
+  .runtime dd .meta {
+    display: block;
+    font-family: var(--font-sans);
+  }
 
   /* Narrower windows */
   @media (max-width: 1100px) {

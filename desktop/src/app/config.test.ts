@@ -60,10 +60,36 @@ describe("desktop trust boundary", () => {
     expect(conf.bundle.externalBin).toBeUndefined();
   });
 
-  it("ships no frontend dependency on Tauri APIs or network clients", () => {
+  // Reviewed in issue #40: the frontend may depend on @tauri-apps/api, and only to call get_runtime_status.
+  it("depends only on @tauri-apps/api, pinned to the Rust tauri crate's version", () => {
     const pkg = JSON.parse(read("package.json"));
     const deps = Object.keys({ ...pkg.dependencies });
-    expect(deps.filter((d) => d.startsWith("@tauri-apps"))).toEqual([]);
+    expect(deps.filter((d) => d.startsWith("@tauri-apps"))).toEqual(["@tauri-apps/api"]);
+    const crate = read("src-tauri/Cargo.lock").match(/name = "tauri"\nversion = "([^"]+)"/)?.[1];
+    expect(pkg.dependencies["@tauri-apps/api"]).toBe(crate);
+  });
+
+  it("calls exactly one native command, from one module, with no arguments", () => {
+    const files: string[] = [];
+    const walk = (dir: string) => {
+      for (const name of readdirSync(dir)) {
+        const p = join(dir, name);
+        if (statSync(p).isDirectory()) walk(p);
+        else if (/\.tsx?$/.test(name) && !/\.test\.tsx?$/.test(name)) files.push(p);
+      }
+    };
+    walk(join(root, "src"));
+    const users = files.filter((f) => readFileSync(f, "utf8").includes("@tauri-apps"));
+    expect(users).toEqual([join(root, "src", "app", "runtimeStatus.ts")]);
+
+    const adapter = read("src/app/runtimeStatus.ts");
+    expect(adapter.match(/from "@tauri-apps[^"]*"/g)).toEqual(['from "@tauri-apps/api/core"']);
+    expect(adapter).toMatch(/^import \{ invoke, isTauri \} from "@tauri-apps\/api\/core";$/m);
+    expect(adapter).toMatch(/^const COMMAND = "get_runtime_status";$/m);
+    // One call site, with the fixed name and nothing else; invoke itself is never handed to other code.
+    expect(adapter.match(/\binvoke\b/g)).toHaveLength(2);
+    expect(adapter).toMatch(/\binvoke\(COMMAND\)/);
+    expect(adapter).not.toMatch(/export[^\n]*\binvoke\b(?!\()|export \{|export \*/);
   });
 
   it("references no remote URL from the app sources", () => {

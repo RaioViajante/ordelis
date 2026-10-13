@@ -1,6 +1,6 @@
 # Development-only Python runtime bridge
 
-[Issue #36](https://github.com/RaioViajante/synapse/issues/36). The second step of the native runtime integration plan, after the [IPC authorization](desktop-architecture.md#ipc-authorization) of PR #33. The desktop Rust backend can ask one fixed question of the Python runtime, "what are you?", through one authorized command, `get_runtime_status`. **It is a development tool.** A default or release build cannot start Python, and no UI uses the command yet.
+[Issue #36](https://github.com/RaioViajante/synapse/issues/36). The second step of the native runtime integration plan, after the [IPC authorization](desktop-architecture.md#ipc-authorization) of PR #33. The desktop Rust backend can ask one fixed question of the Python runtime, "what are you?", through one authorized command, `get_runtime_status`. **It is a development tool.** A default or release build cannot start Python. The Settings → Runtime tab ([issue #40](https://github.com/RaioViajante/synapse/issues/40)) is its only caller; see [Runtime status in Settings](#runtime-status-in-settings).
 
 This is not a sandbox, not provider authorization and not isolation from a same-user attacker. Launching a process is a security boundary even when the question is read-only, so the bridge fails closed whenever its environment, interpreter or answer cannot be trusted for this narrow contract.
 
@@ -142,9 +142,32 @@ The query imports `runtime/__init__` (which imports `artifacts` and `contracts`)
 | Rust bridge (`runtime_bridge/process/tests.rs`) | valid report; Rust-set provenance; child-supplied provenance, unknown, duplicate, missing and mistyped fields, bad strings, trailing data rejected; unsupported schema; exit 78; other failures never echo output; missing interpreter; oversize stops and reaps the child; exact-limit boundary; timeout reaps the child **and** its same-group descendant; early-closed stdout still times out; 4 MB stderr flood; cleared hostile environment, `cwd` `/`, null stdin; non-CLOEXEC descriptor not inherited; second concurrent call is busy then recovers; fixed error messages; serialized shape; interpreter validation (relative, missing, directory, non-executable, writable file or directory, symlink resolution, world-writable grandparent, Homebrew-like group-writable ancestor, foreign owner at every depth, world-writable `/`); child stderr goes to `/dev/null` and a stderr canary never reaches the parent's fd 2; zero `policy_version` rejected |
 | Rust with `--features dev-runtime` | fixed argv; real end-to-end call against the configured interpreter, checking the version against `pyproject.toml` |
 | Tauri ACL (`lib.rs`) | both commands callable from `tauri://localhost` in `main`; unlisted and unknown commands, other windows, remote origins and core/plugin commands denied; grant removal denies both; payload ignored; exact generated permission files; manifest, handler and capability name the same two commands |
+| Frontend (issue #40) | adapter validation and error mapping; Settings → Runtime states and lifecycle; only `runtimeStatus.ts` imports `@tauri-apps/api` and it calls only this command (see [Runtime status in Settings](#runtime-status-in-settings)) |
 | Release | `cargo test --release` (default features) returns the unavailable error; `verify-release-isolation.sh` accepts the real release bundle; `test-verify-release-isolation.sh` with fixtures and the real `dev-runtime` bundle; `dev-runtime` + release profile fails to build |
 
 CI (`.github/workflows/desktop.yml`) installs Python 3.10, runs these, and triggers on `runtime/**` as well as `desktop/**`. `gate.yml` still runs the full Python suite, Node tests, version and skill checks and the npm packaging smoke on every pull request; that smoke does not validate the desktop crate.
+
+## Runtime status in Settings
+
+[Issue #40](https://github.com/RaioViajante/synapse/issues/40). **Settings → Runtime** shows the answer. It is observability only: it does not check agents, providers, models or authentication, and a successful answer says nothing about readiness to run anything.
+
+| Field | Meaning |
+| --- | --- |
+| Runtime version | `runtime.version`, the version the checkout's Python runtime reports |
+| Python | `runtime.python`, the interpreter version that answered |
+| Gate policy | `gate.policy_version`, the Execution Safety Gate's static `POLICY_VERSION`. Metadata only: it is not a gate decision and authorizes nothing |
+| Source | Fixed copy for `python_runtime` / `dev_checkout`: the Python runtime of this development checkout. No path is shown |
+| Observed | Local time from `observed_at_ms` and the request's `duration_ms` |
+
+**When it queries.** Once when the Runtime tab opens, and again only when Refresh is pressed. There is no polling and no automatic retry, including after `runtime_busy`. A request already in flight is shared rather than repeated, so repeated clicks, React Strict Mode's second effect run and leaving and reopening the tab never start a second request; the bridge's own one-request limit stays the backstop. The tab unmounts when hidden, so it never queries in the background, and a late answer for an unmounted tab is dropped. Answers live in component state only; nothing is written to `localStorage` or any other storage.
+
+**Browser preview.** `pnpm dev` in a browser has no Tauri IPC. The section checks `isTauri()` from `@tauri-apps/api/core` and, outside Tauri, makes no call and says it is a browser preview. That check only decides whether to try: whether the command is allowed and available is decided by the native answer, never by `isTauri()`, `__TAURI_INTERNALS__` or the build mode.
+
+**Release builds.** A default or release build answers `runtime_not_installed`, shown as *Not available in this build*. Non-macOS builds answer `unsupported_platform`, shown as *Not supported on this platform*.
+
+**Adapter.** `desktop/src/app/runtimeStatus.ts` is the only module that imports `@tauri-apps/api` (exactly `invoke` and `isTauri` from `core`). It calls `invoke("get_runtime_status")` with the name in one constant and no arguments, and exports no general invoke. Each answer is validated before display: exact keys at every level, `schema_version` 1, `source` `python_runtime`, `interpreter_kind` `dev_checkout`, `observed_at_ms` a positive safe integer that `Date` can represent, `duration_ms` a non-negative safe integer, identity strings matching the Rust rule (1–32 of `[A-Za-z0-9._+-]`), and `policy_version` an integer from 1 to 2³²−1. Anything else, including a rejection that isn't exactly `{ code, message }` with a known code (an ACL denial, for example), becomes *Status couldn't be read*. Each known code has fixed frontend copy; the native `message` and any other native text are never rendered.
+
+Tests: `src/app/runtimeStatus.test.ts` (command name, empty payload, in-flight sharing, every error code, sensitive-text rejection, about 30 malformed shapes) and `src/app/Runtime.test.tsx` (each state, refresh, no polling, unmount, Strict Mode, keyboard, status announcement). Both use `mockIPC` from `@tauri-apps/api/mocks`; production code has no fallback answer.
 
 ## Remaining limitations
 

@@ -74,3 +74,20 @@ Captures are **WebKit through Playwright against the production build, not the T
 The debug `Synapse.app` was built and launched, but no native Sessions screenshot exists: the window could not be driven or captured reliably (the keystroke went to another app), so no native claim is made. The sample-data-off empty state is covered by tests rather than a new capture; `sessions-empty-1440.png` still shows it.
 
 Differences from reference page 3: a search and two filters above the table, a "Details" link per row, a fifth (blocked) sample session, "Worktree" fed from the sample project's HEAD (`main @ 9b04e7d`) rather than an invented hash, and the "Requires" row reading "advertised, not verified" or "not checked" instead of a verified claim. The timeline is a recorded-sample list, not the reference's terminal block, and carries offsets instead of wall-clock times so it implies no real time. Not compared: the PDF itself (no PDF renderer was available), so pages 3, 11, 15 and 16 were read from their PNG exports.
+
+## Runtime status (issue #40)
+
+Captures are **WebKit through Playwright against the Vite dev server, not the Tauri WKWebView**, so they show the real browser-preview state (no IPC, no mocks): [1280 wide](../assets/desktop/runtime-browser-preview-1280-webkit.png) and [the 760 minimum](../assets/desktop/runtime-browser-preview-760-webkit.png). No page-level horizontal overflow at either width.
+
+No native screenshot exists. The release `Synapse.app` was rebuilt and launched, and `⌘6` reached Settings, but macOS would not bring the window forward for the Runtime tab to be selected, so neither the release "Not available in this build" state nor a `dev-runtime` success was captured. Nothing was mocked into a screenshot to stand in for them.
+
+What each kind of evidence covers:
+
+| Evidence | Covers | Does not cover |
+| --- | --- | --- |
+| The two screenshots above | The browser-preview state, rendered by WebKit | Any native state, the Tauri WKWebView |
+| `Runtime.test.tsx`, `runtimeStatus.test.ts` (jsdom, `mockIPC`) | How the UI validates and shows each native answer shape, error code and lifecycle case, using mocked IPC responses | A real IPC call or real rendering |
+| `cargo test` (default and `--release`) | The real `runtime_not_installed` answer and the IPC authorization rules | The webview |
+| `cargo test --features dev-runtime` | A real call from Rust to the configured Python runtime, passing locally and in CI | The webview and the frontend |
+
+**Not verified:** the end-to-end native path, from the WKWebView through IPC to the rendered Runtime tab. No test or capture exercises it.
