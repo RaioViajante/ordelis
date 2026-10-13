@@ -75,14 +75,14 @@ describe("Home composer", () => {
     expect(toggle).toHaveAttribute("aria-expanded", "false");
     await user.click(toggle);
     expect(toggle).toHaveAttribute("aria-expanded", "true");
-    const group = screen.getByRole("group", { name: /Sample notes for atlas-api/ });
+    const group = screen.getByRole("group", { name: /Sample context for atlas-api/ });
     await user.click(within(group).getByRole("checkbox", { name: /Security \/ Tokens/ }));
     expect(within(group).getByRole("checkbox", { name: /Security \/ Tokens/ })).toBeChecked();
-    expect(screen.getByText("1 of 3 selected")).toBeInTheDocument();
+    expect(screen.getByText("1 of 5 selected")).toBeInTheDocument();
     expect(status()).toHaveTextContent("Security / Tokens added to sample context");
-    await user.selectOptions(projectSelect(), "mochi-web");
-    expect(screen.queryByRole("group", { name: /Sample notes/ })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Select context" })).toHaveAccessibleDescription(/no vault/i);
+    await user.selectOptions(projectSelect(), "synapse");
+    expect(screen.queryByRole("group", { name: /Sample context/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Select context" })).toHaveAccessibleDescription(/no sample context/i);
   });
 
   it("offers only a preview action, disabled with a reason until there is a draft", async () => {
@@ -167,7 +167,7 @@ describe("Home composer", () => {
     await user.click(screen.getByRole("button", { name: "Select context" }));
 
     expect(screen.getByRole("checkbox", { name: /Security \/ Tokens/ })).not.toBeChecked();
-    expect(screen.getByText("3 suggested")).toBeInTheDocument();
+    expect(screen.getByText("5 available")).toBeInTheDocument();
   });
 });
 

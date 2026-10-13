@@ -91,7 +91,7 @@ function ShellFrame() {
           {route === "task" && <TaskPreview id={loc.param} go={go} />}
           {route === "preview" && <DraftPreview go={go} />}
           {route === "sessions" && <Sessions />}
-          {route === "context" && <Context />}
+          {route === "context" && <Context go={go} />}
           {route === "agents" && <Agents />}
           {route === "settings" && <Settings />}
         </div>

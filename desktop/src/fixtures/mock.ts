@@ -59,8 +59,6 @@ export interface MockProject {
   worktrees: string;
   wts: { id: string; task: string; agent: string; tone: StatusTone; state: string }[];
   vault?: { name: string; notes: string };
-  /** Sample note suggestions for the composer; empty when the project has no vault. */
-  suggestions: { id: string; title: string; where: string }[];
   tasks: { id: string; name: string; tone: StatusTone; state: string }[];
 }
 
@@ -71,7 +69,7 @@ export const MOCK_PROJECTS: MockProject[] = [
     line: "4 tasks · 2 sessions running",
     stages: [
       { label: "Workspace", tone: "ok", text: "3 worktrees" },
-      { label: "Context", tone: "ok", text: "vault · 4 notes linked" },
+      { label: "Context", tone: "ok", text: "sample vault · 4 sample notes" },
       { label: "Sessions", tone: "you", text: "1 running · 1 paused" },
       { label: "Changes", tone: "warn", text: "1 approved, not applied" },
     ],
@@ -85,11 +83,6 @@ export const MOCK_PROJECTS: MockProject[] = [
       { id: "9c1e", task: "Fix pagination on /notes", agent: "claude-code", tone: "you", state: "approved · not applied" },
     ],
     vault: { name: "Cérebro", notes: "Projects/Atlas, Decisions/Auth 2026, Security, #backend" },
-    suggestions: [
-      { id: "tokens", title: "Security / Tokens", where: "Refresh" },
-      { id: "auth-2026", title: "Decisions / Auth 2026", where: "Decisions" },
-      { id: "journal", title: "Journal / October 2", where: "Journal" },
-    ],
     tasks: [
       { id: "move-auth", name: "Move auth to server-side sessions", tone: "you", state: "terminals" },
       { id: "note-search", name: "Speed up note search", tone: "you", state: "paused" },
@@ -112,7 +105,6 @@ export const MOCK_PROJECTS: MockProject[] = [
     dirty: "clean",
     worktrees: "none",
     wts: [],
-    suggestions: [],
     tasks: [{ id: "onboarding-copy", name: "Draft onboarding copy", tone: "wait", state: "not started" }],
   },
   {
@@ -130,7 +122,6 @@ export const MOCK_PROJECTS: MockProject[] = [
     dirty: "clean",
     worktrees: "none",
     wts: [],
-    suggestions: [],
     tasks: [],
   },
   {
@@ -148,7 +139,6 @@ export const MOCK_PROJECTS: MockProject[] = [
     dirty: "—",
     worktrees: "none",
     wts: [],
-    suggestions: [],
     tasks: [],
   },
 ];
@@ -171,18 +161,93 @@ export const MOCK_SESSIONS: MockSession[] = [
   { id: "9c1e", agent: "cc", agentName: "claude-code", task: "Fix pagination on /notes", project: "atlas-api", state: "finished · exit 0", tone: "done", wt: "9c1e" },
 ];
 
-export const MOCK_CONTEXT = {
-  vaultName: "Cérebro",
-  notes: "1,284 notes · 4 linked to atlas-api",
-  path: "~/Obsidian/Cérebro",
-  index: "1,284 notes · 23:10",
-  stored: "~/.local/share/synapse",
-  results: [
-    { src: "your notes", where: "Security / Tokens", sub: "Refresh", tok: "1,200 of 1,900 tok", trimmed: true, text: "Every refresh token works once; presenting a spent one revokes the whole family…" },
-    { src: "your notes", where: "Journal / October 2", tok: "380 tok", text: "The iOS client resends the refresh token in parallel when it returns from the background…" },
-  ],
-  history: { where: "Decision · Oct 12, 23:27", tok: "64 tok", text: "“Accept old JWTs for 30 days” — decided by you in Move auth to sessions." },
+export type ContextSource = "notes" | "history" | "suggestion";
+
+export interface ContextEntry {
+  id: string;
+  source: ContextSource;
+  project: string;
+  title: string;
+  where: string;
+  /** Full synthetic text. The page shows a deliberately shortened excerpt of it. */
+  text: string;
+  /** Where this record comes from. Always a statement that it is invented. */
+  provenance: string;
+  /** Set when the record exists but cannot be used; the value is the reason shown. */
+  unavailable?: string;
+}
+
+export const SOURCE_LABEL: Record<ContextSource, string> = {
+  notes: "your notes",
+  history: "private history",
+  suggestion: "pending suggestion",
 };
+
+const NOTE = "Synthetic sample note, invented for this UI. Not read from a vault.";
+const HIST = "Synthetic sample decision, invented for this UI. No task ever recorded it.";
+const SUG = "Synthetic sample draft, invented for this UI. Nothing generated it.";
+
+export const MOCK_CONTEXT_ENTRIES: ContextEntry[] = [
+  {
+    id: "tokens", source: "notes", project: "atlas-api", title: "Security / Tokens", where: "Refresh", provenance: NOTE,
+    text: "Every refresh token works once. When used, the server issues a new pair and marks the old one spent. If a spent token comes back, the whole family is revoked. Clients must store the newest refresh token before they discard the previous one, otherwise a crash between the two steps locks the user out. Access tokens live for fifteen minutes and are never stored server-side. Revocation lists are keyed by family id and kept for the refresh lifetime plus one day. Device names shown to users come from the client at login and are never trusted for anything else.",
+  },
+  {
+    id: "auth-2026", source: "notes", project: "atlas-api", title: "Decisions / Auth 2026", where: "Expiry", provenance: NOTE,
+    text: "Sessions expire after 30 days of inactivity. Old JWTs stay valid for the same 30 days so that signed-in clients are not logged out by the migration.",
+  },
+  {
+    id: "journal", source: "notes", project: "atlas-api", title: "Journal / October 2", where: "Journal", provenance: NOTE,
+    text: "The iOS client resends the refresh token in parallel when it returns from the background. Worth remembering when a reuse alarm fires.",
+  },
+  {
+    id: "runbook", source: "notes", project: "atlas-api", title: "Runbooks / Old deploys", where: "Archive", provenance: NOTE,
+    text: "Retired deploy steps.", unavailable: "this sample record is marked unavailable",
+  },
+  {
+    id: "hist-jwt", source: "history", project: "atlas-api", title: "Decision · Oct 12", where: "Move auth to sessions", provenance: HIST,
+    text: "“Accept old JWTs for 30 days” — decided by you in Move auth to sessions.",
+  },
+  {
+    id: "hist-prisma", source: "history", project: "atlas-api", title: "Decision · Prisma upgrade", where: "Oct 8", provenance: HIST,
+    text: "Pin Prisma to the current major until the migration of the notes table is finished.",
+  },
+  {
+    id: "hist-copy", source: "history", project: "mochi-web", title: "Decision · Tone of voice", where: "Oct 3", provenance: HIST,
+    text: "Onboarding copy stays short and avoids exclamation marks.",
+  },
+  {
+    id: "sug-rotation", source: "suggestion", project: "atlas-api", title: "Security / Rotation", where: "Draft", provenance: SUG,
+    text: "Draft: refresh tokens rotate on every use, and reuse revokes the whole family.",
+  },
+  {
+    id: "sug-ios", source: "suggestion", project: "atlas-api", title: "Journal / iOS resend", where: "Draft", provenance: SUG,
+    text: "Draft: the iOS client may send the same refresh token twice when it resumes.",
+  },
+];
+
+/** Records that are malformed (missing text, unknown source, duplicate id) are dropped, never shown. */
+export function usableEntries(entries: ContextEntry[]): ContextEntry[] {
+  const seen = new Set<string>();
+  return entries.filter((e) => {
+    const ok =
+      !!e.id &&
+      !seen.has(e.id) &&
+      (e.source in SOURCE_LABEL) &&
+      !!findProject(e.project) &&
+      !!e.title?.trim() &&
+      !!e.text?.trim() &&
+      !!e.provenance?.trim();
+    if (ok) seen.add(e.id);
+    return ok;
+  });
+}
+
+export const entriesFor = (project: string | null | undefined) =>
+  project ? usableEntries(MOCK_CONTEXT_ENTRIES).filter((e) => e.project === project) : [];
+
+/** Drafts and unavailable records can be read but never become context. */
+export const isSelectable = (e: ContextEntry) => e.source !== "suggestion" && !e.unavailable;
 
 export const findProject = (name: string | null | undefined) => MOCK_PROJECTS.find((p) => p.name === name);
 export const findTask = (id: string | undefined) => MOCK_TASKS.find((t) => t.id === id);

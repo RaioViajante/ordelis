@@ -2,15 +2,14 @@ import { useState } from "react";
 import { useSampleData } from "../app/SampleData";
 import { hrefFor, type Location } from "../app/routes";
 import { useWorkspace } from "../app/Workspace";
-import { findProject, MOCK_PROJECTS, MOCK_TASKS, MOCK_WAITING } from "../fixtures/mock";
+import { MOCK_PROJECTS, SOURCE_LABEL, MOCK_TASKS, MOCK_WAITING } from "../fixtures/mock";
 import { Agent, Button, SecHead, Select } from "../components/ui";
 
 export function Home({ go }: { go: (page: Location["page"], param?: string) => void }) {
   const { on } = useSampleData();
-  const { project, selectProject, draft, setDraft, clearDraft, contextIds, toggleContext } = useWorkspace();
+  const { project, selectProject, draft, setDraft, clearDraft, selectable: suggestions, contextIds, toggleContext } = useWorkspace();
   const [picking, setPicking] = useState(false);
-  const suggestions = findProject(project)?.suggestions ?? [];
-  const chosen = contextIds.filter((id) => suggestions.some((s) => s.id === id)).length;
+  const chosen = contextIds.length;
   const blocker = !on
     ? "Sample data is hidden and this build cannot add projects yet."
     : !project
@@ -59,8 +58,8 @@ export function Home({ go }: { go: (page: Location["page"], param?: string) => v
               context:{" "}
               {on && suggestions.length > 0 ? (
                 <>
-                  <span className="prov prov--you">your notes</span>{" "}
-                  <span className="meta">{chosen ? `${chosen} of ${suggestions.length} selected` : `${suggestions.length} suggested`}</span>
+                  <span className="prov prov--you">sample context</span>{" "}
+                  <span className="meta">{chosen ? `${chosen} of ${suggestions.length} selected` : `${suggestions.length} available`}</span>
                 </>
               ) : (
                 <span className="meta">none selected</span>
@@ -77,7 +76,7 @@ export function Home({ go }: { go: (page: Location["page"], param?: string) => v
                   Select context
                 </Button>
               ) : (
-                <Button reason={on ? "This project has no vault, so there are no notes to suggest." : "No sample notes while sample data is hidden."}>
+                <Button reason={on ? "This project has no sample context entries." : "No sample context while sample data is hidden."}>
                   Select context
                 </Button>
               )}
@@ -88,14 +87,17 @@ export function Home({ go }: { go: (page: Location["page"], param?: string) => v
           </div>
           {picking && on && suggestions.length > 0 && (
             <fieldset className="ctx-pick" id="ctx-pick">
-              <legend className="t-label">Sample notes for {project} · nothing is read or sent</legend>
+              <legend className="t-label">Sample context for {project} · nothing is read or sent</legend>
               {suggestions.map((n) => (
                 <label key={n.id}>
                   <input type="checkbox" checked={contextIds.includes(n.id)} onChange={() => toggleContext(n.id)} />
                   <span>{n.title}</span>
-                  <span className="meta">{n.where}</span>
+                  <span className="meta">{SOURCE_LABEL[n.source]}</span>
                 </label>
               ))}
+              <a className="link meta" href={hrefFor("context")}>
+                Search and read excerpts in Context
+              </a>
             </fieldset>
           )}
         </div>

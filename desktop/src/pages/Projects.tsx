@@ -117,18 +117,25 @@ export function Projects({ param, go }: { param?: string; go: (page: Location["p
               </section>
 
               <section className="min-w-0">
-                <SecHead title="Context" />
+                <SecHead title="Context" meta={cur.vault ? "sample" : undefined} />
                 {cur.vault ? (
-                  <dl className="kv2">
-                    <dt>Vault</dt>
-                    <dd>{cur.vault.name}</dd>
-                    <dt>Linked notes</dt>
-                    <dd>{cur.vault.notes}</dd>
-                    <dt>Access</dt>
-                    <dd className="!font-sans">
-                      <Evidence level="adv">read-only · by design, not checked</Evidence>
-                    </dd>
-                  </dl>
+                  <>
+                    <dl className="kv2">
+                      <dt>Vault</dt>
+                      <dd>
+                        {cur.vault.name} <span className="ink2 !font-sans">· sample, not connected</span>
+                      </dd>
+                      <dt>Sample notes</dt>
+                      <dd>{cur.vault.notes}</dd>
+                      <dt>Access</dt>
+                      <dd className="!font-sans">
+                        <Evidence level="unk">none · no vault is connected</Evidence>
+                      </dd>
+                    </dl>
+                    <p className="hint mt-2.5 !text-[13px]">
+                      Invented for layout review. No Obsidian vault exists or was indexed; see Context for the sample entries.
+                    </p>
+                  </>
                 ) : (
                   <Empty small title="No vault for this project">
                     That’s fine. Tasks here use the repository, files you attach and what you write in the request. A vault is
