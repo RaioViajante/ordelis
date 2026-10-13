@@ -59,5 +59,8 @@ jobs:
         with:
           workspaces: desktop/src-tauri
 
+      - name: Rust IPC authorization tests
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml
+
       - name: Build macOS app bundle (debug)
         run: pnpm tauri build --debug --bundles app
