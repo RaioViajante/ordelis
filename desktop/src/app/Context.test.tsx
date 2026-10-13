@@ -329,3 +329,28 @@ describe("layout and boundaries", () => {
     expect(document.cookie).toBe("");
   });
 });
+
+describe("Projects discloses its vault information as sample data", () => {
+  it("labels the vault, notes and access as synthetic and not connected", async () => {
+    const user = userEvent.setup();
+    renderApp();
+    await user.click(rail().getByRole("link", { name: "Projects" }));
+    await screen.findByRole("heading", { level: 2, name: "atlas-api" });
+    expect(screen.getByText("· sample, not connected")).toBeInTheDocument();
+    expect(screen.getByText("Sample notes")).toBeInTheDocument();
+    expect(screen.getByText("sample vault · 4 sample notes")).toBeInTheDocument();
+    expect(screen.getByText("none · no vault is connected")).toBeInTheDocument();
+    expect(screen.getByText(/No Obsidian vault exists or was indexed/)).toBeInTheDocument();
+    expect(screen.queryByText(/linked|read-only/i)).not.toBeInTheDocument();
+  });
+
+  it("agrees with Context about the same project", async () => {
+    const user = userEvent.setup();
+    renderApp();
+    await user.click(rail().getByRole("link", { name: "Projects" }));
+    await screen.findByText("· sample, not connected");
+    await user.click(rail().getByRole("link", { name: "Context" }));
+    expect(await screen.findByText(/No Obsidian vault is connected/)).toBeInTheDocument();
+    expect(screen.getByText("none connected")).toBeInTheDocument();
+  });
+});

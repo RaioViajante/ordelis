@@ -69,7 +69,7 @@ export const MOCK_PROJECTS: MockProject[] = [
     line: "4 tasks · 2 sessions running",
     stages: [
       { label: "Workspace", tone: "ok", text: "3 worktrees" },
-      { label: "Context", tone: "ok", text: "vault · 4 notes linked" },
+      { label: "Context", tone: "ok", text: "sample vault · 4 sample notes" },
       { label: "Sessions", tone: "you", text: "1 running · 1 paused" },
       { label: "Changes", tone: "warn", text: "1 approved, not applied" },
     ],
