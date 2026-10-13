@@ -61,12 +61,6 @@ describe("navigation", () => {
     expect(await screen.findByRole("heading", { level: 1, name: "Context" })).toBeInTheDocument();
   });
 
-  it("Select context on Home is a real local action", async () => {
-    const user = userEvent.setup();
-    renderApp();
-    await user.click(screen.getByRole("button", { name: "Select context" }));
-    expect(await screen.findByRole("heading", { level: 1, name: "Context" })).toBeInTheDocument();
-  });
 });
 
 describe("honesty of mock data", () => {
@@ -142,9 +136,7 @@ describe("controls", () => {
     const add = await screen.findByRole("button", { name: "Add a folder…" });
     expect(add).toHaveAttribute("aria-disabled", "true");
     expect(add).toHaveAccessibleDescription(/never reads your filesystem/i);
-    const task = screen.getByRole("button", { name: "New task here" });
-    expect(task).toHaveAttribute("aria-disabled", "true");
-    expect(task).toHaveAccessibleDescription(/isn't connected to the runtime/i);
+    expect(screen.getByRole("button", { name: "Draft task here" })).not.toHaveAttribute("aria-disabled");
   });
 
   it("every disabled button on every page has a stated reason", async () => {

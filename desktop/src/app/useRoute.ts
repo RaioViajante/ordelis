@@ -1,18 +1,18 @@
 import { useCallback, useEffect, useState } from "react";
-import { hrefFor, parseHash, type RouteId } from "./routes";
+import { hrefFor, parseHash, type Location } from "./routes";
 
-export function useRoute(): [RouteId, (id: RouteId) => void] {
-  const [route, setRoute] = useState<RouteId>(() => parseHash(window.location.hash));
+export function useRoute(): [Location, (page: Location["page"], param?: string) => void] {
+  const [loc, setLoc] = useState<Location>(() => parseHash(window.location.hash));
 
   useEffect(() => {
-    const onChange = () => setRoute(parseHash(window.location.hash));
+    const onChange = () => setLoc(parseHash(window.location.hash));
     window.addEventListener("hashchange", onChange);
     return () => window.removeEventListener("hashchange", onChange);
   }, []);
 
-  const go = useCallback((id: RouteId) => {
-    window.location.hash = hrefFor(id);
+  const go = useCallback((page: Location["page"], param?: string) => {
+    window.location.hash = hrefFor(page, param);
   }, []);
 
-  return [route, go];
+  return [loc, go];
 }

@@ -1235,3 +1235,68 @@
     background: var(--bg-300);
   }
 }
+
+@layer components {
+  a.task {
+    color: inherit;
+    text-decoration: none;
+  }
+  a.task:hover {
+    background: var(--bg-200);
+  }
+  a.task:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+  }
+  .ctx-pick {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    margin: 0;
+    padding: 10px 14px 12px;
+    border: 0;
+    border-top: 1px solid var(--line-100);
+  }
+  .ctx-pick label {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    padding: 6px 0;
+    font-size: 15px;
+  }
+  .ctx-pick input {
+    accent-color: var(--accent);
+  }
+  .col.preview-col {
+    margin-left: 0;
+  }
+  .preview-col {
+    max-width: 840px;
+  }
+}
+
+@layer components {
+  .preview-text {
+    margin: 0;
+    max-width: 720px;
+    font-size: 16px;
+    line-height: 26px;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  a.r {
+    color: inherit;
+    text-decoration: none;
+  }
+  a.r:hover {
+    background: var(--bg-200);
+  }
+}
+
+@layer components {
+  .link {
+    color: var(--ink-100);
+    text-decoration: underline;
+    text-underline-offset: 3px;
+  }
+}

@@ -1,13 +1,23 @@
 import { useState } from "react";
 import { useSampleData } from "../app/SampleData";
-import type { RouteId } from "../app/routes";
-import { MOCK_PROJECTS, MOCK_TASKS, MOCK_WAITING } from "../fixtures/mock";
+import { hrefFor, type Location } from "../app/routes";
+import { useWorkspace } from "../app/Workspace";
+import { findProject, MOCK_PROJECTS, MOCK_TASKS, MOCK_WAITING } from "../fixtures/mock";
 import { Agent, Button, SecHead, Select } from "../components/ui";
 
-export function Home({ go }: { go: (id: RouteId) => void }) {
+export function Home({ go }: { go: (page: Location["page"], param?: string) => void }) {
   const { on } = useSampleData();
-  const [task, setTask] = useState("");
-  const [project, setProject] = useState(MOCK_PROJECTS[0].name);
+  const { project, selectProject, draft, setDraft, clearDraft, contextIds, toggleContext } = useWorkspace();
+  const [picking, setPicking] = useState(false);
+  const suggestions = findProject(project)?.suggestions ?? [];
+  const chosen = contextIds.filter((id) => suggestions.some((s) => s.id === id)).length;
+  const blocker = !on
+    ? "Sample data is hidden and this build cannot add projects yet."
+    : !project
+      ? "Choose a project first."
+      : !draft.trim()
+        ? "Describe the task first."
+        : undefined;
 
   return (
     <div className="col col--home">
@@ -19,8 +29,8 @@ export function Home({ go }: { go: (id: RouteId) => void }) {
           </label>
           <textarea
             id="new-task"
-            value={task}
-            onChange={(e) => setTask(e.target.value)}
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
             placeholder="Describe a change, a fix, or a question about the code…"
           />
           <div className="ask__bar">
@@ -30,32 +40,65 @@ export function Home({ go }: { go: (id: RouteId) => void }) {
             <Select
               id="proj"
               className="field"
-              value={on ? project : ""}
+              value={on ? (project ?? "") : ""}
               disabled={!on}
-              onChange={(e) => setProject(e.target.value)}
+              onChange={(e) => selectProject(e.target.value || null)}
             >
               {on ? (
-                MOCK_PROJECTS.map((p) => <option key={p.name}>{p.name}</option>)
+                <>
+                  <option value="">Choose a project…</option>
+                  {MOCK_PROJECTS.map((p) => (
+                    <option key={p.name}>{p.name}</option>
+                  ))}
+                </>
               ) : (
                 <option value="">No projects</option>
               )}
             </Select>
             <span className="t-label">
               context:{" "}
-              {on ? (
+              {on && suggestions.length > 0 ? (
                 <>
-                  <span className="prov prov--you">your notes</span> <span className="meta">3 suggested</span>
+                  <span className="prov prov--you">your notes</span>{" "}
+                  <span className="meta">{chosen ? `${chosen} of ${suggestions.length} selected` : `${suggestions.length} suggested`}</span>
                 </>
               ) : (
                 <span className="meta">none selected</span>
               )}
             </span>
             <span className="sp" />
-            <Button variant="go" onClick={() => go("context")}>
-              Select context
+            {draft && (
+              <Button small variant="ghost" onClick={clearDraft}>
+                Clear draft
+              </Button>
+            )}
+            {on && suggestions.length > 0 ? (
+              <Button aria-expanded={picking} aria-controls="ctx-pick" onClick={() => setPicking(!picking)}>
+                Select context
+              </Button>
+            ) : (
+              <Button reason={on ? "This project has no vault, so there are no notes to suggest." : "No sample notes while sample data is hidden."}>
+                Select context
+              </Button>
+            )}
+            <Button variant="go" reason={blocker} onClick={() => go("preview")}>
+              Preview task
             </Button>
           </div>
+          {picking && on && suggestions.length > 0 && (
+            <fieldset className="ctx-pick" id="ctx-pick">
+              <legend className="t-label">Sample notes for {project} · nothing is read or sent</legend>
+              {suggestions.map((n) => (
+                <label key={n.id}>
+                  <input type="checkbox" checked={contextIds.includes(n.id)} onChange={() => toggleContext(n.id)} />
+                  <span>{n.title}</span>
+                  <span className="meta">{n.where}</span>
+                </label>
+              ))}
+            </fieldset>
+          )}
         </div>
+        <p className="hint">Preview only: nothing here starts an agent. Your draft stays while you move around the app.</p>
       </section>
 
       {on ? <SampleSections /> : <FirstUse />}
@@ -90,7 +133,7 @@ function SampleSections() {
         <SecHead title="Active tasks" meta="across projects · sample" />
         <div className="border-t border-line-100">
           {MOCK_TASKS.map((t) => (
-            <div className="task" key={t.title}>
+            <a className="task" key={t.id} href={hrefFor("task", t.id)}>
               <span>{t.title}</span>
               <span className="mono meta">{t.project}</span>
               <span className="flex gap-3">
@@ -101,7 +144,7 @@ function SampleSections() {
                 ))}
               </span>
               <span className={`st st--${t.tone}`}>{t.state}</span>
-            </div>
+            </a>
           ))}
         </div>
       </section>

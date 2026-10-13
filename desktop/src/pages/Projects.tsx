@@ -1,14 +1,22 @@
-import { useState } from "react";
+import { useEffect } from "react";
 import { useSampleData } from "../app/SampleData";
-import { MOCK_PROJECTS } from "../fixtures/mock";
+import { hrefFor, type Location } from "../app/routes";
+import { useWorkspace } from "../app/Workspace";
+import { findProject, MOCK_PROJECTS } from "../fixtures/mock";
 import { Button, Empty, Evidence, SecHead } from "../components/ui";
 
 const NO_FOLDERS = "Folder access isn't built yet. This build never reads your filesystem.";
 
-export function Projects() {
+export function Projects({ param, go }: { param?: string; go: (page: Location["page"], param?: string) => void }) {
   const { on } = useSampleData();
-  const [picked, setPicked] = useState(0);
-  const cur = MOCK_PROJECTS[picked];
+  const { project, selectProject } = useWorkspace();
+  // A link such as #/projects/atlas-api asks for that project; the shared selection stays the single source of truth.
+  const requested = param === undefined ? undefined : findProject(param);
+  const cur = findProject(requested?.name ?? project);
+
+  useEffect(() => {
+    if (on && requested) selectProject(requested.name);
+  }, [on, requested, selectProject]);
 
   return (
     <div className="col col--1300">
@@ -23,16 +31,31 @@ export function Projects() {
           Projects are folders you add, each with its own workspace and optional vault. Adding one will be possible once
           folder access is built.
         </Empty>
+      ) : param !== undefined && !requested ? (
+        <Empty
+          title="Project not found"
+          why={`no sample project is named “${param}”`}
+          actions={
+            <a className="btn" href={hrefFor("projects")}>
+              Back to projects
+            </a>
+          }
+        >
+          This link points at a project that isn’t in the sample data. Pick one from the list instead.
+        </Empty>
       ) : (
         <div className="lay">
           <div className="flex flex-col gap-0.5" role="group" aria-label="Projects">
-            {MOCK_PROJECTS.map((p, i) => (
+            {MOCK_PROJECTS.map((p) => (
               <button
                 type="button"
                 key={p.name}
-                className={`pj${i === picked ? " on" : ""}`}
-                aria-pressed={i === picked}
-                onClick={() => setPicked(i)}
+                className={`pj${p.name === cur?.name ? " on" : ""}`}
+                aria-pressed={p.name === cur?.name}
+                onClick={() => {
+                  selectProject(p.name);
+                  if (param !== undefined) go("projects");
+                }}
               >
                 <span className="font-medium text-[15.5px] leading-[22px] text-ink-100">{p.name}</span>
                 <span className="mono !text-[13px] text-ink-300">{p.path}</span>
@@ -41,13 +64,18 @@ export function Projects() {
             ))}
           </div>
 
+          {!cur ? (
+            <Empty title="No project selected" why="choose one from the list to see its details">
+              Sample projects are listed on the left. The one you choose here is also the one Home will use for your draft.
+            </Empty>
+          ) : (
           <section className="flex min-w-0 flex-col gap-8">
             <div className="flex flex-wrap items-baseline gap-4">
               <h2 className="h2-lg">{cur.name}</h2>
               <span className="mono meta">{cur.path}</span>
               <span className="sp" />
-              <Button small variant="go" reason="Task planning isn't connected to the runtime yet.">
-                New task here
+              <Button small variant="go" onClick={() => go("home")}>
+                Draft task here
               </Button>
             </div>
 
@@ -113,15 +141,16 @@ export function Projects() {
                 <div className="rows">
                   {cur.tasks.length === 0 && <div className="r meta">No tasks yet.</div>}
                   {cur.tasks.map((t) => (
-                    <div className="r" key={t.name}>
+                    <a className="r" key={t.id} href={hrefFor("task", t.id)}>
                       <span className="min-w-0 flex-1 text-[15px]">{t.name}</span>
                       <span className={`st st--${t.tone}`}>{t.state}</span>
-                    </div>
+                    </a>
                   ))}
                 </div>
               </section>
             </div>
           </section>
+          )}
         </div>
       )}
     </div>
