@@ -1,9 +1,6 @@
 use super::*;
 use std::os::unix::fs::PermissionsExt;
-use std::sync::Mutex;
-
-// Tests that go through query_with share the one-request-at-a-time guard, so they must not overlap.
-static SERIAL: Mutex<()> = Mutex::new(());
+use crate::runtime_bridge::GUARD_TESTS as SERIAL;
 
 const GOOD: &str = r#"{"schema_version":1,"runtime":{"version":"0.12.1","python":"3.12.4"},"gate":{"policy_version":1}}"#;
 
@@ -94,6 +91,7 @@ fn malformed_unknown_and_unsupported_reports_are_rejected() {
         r#"{"schema_version":1,"runtime":{"version":"/Users/x/py","python":"3"},"gate":{"policy_version":1}}"#,
         r#"{"schema_version":1,"runtime":{"version":"","python":"3"},"gate":{"policy_version":1}}"#,
         r#"{"schema_version":1,"runtime":{"version":"1","python":"3"},"gate":{"policy_version":-1}}"#,
+        r#"{"schema_version":1,"runtime":{"version":"1","python":"3"},"gate":{"policy_version":0}}"#,
     ] {
         assert_eq!(outcome(&emit(bad)), ErrorCode::RuntimeOutputMalformed, "{bad}");
     }
@@ -163,6 +161,34 @@ fn a_flooded_stderr_cannot_block_the_child() {
     let script = format!("head -c 4000000 /dev/zero >&2; printf '%s' '{GOOD}'");
     assert!(run(&fast(&script)).is_ok());
 }
+
+// Points this process's fd 2 at a file while a child writes a canary to its stderr. If the child inherited
+// stderr the canary would land in the file; it must go to /dev/null instead.
+#[test]
+fn child_stderr_is_discarded_and_never_reaches_the_parent() {
+    let _serial = STDERR.lock().unwrap_or_else(|e| e.into_inner());
+    let scratch = Scratch::new("stderr");
+    let canary = format!("synapse-stderr-canary-{}", std::process::id());
+    let capture = std::fs::File::create(scratch.path("parent-stderr")).unwrap();
+    let script = format!(
+        "echo {canary} >&2; [ /dev/fd/2 -ef /dev/null ] && echo devnull > '{}/fd2'; printf '%s' '{GOOD}'",
+        scratch.0.display()
+    );
+    // SAFETY: dup/dup2 on valid descriptors; fd 2 is restored before the assertions.
+    let saved = unsafe { libc::dup(2) };
+    unsafe { libc::dup2(capture.as_raw_fd(), 2) };
+    let result = run(&fast(&script));
+    unsafe {
+        libc::dup2(saved, 2);
+        libc::close(saved);
+    }
+    assert!(result.is_ok());
+    assert!(!scratch.read("parent-stderr").contains(&canary), "child stderr reached the parent");
+    assert_eq!(scratch.read("fd2").trim(), "devnull");
+}
+
+// Only one test may redirect this process's stderr at a time.
+static STDERR: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[test]
 fn child_gets_a_cleared_environment_neutral_cwd_and_null_stdin() {
@@ -330,6 +356,65 @@ mod interpreter {
         let bad_link = scratch.path("bad-link");
         std::os::unix::fs::symlink(&bad, &bad_link).unwrap();
         assert_eq!(validate_interpreter(&bad_link), Err(ErrorCode::RuntimeNotInstalled));
+    }
+
+    #[test]
+    fn rejects_a_world_writable_grandparent_directory() {
+        let scratch = Scratch::new("grandparent");
+        let parent = scratch.path("grand").join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let python = parent.join("python");
+        std::fs::write(&python, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&python, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let grand = scratch.path("grand");
+        std::fs::set_permissions(&grand, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(validate_interpreter(&python).is_ok());
+        std::fs::set_permissions(&grand, std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert_eq!(validate_interpreter(&python), Err(ErrorCode::RuntimeNotInstalled));
+        // A group-writable grandparent owned by the user is accepted, as in Homebrew's layout.
+        std::fs::set_permissions(&grand, std::fs::Permissions::from_mode(0o775)).unwrap();
+        assert!(validate_interpreter(&python).is_ok());
+    }
+
+    const ME: u32 = 501;
+    const OTHER: u32 = 502;
+
+    #[test]
+    fn homebrew_like_ancestry_is_accepted() {
+        // python3.x, bin, Versions/3.x, ..., Cellar (group-writable, user-owned), /opt/homebrew, /opt, /
+        let chain = [(ME, 0o100755), (ME, 0o40755), (ME, 0o40755), (ME, 0o40775), (ME, 0o40755), (0, 0o40755), (0, 0o41755)];
+        assert!(ancestry_trusted(&chain, ME));
+        assert!(validate_interpreter(Path::new("/bin/sh")).is_ok(), "root-owned system path up to /");
+    }
+
+    #[test]
+    fn another_owner_anywhere_in_the_chain_is_rejected() {
+        let good = [(ME, 0o100755), (ME, 0o40755), (ME, 0o40755), (0, 0o40755)];
+        assert!(ancestry_trusted(&good, ME));
+        for depth in 0..good.len() {
+            let mut chain = good;
+            chain[depth].0 = OTHER;
+            assert!(!ancestry_trusted(&chain, ME), "foreign owner at depth {depth}");
+        }
+    }
+
+    #[test]
+    fn write_rules_are_strict_near_the_interpreter_and_world_only_further_up() {
+        let good = [(ME, 0o100755), (ME, 0o40755), (ME, 0o40755), (0, 0o40755)];
+        for (depth, mode, accepted) in [
+            (0, 0o100775, false),
+            (1, 0o40775, false),
+            (2, 0o40775, true),
+            (2, 0o40757, false),
+            (3, 0o40777, false),  // a world-writable filesystem root
+            (3, 0o41777, false),  // sticky does not make a world-writable ancestor acceptable
+        ] {
+            let mut chain = good;
+            chain[depth].1 = mode;
+            assert_eq!(ancestry_trusted(&chain, ME), accepted, "depth {depth} mode {mode:o}");
+        }
+        assert!(!ancestry_trusted(&[(ME, 0o100755)], ME), "a chain without a directory is invalid");
     }
 }
 

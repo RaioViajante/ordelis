@@ -102,6 +102,7 @@ mod tests {
     // An allowed call may still fail inside the command; what matters here is that the ACL let it through.
     #[test]
     fn runtime_status_command_is_callable_from_the_local_origin() {
+        let _guard = runtime_bridge::GUARD_TESTS.lock().unwrap_or_else(|e| e.into_inner());
         let result = call("main", "get_runtime_status", LOCAL);
         #[cfg(not(feature = "dev-runtime"))]
         assert_eq!(
@@ -128,6 +129,7 @@ mod tests {
     // The command has no parameters, so a hostile payload has nothing to bind to.
     #[test]
     fn runtime_status_ignores_any_frontend_supplied_arguments() {
+        let _guard = runtime_bridge::GUARD_TESTS.lock().unwrap_or_else(|e| e.into_inner());
         let app = app();
         let window = webview(&app, "main");
         let mut hostile = request("get_runtime_status", LOCAL);

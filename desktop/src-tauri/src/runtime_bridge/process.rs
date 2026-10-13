@@ -117,15 +117,34 @@ fn validate_interpreter(configured: &Path) -> Result<PathBuf, ErrorCode> {
     // symlink therefore runs the base interpreter, which -I -S makes irrelevant.
     let resolved = configured.canonicalize().map_err(|_| unavailable)?;
     let file = std::fs::metadata(&resolved).map_err(|_| unavailable)?;
-    let parent = std::fs::metadata(resolved.parent().ok_or(unavailable)?).map_err(|_| unavailable)?;
+    if !file.is_file() || file.mode() & 0o111 == 0 {
+        return Err(unavailable);
+    }
+    // The file, then every directory up to and including "/". The path is canonical, so none is a symlink.
+    let mut chain = vec![(file.uid(), file.mode())];
+    for dir in resolved.ancestors().skip(1) {
+        let meta = std::fs::metadata(dir).map_err(|_| unavailable)?;
+        chain.push((meta.uid(), meta.mode()));
+    }
     // SAFETY: geteuid has no preconditions.
-    let me = unsafe { libc::geteuid() };
-    let trusted = |meta: &std::fs::Metadata| (meta.uid() == me || meta.uid() == 0) && meta.mode() & 0o022 == 0;
-    if file.is_file() && parent.is_dir() && file.mode() & 0o111 != 0 && trusted(&file) && trusted(&parent) {
+    if ancestry_trusted(&chain, unsafe { libc::geteuid() }) {
         Ok(resolved)
     } else {
         Err(unavailable)
     }
+}
+
+/// `chain` is (owner uid, mode) for the interpreter, its directory, then each further ancestor up to "/".
+/// Every entry must be owned by `me` or root. The interpreter and its directory must also be writable by
+/// no group or other user. Further ancestors only must not be world-writable: Homebrew's own directories
+/// (e.g. /opt/homebrew/Cellar) are group-writable by `admin`, so members of a group that can write an
+/// ancestor are trusted to the same degree as the owner.
+fn ancestry_trusted(chain: &[(u32, u32)], me: u32) -> bool {
+    chain.len() >= 2
+        && chain.iter().enumerate().all(|(depth, &(uid, mode))| {
+            let forbidden_write = if depth < 2 { 0o022 } else { 0o002 };
+            (uid == me || uid == 0) && mode & forbidden_write == 0
+        })
 }
 
 fn run(launch: &Launch) -> Result<RuntimeStatus, ErrorCode> {
@@ -258,7 +277,7 @@ fn parse_report(stdout: &[u8]) -> Result<Report, ErrorCode> {
     }
     let report: Report = serde_json::from_slice(stdout).map_err(|_| malformed)?;
     let plain = |s: &str| (1..=MAX_FIELD_LEN).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_alphanumeric() || b"._+-".contains(&b));
-    if plain(&report.runtime.version) && plain(&report.runtime.python) {
+    if plain(&report.runtime.version) && plain(&report.runtime.python) && report.gate.policy_version > 0 {
         Ok(report)
     } else {
         Err(malformed)

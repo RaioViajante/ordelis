@@ -80,6 +80,11 @@ pub struct RuntimeStatus {
     gate: GatePolicy,
 }
 
+// Tests that can reach the one-request-at-a-time guard (directly or through the command) take this lock,
+// so a parallel test never sees another test's request as "busy".
+#[cfg(test)]
+pub(crate) static GUARD_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Blocking; callers run it on a worker thread.
 pub fn query() -> Result<RuntimeStatus, BridgeError> {
     #[cfg(not(target_os = "macos"))]
