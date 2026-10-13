@@ -14,9 +14,9 @@
 
 <table align="center">
   <tr>
-    <td width="33%"><img src="./docs/assets/desktop/projects-interactive-1440.png" alt="Projects" /></td>
-    <td width="33%"><img src="./docs/assets/desktop/context-populated-1440-webkit.png" alt="Context" /></td>
-    <td width="33%"><img src="./docs/assets/desktop/sessions-list-1440-webkit.png" alt="Sessions" /></td>
+    <td width="33%"><a href="./docs/assets/desktop/projects-interactive-1440.png"><img src="./docs/assets/desktop/projects-interactive-1440.png" alt="Projects" /></a></td>
+    <td width="33%"><a href="./docs/assets/desktop/context-populated-1440-webkit.png"><img src="./docs/assets/desktop/context-populated-1440-webkit.png" alt="Context" /></a></td>
+    <td width="33%"><a href="./docs/assets/desktop/sessions-list-1440-webkit.png"><img src="./docs/assets/desktop/sessions-list-1440-webkit.png" alt="Sessions" /></a></td>
   </tr>
   <tr align="center">
     <td><sub>Projects</sub></td>
@@ -42,15 +42,10 @@ Today only the interface exists. The desktop app, built with Tauri, React and Ty
 
 ## Documentation
 
-| Topic | Where |
-|-------|-------|
-| Run the desktop app, tests and build | [desktop/README.md](./desktop/README.md#commands) |
-| Architecture | [Desktop architecture](./docs/implementation/desktop-architecture.md) |
-| Security model | [IPC authorization](./docs/implementation/desktop-architecture.md#ipc-authorization) · [Execution safety gate](./docs/implementation/execution-safety-gate.md) |
-| Visual verification and screenshot provenance | [Desktop visual verification](./docs/implementation/desktop-visual-verification.md) |
-| Roadmap | [MVP plan and phase exit gates](./docs/implementation/synapse-mvp-plan.md#implementation-phases-and-exit-gates) |
-| Inherited MCO command line | [Workflow guide](./docs/guides/workflows.md) · [CLI reference](./docs/reference/cli.md) |
-| Release history | [CHANGELOG.md](./CHANGELOG.md) |
+- [Run the desktop app, tests and build](./desktop/README.md#commands)
+- [Desktop architecture](./docs/implementation/desktop-architecture.md), including [IPC authorization](./docs/implementation/desktop-architecture.md#ipc-authorization)
+- [All documentation](./docs/README.md): roadmap, safety gate, screenshot provenance and the inherited MCO guides
+- [Changelog](./CHANGELOG.md)
 
 ## Origins and license
 
