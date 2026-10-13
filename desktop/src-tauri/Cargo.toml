@@ -1,0 +1,16 @@
+[package]
+name = "synapse-desktop"
+version = "0.0.0"
+description = "Synapse desktop shell. Presents a local UI only; it is not connected to the Python runtime."
+edition = "2021"
+publish = false
+
+[lib]
+name = "synapse_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
