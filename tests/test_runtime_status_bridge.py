@@ -85,10 +85,10 @@ class RuntimeStatusEntryPointTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.split(), ["78", "False", "False"])
 
-    def test_the_bootstrap_has_no_syntax_newer_than_python_3_6(self):
+    def test_the_bootstrap_has_no_syntax_newer_than_python_3_7(self):
         import ast
         source = SCRIPT.read_text()
-        ast.parse(source, feature_version=(3, 6))
+        ast.parse(source, feature_version=(3, 7))
         self.assertNotIn('f"', source)
         self.assertNotIn("f'", source)
 

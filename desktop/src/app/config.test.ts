@@ -7,13 +7,13 @@ const read = (p: string) => readFileSync(join(root, p), "utf8");
 describe("desktop trust boundary", () => {
   const conf = JSON.parse(read("src-tauri/tauri.conf.json"));
 
-  it("grants the main window exactly one app permission and no other", () => {
+  it("grants the main window exactly two app permissions and no other", () => {
     const dir = join(root, "src-tauri", "capabilities");
     const files = readdirSync(dir).filter((f) => f.endsWith(".json"));
     expect(files).toEqual(["default.json"]);
     const cap = JSON.parse(readFileSync(join(dir, "default.json"), "utf8"));
     // No shell, fs, network, opener or core plugin permission, and no remote origin.
-    expect(cap.permissions).toEqual(["allow-ipc-boundary-status"]);
+    expect(cap.permissions).toEqual(["allow-ipc-boundary-status", "allow-get-runtime-status"]);
     expect(cap.windows).toEqual(["main"]);
     expect(cap.remote).toBeUndefined();
     expect(cap.webviews).toBeUndefined();
@@ -32,22 +32,31 @@ describe("desktop trust boundary", () => {
     expect(conf.build.devUrl).toMatch(/^http:\/\/localhost:/);
   });
 
-  it("registers no Tauri plugins or sidecars and exactly one declared app command", () => {
+  it("registers no Tauri plugins or sidecars and exactly two declared app commands", () => {
     const cargo = read("src-tauri/Cargo.toml");
     expect(cargo).not.toMatch(/tauri-plugin|sidecar/i);
-    // The runtime dependencies are tauri and serde; adding another is a deliberate review decision.
+    // The runtime dependencies are tauri, serde, serde_json (response parsing) and libc (poll and process
+    // groups for the bridge); adding another is a deliberate review decision.
     const runtime = cargo.split("[dependencies]")[1].split("[dev-dependencies]")[0];
-    expect(runtime.match(/^[a-z_-]+(?= *=)/gm)).toEqual(["tauri", "serde"]);
+    expect(runtime.match(/^[a-z_-]+(?= *=)/gm)).toEqual(["tauri", "serde", "serde_json", "libc"]);
+    // The development bridge is opt-in: dev-runtime is the only feature and nothing enables it by default.
+    expect(cargo.split("[features]")[1].match(/^[a-z-]+(?= *=)/gm)).toEqual(["dev-runtime"]);
+    expect(cargo.split("[features]")[1]).toMatch(/^dev-runtime = \[\]$/m);
     // Production code is everything before the Rust test module.
     const lib = read("src-tauri/src/lib.rs");
     const rust = lib.slice(0, lib.indexOf("#[cfg(test)]"));
-    expect(rust).not.toMatch(/\.plugin\(|Command::|std::process|std::fs|std::env|std::net|tokio|reqwest|spawn/);
+    // The only process-related call here is the blocking-worker hop; starting Python lives in the
+    // cfg-gated runtime_bridge/process.rs.
+    expect(rust.replaceAll("spawn_blocking", "")).not.toMatch(/\.plugin\(|Command::|std::process|std::fs|std::env|std::net|tokio|reqwest|spawn/);
     expect(rust.match(/invoke_handler\(/g)).toHaveLength(1);
-    expect(rust.match(/generate_handler!\[([^\]]*)\]/)?.[1].trim()).toBe("ipc_boundary_status");
-    expect(rust.match(/#\[tauri::command\]/g)).toHaveLength(1);
+    expect(rust.match(/generate_handler!\[([^\]]*)\]/)?.[1].trim()).toBe("ipc_boundary_status, get_runtime_status");
+    expect(rust.match(/#\[tauri::command\]/g)).toHaveLength(2);
+    const bridge = read("src-tauri/src/runtime_bridge.rs");
+    expect(bridge).not.toMatch(/Command::|std::process|std::fs|std::env/);
+    expect(bridge).toMatch(/#\[cfg\(any\(test, all\(feature = "dev-runtime", target_os = "macos"\)\)\)\]\s*mod process;/);
     // The app manifest is what makes Tauri enforce the capability for local-origin app commands.
     const build = read("src-tauri/build.rs");
-    expect(build).toMatch(/AppManifest::new\(\)\s*\.commands\(&\["ipc_boundary_status"\]\)/);
+    expect(build).toMatch(/AppManifest::new\(\)\s*\.commands\(&\["ipc_boundary_status", "get_runtime_status"\]\)/);
     expect(conf.bundle.externalBin).toBeUndefined();
   });
 
