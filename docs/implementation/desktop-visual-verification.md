@@ -79,4 +79,15 @@ Differences from reference page 3: a search and two filters above the table, a "
 
 Captures are **WebKit through Playwright against the Vite dev server, not the Tauri WKWebView**, so they show the real browser-preview state (no IPC, no mocks): [1280 wide](../assets/desktop/runtime-browser-preview-1280-webkit.png) and [the 760 minimum](../assets/desktop/runtime-browser-preview-760-webkit.png). No page-level horizontal overflow at either width.
 
-No native screenshot exists. The release `Synapse.app` was rebuilt and launched, and `⌘6` reached Settings, but macOS would not bring the window forward for the Runtime tab to be selected, so neither the release "Not available in this build" state nor a `dev-runtime` success was captured. Nothing was mocked into a screenshot to stand in for them. The native states are covered by `Runtime.test.tsx`, and the real bridge answer by `cargo test --features dev-runtime`, which passed locally against the configured interpreter.
+No native screenshot exists. The release `Synapse.app` was rebuilt and launched, and `⌘6` reached Settings, but macOS would not bring the window forward for the Runtime tab to be selected, so neither the release "Not available in this build" state nor a `dev-runtime` success was captured. Nothing was mocked into a screenshot to stand in for them.
+
+What each kind of evidence covers:
+
+| Evidence | Covers | Does not cover |
+| --- | --- | --- |
+| The two screenshots above | The browser-preview state, rendered by WebKit | Any native state, the Tauri WKWebView |
+| `Runtime.test.tsx`, `runtimeStatus.test.ts` (jsdom, `mockIPC`) | How the UI validates and shows each native answer shape, error code and lifecycle case, using mocked IPC responses | A real IPC call or real rendering |
+| `cargo test` (default and `--release`) | The real `runtime_not_installed` answer and the IPC authorization rules | The webview |
+| `cargo test --features dev-runtime` | A real call from Rust to the configured Python runtime, passing locally and in CI | The webview and the frontend |
+
+**Not verified:** the end-to-end native path, from the WKWebView through IPC to the rendered Runtime tab. No test or capture exercises it.

@@ -147,6 +147,19 @@ describe("runtime status in Settings", () => {
     expect(section()).toHaveTextContent("0.12.2");
   });
 
+  it("hides the previous error's detail while a refresh is running", async () => {
+    desktop();
+    const { user } = await openRuntime();
+    await answer((p) => p.reject(failure("runtime_timeout")));
+    expect(section()).toHaveTextContent("stopped after 5 seconds");
+    await user.click(refresh());
+    expect(state()).toHaveTextContent("Checking the runtime…");
+    expect(section()).not.toHaveTextContent("stopped after 5 seconds");
+    await answer((p) => p.reject(failure("runtime_failed")));
+    expect(state()).toHaveTextContent("The runtime query failed");
+    expect(section()).toHaveTextContent("The runtime exited with an error.");
+  });
+
   it("never polls or retries on its own", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
@@ -160,25 +173,29 @@ describe("runtime status in Settings", () => {
     }
   });
 
-  it("drops a late answer after leaving the tab and shares the in-flight request on return", async () => {
+  // These check what a user can observe. They do not prove the hook's mounted guard: React 19 silently ignores
+  // a state update on an unmounted component, so the tests pass with or without it.
+  it("shares the in-flight request when the tab is left and reopened", async () => {
     desktop();
-    const errors = vi.spyOn(console, "error");
     const { user } = await openRuntime();
     await user.click(screen.getByRole("tab", { name: "Preferences" }));
     await user.click(screen.getByRole("tab", { name: "Runtime" }));
     expect(calls).toHaveLength(1);
     await answer((p) => p.resolve(valid()));
     expect(state()).toHaveTextContent("Answered by the runtime");
-    expect(errors).not.toHaveBeenCalled();
   });
 
-  it("ignores an answer that arrives after Settings is unmounted", async () => {
+  it("does not carry an answer that arrived while unmounted into the next mount", async () => {
     desktop();
-    const errors = vi.spyOn(console, "error");
     const { view } = await openRuntime();
     view.unmount();
+    await answer((p) => p.reject(failure("runtime_failed")));
+    await openRuntime();
+    expect(calls).toHaveLength(2);
+    expect(state()).toHaveTextContent("Checking the runtime…");
+    expect(section()).not.toHaveTextContent("The runtime exited with an error.");
     await answer((p) => p.resolve(valid()));
-    expect(errors).not.toHaveBeenCalled();
+    expect(state()).toHaveTextContent("Answered by the runtime");
   });
 
   it("sends a single request under React Strict Mode", async () => {

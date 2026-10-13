@@ -75,6 +75,7 @@ describe("runtime status adapter: response validation", () => {
     ["an unexpected provenance field", (s) => ({ ...s, provenance: { ...s.provenance, interpreter: "/opt/python" } })],
     ["an unexpected runtime field", (s) => ({ ...s, runtime: { ...s.runtime, providers: [] } })],
     ["an unexpected gate field", (s) => ({ ...s, gate: { ...s.gate, authorized: true } })],
+    ["an unexpected field sorting after every expected key", (s) => ({ ...s, gate: { policy_version: 1, zz: 1 } })],
     ["schema_version 2", (s) => ({ ...s, schema_version: 2 })],
     ["schema_version as a string", (s) => ({ ...s, schema_version: "1" })],
     ["a missing gate", (s) => ({ schema_version: s.schema_version, provenance: s.provenance, runtime: s.runtime })],

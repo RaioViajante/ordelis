@@ -249,7 +249,7 @@ function Runtime() {
             This page is running in a browser, which has no connection to the desktop app, so no runtime was queried.
           </p>
         )}
-        {outcome && <p className="ink2">{outcome.detail}</p>}
+        {outcome && !loading && <p className="ink2">{outcome.detail}</p>}
         {status && (
           <dl className="kv2">
             <dt>Runtime version</dt>
