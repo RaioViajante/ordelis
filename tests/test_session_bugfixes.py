@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import socket
 import tempfile
 import threading
@@ -15,6 +14,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from runtime.session.state import SessionState, save_state, load_state, load_history
+from tests.session_helpers import wait_for_daemon_ready
 from runtime.session.daemon import run_daemon, _socket_path
 from runtime.session.client import send_prompt_nowait, get_result
 from runtime.session.manager import resume_session
@@ -63,11 +63,7 @@ class TestNowaitNoDataLoss(unittest.TestCase):
 
         t = threading.Thread(target=run_daemon, args=(self.tmp, "test-nwfix"), daemon=True)
         t.start()
-        sock_path = _socket_path(self.tmp, "test-nwfix")
-        for _ in range(50):
-            if os.path.exists(sock_path):
-                break
-            time.sleep(0.05)
+        wait_for_daemon_ready(t, self.tmp, "test-nwfix")
 
         # Send with nowait — returns immediately with queued ack
         result = send_prompt_nowait(self.tmp, "test-nwfix", "review code")
@@ -101,10 +97,7 @@ class TestNowaitNoDataLoss(unittest.TestCase):
         t = threading.Thread(target=run_daemon, args=(self.tmp, "test-nwfix"), daemon=True)
         t.start()
         sock_path = _socket_path(self.tmp, "test-nwfix")
-        for _ in range(50):
-            if os.path.exists(sock_path):
-                break
-            time.sleep(0.05)
+        wait_for_daemon_ready(t, self.tmp, "test-nwfix")
 
         # Send with nowait=True in the raw protocol
         ack = _send_raw(sock_path, {"action": "send", "prompt": "test", "nowait": True})
@@ -136,10 +129,7 @@ class TestNowaitNoDataLoss(unittest.TestCase):
         t = threading.Thread(target=run_daemon, args=(self.tmp, "test-nwfix"), daemon=True)
         t.start()
         sock_path = _socket_path(self.tmp, "test-nwfix")
-        for _ in range(50):
-            if os.path.exists(sock_path):
-                break
-            time.sleep(0.05)
+        wait_for_daemon_ready(t, self.tmp, "test-nwfix")
 
         ack = _send_raw(sock_path, {"action": "send", "prompt": "test", "nowait": True})
         request_id = ack["request_id"]
@@ -229,10 +219,7 @@ class TestBroaderExceptionHandling(unittest.TestCase):
         t = threading.Thread(target=run_daemon, args=(tmp, "test-exc"), daemon=True)
         t.start()
         sock_path = _socket_path(tmp, "test-exc")
-        for _ in range(50):
-            if os.path.exists(sock_path):
-                break
-            time.sleep(0.05)
+        wait_for_daemon_ready(t, tmp, "test-exc")
 
         # Daemon should still accept pings
         ping = _send_raw(sock_path, {"action": "ping"})

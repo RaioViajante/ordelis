@@ -4,12 +4,12 @@ from __future__ import annotations
 import os
 import tempfile
 import threading
-import time
 import unittest
 from unittest.mock import patch, MagicMock
 
 from runtime.session.state import SessionState, save_state, load_state, load_history
-from runtime.session.daemon import run_daemon, _socket_path
+from tests.session_helpers import wait_for_daemon_ready
+from runtime.session.daemon import run_daemon
 from runtime.session.client import send_prompt, ping_session, stop_session as client_stop, broadcast_prompt
 from runtime.session.manager import _is_pid_alive
 
@@ -28,11 +28,7 @@ class _DaemonTestBase(unittest.TestCase):
     def _start_daemon_thread(self, repo_root: str, name: str) -> threading.Thread:
         t = threading.Thread(target=run_daemon, args=(repo_root, name), daemon=True)
         t.start()
-        sock_path = _socket_path(repo_root, name)
-        for _ in range(100):
-            if os.path.exists(sock_path):
-                break
-            time.sleep(0.05)
+        wait_for_daemon_ready(t, repo_root, name)
         return t
 
     def _stop_daemon(self, repo_root: str, name: str, thread: threading.Thread) -> None:

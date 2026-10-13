@@ -14,6 +14,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed
 - Rejected case-aliased and symlink-aliased paths inside the checkout in `mco context plan` private path validation by deciding overlap with file identity instead of path text.
+- Fixed flaky session-daemon tests that treated the socket file's existence as readiness although the daemon creates it at `bind()` before `listen()`; tests now wait for a successful ping. Daemon behavior is unchanged (#21).
 
 ## [0.12.1] - 2026-10-07
 

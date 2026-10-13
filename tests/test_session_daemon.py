@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import os
 import socket
 import tempfile
 import threading
@@ -11,6 +10,7 @@ import unittest
 from unittest.mock import patch, MagicMock
 
 from runtime.session.state import SessionState, save_state, load_state, load_history
+from tests.session_helpers import wait_for_daemon_ready
 from runtime.session.daemon import run_daemon, _dispatch_prompt, _socket_path
 
 
@@ -66,11 +66,7 @@ class TestDaemonProtocol(unittest.TestCase):
     def _start_daemon(self) -> threading.Thread:
         t = threading.Thread(target=run_daemon, args=(self.tmp, "test-session"), daemon=True)
         t.start()
-        sock_path = _socket_path(self.tmp, "test-session")
-        for _ in range(50):
-            if os.path.exists(sock_path):
-                break
-            time.sleep(0.05)
+        wait_for_daemon_ready(t, self.tmp, "test-session")
         return t
 
     def test_ping_pong(self) -> None:
@@ -175,11 +171,7 @@ class TestDaemonQueue(unittest.TestCase):
     def _start_daemon(self) -> threading.Thread:
         t = threading.Thread(target=run_daemon, args=(self.tmp, "test-session"), daemon=True)
         t.start()
-        sock_path = _socket_path(self.tmp, "test-session")
-        for _ in range(50):
-            if os.path.exists(sock_path):
-                break
-            time.sleep(0.05)
+        wait_for_daemon_ready(t, self.tmp, "test-session")
         return t
 
     def test_queue_status_idle(self) -> None:
