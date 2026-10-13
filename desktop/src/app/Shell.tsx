@@ -7,6 +7,7 @@ import { Context } from "../pages/Context";
 import { Home } from "../pages/Home";
 import { Projects } from "../pages/Projects";
 import { Sessions } from "../pages/Sessions";
+import { SessionDetail } from "../pages/SessionDetail";
 import { Settings } from "../pages/Settings";
 import { DraftPreview, TaskPreview } from "../pages/Preview";
 import { useSampleData } from "./SampleData";
@@ -90,7 +91,7 @@ function ShellFrame() {
           {route === "projects" && <Projects param={loc.param} go={go} />}
           {route === "task" && <TaskPreview id={loc.param} go={go} />}
           {route === "preview" && <DraftPreview go={go} />}
-          {route === "sessions" && <Sessions />}
+          {route === "sessions" && (loc.param ? <SessionDetail id={loc.param} go={go} /> : <Sessions />)}
           {route === "context" && <Context go={go} />}
           {route === "agents" && <Agents />}
           {route === "settings" && <Settings />}

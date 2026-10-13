@@ -66,3 +66,11 @@ At 900 px the sessions table drops its Project and Worktree columns, the task ta
 **Known limitations.** Native Context and native narrow-window states are unverified. The aside sits below the results under 1100 px, so the selection summary is a scroll away at 760 px (the "N selected" count stays beside the search heading). Screenshots are not pixel-diffed against the reference.
 
 **Projects vault disclosure.** The Projects Context section now labels the vault "sample, not connected", renames "Linked notes" to "Sample notes", shows Access as "none · no vault is connected" instead of "read-only", and adds a one-line note; the stage strip reads "sample vault · 4 sample notes". The layout is unchanged. The reference's "read-only" evidence dot is replaced because nothing is connected or checked.
+
+## Sessions (issue #30)
+
+Captures are **WebKit through Playwright against the production build, not the Tauri WKWebView**: [list](../assets/desktop/sessions-list-1440-webkit.png), [selected row with continuity comparison](../assets/desktop/sessions-continuity-1440-webkit.png), [detail](../assets/desktop/session-detail-1440-webkit.png), [filtered-empty](../assets/desktop/sessions-empty-filtered-1440-webkit.png), and [760×560 list](../assets/desktop/sessions-760x560-webkit.png) and [detail](../assets/desktop/session-detail-760x560-webkit.png). No page-level horizontal overflow at 760×560 in any of them.
+
+The debug `Synapse.app` was built and launched, but no native Sessions screenshot exists: the window could not be driven or captured reliably (the keystroke went to another app), so no native claim is made. The sample-data-off empty state is covered by tests rather than a new capture; `sessions-empty-1440.png` still shows it.
+
+Differences from reference page 3: a search and two filters above the table, a "Details" link per row, a fifth (blocked) sample session, "Worktree" fed from the sample project's HEAD (`main @ 9b04e7d`) rather than an invented hash, and the "Requires" row reading "advertised, not verified" or "not checked" instead of a verified claim. The timeline is a recorded-sample list, not the reference's terminal block, and carries offsets instead of wall-clock times so it implies no real time. Not compared: the PDF itself (no PDF renderer was available), so pages 3, 11, 15 and 16 were read from their PNG exports.

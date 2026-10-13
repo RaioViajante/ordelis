@@ -143,24 +143,6 @@ export const MOCK_PROJECTS: MockProject[] = [
   },
 ];
 
-export interface MockSession {
-  id: string;
-  agent: AgentId;
-  agentName: string;
-  task: string;
-  project: string;
-  state: string;
-  tone: StatusTone;
-  wt: string;
-}
-
-export const MOCK_SESSIONS: MockSession[] = [
-  { id: "a3f2", agent: "cc", agentName: "claude-code", task: "Move auth to server-side sessions", project: "atlas-api", state: "paused · question", tone: "you", wt: "a3f2" },
-  { id: "b71c", agent: "cx", agentName: "codex", task: "Move auth to server-side sessions", project: "atlas-api", state: "stopped · timeout", tone: "fail", wt: "b71c" },
-  { id: "e81a", agent: "cc", agentName: "claude-code", task: "Speed up note search", project: "atlas-api", state: "running", tone: "work", wt: "e81a" },
-  { id: "9c1e", agent: "cc", agentName: "claude-code", task: "Fix pagination on /notes", project: "atlas-api", state: "finished · exit 0", tone: "done", wt: "9c1e" },
-];
-
 export type ContextSource = "notes" | "history" | "suggestion";
 
 export interface ContextEntry {

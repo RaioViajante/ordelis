@@ -12,7 +12,7 @@ export type RouteId = (typeof ROUTES)[number]["id"];
 /** A page. `task` and `preview` are sub-pages that are not primary destinations. */
 export interface Location {
   page: RouteId | "task" | "preview";
-  /** Project name for `projects`, task id for `task`. */
+  /** Project name for `projects`, session id for `sessions`, task id for `task`. */
   param?: string;
 }
 
@@ -29,7 +29,7 @@ export function parseHash(hash: string): Location {
   }
   if (id === "task" || id === "preview") return { page: id, param };
   const route = ROUTES.find((r) => r.id === id)?.id ?? "home";
-  return { page: route, param: route === "projects" ? param : undefined };
+  return { page: route, param: route === "projects" || route === "sessions" ? param : undefined };
 }
 
 export function hrefFor(page: Location["page"], param?: string): string {

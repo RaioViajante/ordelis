@@ -984,6 +984,99 @@
   .mx .no {
     color: var(--ink-300);
   }
+  .mx tbody th {
+    padding: 12px 14px;
+    border-bottom: 1px solid var(--line-100);
+    vertical-align: top;
+    text-align: left;
+    font: 400 14px/21px var(--font-sans);
+    color: var(--ink-300);
+    white-space: nowrap;
+    width: 150px;
+  }
+  .slist {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+  .sli {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 84px;
+    align-items: center;
+    border-bottom: 1px solid var(--line-100);
+  }
+  .sli .srow {
+    border-bottom: 0;
+  }
+  .sli:hover,
+  .sli:has(.srow.on) {
+    background: var(--bg-200);
+  }
+  .sli .srow:hover,
+  .sli .srow.on {
+    background: transparent;
+  }
+  .sli-hdr {
+    padding-right: 92px;
+  }
+  .sfilter {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px 12px;
+    margin-bottom: 8px;
+  }
+  .sfilter .search {
+    flex: 1 1 280px;
+    margin-bottom: 0;
+  }
+  .tl {
+    list-style: none;
+    margin: 0;
+    padding: 6px 18px;
+    background: var(--bg-300);
+    border-radius: var(--r-md, 14px);
+    font-size: 13.5px;
+  }
+  .tl__i {
+    display: grid;
+    grid-template-columns: 64px 76px minmax(0, 1fr);
+    gap: 12px;
+    padding: 8px 0;
+    line-height: 21px;
+    overflow-wrap: anywhere;
+  }
+  .tl__i + .tl__i {
+    border-top: 1px solid var(--line-100);
+  }
+  .tl__k {
+    color: var(--ink-300);
+  }
+  .tl__i--error .tl__k,
+  .tl__i--stop .tl__k {
+    color: var(--danger);
+  }
+  .utbl {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 14px;
+  }
+  .utbl th,
+  .utbl td {
+    padding: 8px 8px 8px 0;
+    border-bottom: 1px solid var(--line-100);
+    text-align: left;
+    font-weight: 400;
+    vertical-align: top;
+  }
+  .utbl thead th {
+    font: 500 12px/18px var(--font-sans);
+    color: var(--ink-300);
+    border-bottom-color: var(--line-200);
+  }
+  .utbl tbody th {
+    color: var(--ink-300);
+  }
 
   /* Context */
   .src3 {
@@ -1209,6 +1302,10 @@
     .srow,
     .hdr {
       grid-template-columns: 130px minmax(0, 1fr) 150px;
+    }
+    .tl__i {
+      grid-template-columns: 52px 60px minmax(0, 1fr);
+      gap: 8px;
     }
     .srow > :nth-child(3),
     .srow > :nth-child(5),

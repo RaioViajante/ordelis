@@ -4,6 +4,7 @@ import { useSampleData } from "../app/SampleData";
 import { useWorkspace } from "../app/Workspace";
 import { countText, excerptOf, fmt, sumCounts } from "../app/contextBudget";
 import { findProject, findTask, SOURCE_LABEL } from "../fixtures/mock";
+import { sessionsForTask, STATE_LABEL } from "../fixtures/sessions";
 import { Agent, Button, Empty, PageTitle, SecHead } from "../components/ui";
 
 type Go = (page: Location["page"], param?: string) => void;
@@ -54,6 +55,15 @@ export function TaskPreview({ id, go }: { id?: string; go: Go }) {
         <dt>Status</dt>
         <dd className="flex flex-wrap gap-3 !font-sans">
           <span className={`st st--${task.tone}`}>{task.state}</span> <span className="meta">sample, not live</span>
+        </dd>
+        <dt>Sessions</dt>
+        <dd className="flex flex-wrap gap-3 !font-sans">
+          {sessionsForTask(task.id).length === 0 && <span className="meta">none in the sample data</span>}
+          {sessionsForTask(task.id).map((s) => (
+            <a key={s.id} className="link" href={hrefFor("sessions", s.id)}>
+              {s.agentName} · {s.id} · {STATE_LABEL[s.state].toLowerCase()}
+            </a>
+          ))}
         </dd>
       </dl>
       <section>
