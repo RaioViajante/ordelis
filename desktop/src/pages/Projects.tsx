@@ -105,7 +105,9 @@ export function Projects({ param, go }: { param?: string; go: (page: Location["p
                   <div className="mt-[18px] border-t border-line-100">
                     {cur.wts.map((w) => (
                       <div className="wt" key={w.id}>
-                        <span className="mono">{w.id}</span>
+                        <a className="mono link" href={hrefFor("sessions", w.id)} aria-label={`Sample session ${w.id}`}>
+                          {w.id}
+                        </a>
                         <span className="min-w-0">
                           {w.task} <span className="meta block">{w.agent}</span>
                         </span>

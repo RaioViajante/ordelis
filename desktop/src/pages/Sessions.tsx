@@ -1,107 +1,143 @@
 import { useState } from "react";
+import { hrefFor } from "../app/routes";
 import { useSampleData } from "../app/SampleData";
-import { MOCK_SESSIONS } from "../fixtures/mock";
-import { Agent, Button, Empty, Evidence, PageTitle } from "../components/ui";
+import { useWorkspace } from "../app/Workspace";
+import { MOCK_PROJECTS } from "../fixtures/mock";
+import { filterSessions, STATE_LABEL, STATE_TONE, STATES, usableSessions, type SessionFilter } from "../fixtures/sessions";
+import { Continuity } from "../components/Continuity";
+import { Agent, Button, Empty, PageTitle, Select } from "../components/ui";
 
-const NOT_CONNECTED = "Sessions come from the runtime, which this build isn't connected to.";
+const NONE: SessionFilter = { state: "all", project: "all", query: "" };
 
 export function Sessions() {
-  const { on } = useSampleData();
-  const [picked, setPicked] = useState(1);
-  const cur = MOCK_SESSIONS[picked];
+  const { on, setOn } = useSampleData();
+  const { session, selectSession } = useWorkspace();
+  const [filter, setFilter] = useState<SessionFilter>(NONE);
+
+  const all = on ? usableSessions() : [];
+  const shown = filterSessions(all, filter);
+  const filtered = filter.state !== "all" || filter.project !== "all" || filter.query.trim() !== "";
+  // A selection the filters hide is not shown as selected, and has no comparison below.
+  const cur = shown.find((s) => s.id === session);
+  const tally = STATES.filter((st) => all.some((s) => s.state === st))
+    .map((st) => `${all.filter((s) => s.state === st).length} ${st}`)
+    .join(" · ");
 
   return (
     <div className="col col--1300">
       <div className="flex flex-wrap items-end gap-5">
-        <PageTitle lede="Every agent run, across projects. Terminals for a single task live inside that task.">Sessions</PageTitle>
+        <PageTitle lede={`Every agent run, across projects. Terminals for a single task live inside that task.${on ? " These are synthetic examples: none was ever started." : ""}`}>
+          Sessions
+        </PageTitle>
         <span className="sp" />
-        <span className="meta">{on ? "sample · 1 running · 1 paused · 1 stopped · 1 finished" : "0 sessions"}</span>
+        <span className="meta">{on ? `sample · ${tally}` : "0 sessions"}</span>
       </div>
 
       {!on ? (
-        <Empty title="No sessions yet" why="sessions: 0 · no agent has been started by this app">
+        <Empty
+          title="No sessions yet"
+          why="sessions: 0 · no agent has been started by this app"
+          actions={<Button onClick={() => setOn(true)}>Show sample data</Button>}
+        >
           A session is one agent CLI working in one worktree. None can start from this build: it doesn’t run agents or contact
           providers.
         </Empty>
       ) : (
         <>
-          <section>
-            <div className="hdr t-label">
-              <span>Agent</span>
-              <span>Task</span>
-              <span>Project</span>
-              <span>State</span>
-              <span>Worktree</span>
+          <section aria-label="Sample sessions">
+            <div className="sfilter" role="search" aria-label="Filter sample sessions">
+              <div className="search">
+                <label className="sr" htmlFor="sq">Search sessions by task, agent or id</label>
+                <input
+                  id="sq"
+                  type="search"
+                  value={filter.query}
+                  placeholder="Search task, agent or id, e.g. codex"
+                  onChange={(e) => setFilter({ ...filter, query: e.target.value })}
+                />
+              </div>
+              <label className="t-label" htmlFor="sf-state">State</label>
+              <Select id="sf-state" value={filter.state} onChange={(e) => setFilter({ ...filter, state: e.target.value as SessionFilter["state"] })}>
+                <option value="all">All states</option>
+                {STATES.map((st) => (
+                  <option key={st} value={st}>{STATE_LABEL[st]}</option>
+                ))}
+              </Select>
+              <label className="t-label" htmlFor="sf-project">Project</label>
+              <Select id="sf-project" value={filter.project} onChange={(e) => setFilter({ ...filter, project: e.target.value })}>
+                <option value="all">All projects</option>
+                {MOCK_PROJECTS.map((p) => (
+                  <option key={p.name}>{p.name}</option>
+                ))}
+              </Select>
+              {filtered && (
+                <Button small variant="ghost" onClick={() => setFilter(NONE)}>
+                  Clear filters
+                </Button>
+              )}
             </div>
-            {MOCK_SESSIONS.map((s, i) => (
-              <button
-                type="button"
-                key={s.id}
-                className={`srow${i === picked ? " on" : ""}`}
-                aria-pressed={i === picked}
-                onClick={() => setPicked(i)}
+            <p className="mono meta mb-2" aria-live="polite">
+              {shown.length} of {all.length} sample sessions
+            </p>
+
+            {shown.length === 0 ? (
+              <Empty
+                small
+                title="No sessions match"
+                why={`${all.length} sample sessions exist · filters match 0`}
+                actions={<Button onClick={() => setFilter(NONE)}>Clear filters</Button>}
               >
-                <Agent id={s.agent}>{s.agentName}</Agent>
-                <span className="min-w-0">{s.task}</span>
-                <span className="mono meta">{s.project}</span>
-                <span className={`st st--${s.tone}`}>{s.state}</span>
-                <span className="mono meta">{s.wt}</span>
-              </button>
-            ))}
+                Try a different state or project, or fewer search words.
+              </Empty>
+            ) : (
+              <>
+                <div className="hdr t-label sli-hdr" aria-hidden="true">
+                  <span>Agent</span>
+                  <span>Task</span>
+                  <span>Project</span>
+                  <span>State</span>
+                  <span>Worktree</span>
+                </div>
+                <ul className="slist" aria-label="Sample sessions">
+                  {shown.map((s) => (
+                    <li key={s.id} className="sli">
+                      <button
+                        type="button"
+                        className={`srow${s.id === cur?.id ? " on" : ""}`}
+                        aria-pressed={s.id === cur?.id}
+                        onClick={() => selectSession(s.id)}
+                      >
+                        <Agent id={s.agent}>{s.agentName}</Agent>
+                        <span className="min-w-0">
+                          {s.task} <span className="sr">, session {s.id}</span>
+                        </span>
+                        <span className="mono meta">{s.project}</span>
+                        <span className={`st st--${STATE_TONE[s.state]}`}>
+                          {STATE_LABEL[s.state].toLowerCase()}{s.tag ? ` · ${s.tag}` : ""}
+                        </span>
+                        <span className="mono meta">{s.worktree ?? "none"}</span>
+                      </button>
+                      <a className="btn btn--sm btn--ghost sli__open" href={hrefFor("sessions", s.id)} aria-label={`Open details for session ${s.id}, ${s.task}`}>
+                        Details
+                      </a>
+                    </li>
+                  ))}
+                </ul>
+              </>
+            )}
           </section>
 
-          <section>
-            <div className="sec-h">
-              <h2>
-                Pick up from{" "}
-                <span className="mono !text-base">
-                  {cur.agentName} · {cur.wt}
-                </span>
-              </h2>
-              <span className="meta">three different things — not interchangeable</span>
-            </div>
-            <div className="tw">
-              <table className="mx">
-                <thead>
-                  <tr>
-                    <th />
-                    <th>
-                      Continue this session<small>Same process or CLI conversation, same worktree.</small>
-                    </th>
-                    <th>
-                      New run with this context<small>Fresh CLI session; Synapse hands over a summary of this one.</small>
-                    </th>
-                    <th>
-                      Repeat with new settings<small>Run the original step again from the base, configured differently.</small>
-                    </th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr><td>CLI conversation</td><td className="keep">kept</td><td className="no">new</td><td className="no">new</td></tr>
-                  <tr><td>Worktree</td><td className="keep">same · {cur.wt}</td><td className="new">new, branched from {cur.wt} HEAD</td><td className="new">new, from main @ 3f2a91c</td></tr>
-                  <tr><td>Files from this run</td><td className="keep">all, as they are</td><td className="keep">all, as a starting point</td><td className="no">not carried over · kept for comparison</td></tr>
-                  <tr><td>Context passed</td><td className="no">nothing new</td><td className="new">summary ~900 tok + diff + notes</td><td className="new">original notes, re-selected</td></tr>
-                  <tr><td>Agent / model</td><td className="no">fixed</td><td className="new">can change</td><td className="new">can change</td></tr>
-                  <tr><td>Authorization</td><td className="keep">original, if still in scope</td><td className="new">new authorization</td><td className="new">new authorization</td></tr>
-                  <tr>
-                    <td>Requires</td>
-                    <td><Evidence level="unk">resume is not checked</Evidence></td>
-                    <td><Evidence level="unk">not checked</Evidence></td>
-                    <td><Evidence level="unk">not checked</Evidence></td>
-                  </tr>
-                  <tr>
-                    <td />
-                    <td><Button small reason={NOT_CONNECTED}>Try to resume</Button></td>
-                    <td><Button small reason={NOT_CONNECTED}>Plan a new run</Button></td>
-                    <td><Button small reason={NOT_CONNECTED}>Change settings</Button></td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-          </section>
+          {cur ? (
+            <Continuity session={cur} />
+          ) : (
+            shown.length > 0 && (
+              <Empty small title="No session selected" why="select a row to compare ways to pick it up">
+                Choose a sample session above to see how continuing, starting a new run and repeating differ.
+              </Empty>
+            )
+          )}
         </>
       )}
     </div>
   );
 }
-
