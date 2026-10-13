@@ -195,16 +195,20 @@ fn child_gets_a_cleared_environment_neutral_cwd_and_null_stdin() {
 fn descriptors_without_close_on_exec_are_not_inherited() {
     let scratch = Scratch::new("fd");
     let file = std::fs::File::open("/dev/null").unwrap();
-    // SAFETY: dup of a valid descriptor; unlike File's own descriptor the copy is not close-on-exec.
-    let leaked = unsafe { libc::dup(file.as_raw_fd()) };
-    assert!(leaked > 2);
+    // F_DUPFD yields a descriptor without close-on-exec (unlike File's own). Number 200 is high enough that
+    // the child shell will not reuse it for its own redirections, which would make the probe lie.
+    // SAFETY: duplicating a valid descriptor.
+    let leaked = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_DUPFD, 200) };
+    assert_eq!(leaked, 200);
+    // /dev/fd/N exists only while N is open in the probing process; /dev/fd/1 (stdout) is the positive control.
     let script = format!(
-        "if (: >&{leaked}) 2>/dev/null; then echo open; else echo closed; fi > '{}/fd'; printf '%s' '{GOOD}'",
+        "[ -e /dev/fd/1 ] && echo control-open > '{0}/control'; if [ -e /dev/fd/{leaked} ]; then echo open; else echo closed; fi > '{0}/fd'; printf '%s' '{GOOD}'",
         scratch.0.display()
     );
     assert!(run(&fast(&script)).is_ok());
     // SAFETY: closing the descriptor created above.
     unsafe { libc::close(leaked) };
+    assert_eq!(scratch.read("control").trim(), "control-open", "the probe must be able to see an open descriptor");
     assert_eq!(scratch.read("fd").trim(), "closed");
 }
 
