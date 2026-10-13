@@ -26,7 +26,10 @@ export const MOCK_WAITING: WaitingItem[] = [
 ];
 
 export interface ActiveTask {
+  id: string;
   title: string;
+  /** Invented request text shown in the task preview. */
+  request: string;
   project: string;
   agents: { id: AgentId; name: string }[];
   state: string;
@@ -38,11 +41,11 @@ const CX = { id: "cx", name: "codex" } as const;
 const KM = { id: "km", name: "kimi" } as const;
 
 export const MOCK_TASKS: ActiveTask[] = [
-  { title: "Move auth to server-side sessions", project: "atlas-api", agents: [CC, CX], state: "Terminals · 1 question", tone: "you" },
-  { title: "Speed up note search", project: "atlas-api", agents: [CC, CX], state: "Paused · budget", tone: "you" },
-  { title: "Fix pagination on /notes", project: "atlas-api", agents: [CC], state: "Review · needs re-check", tone: "done" },
-  { title: "Translate error messages", project: "atlas-api", agents: [CC, KM], state: "Plan · blocked", tone: "fail" },
-  { title: "Draft onboarding copy", project: "mochi-web", agents: [CC], state: "Context · not started", tone: "wait" },
+  { id: "move-auth", title: "Move auth to server-side sessions", request: "Replace stateless JWTs with server-side sessions and keep old tokens valid for 30 days.", project: "atlas-api", agents: [CC, CX], state: "Terminals · 1 question", tone: "you" },
+  { id: "note-search", title: "Speed up note search", request: "Notes search is slow on large vaults; find where the time goes and fix it.", project: "atlas-api", agents: [CC, CX], state: "Paused · budget", tone: "you" },
+  { id: "pagination", title: "Fix pagination on /notes", request: "The last page of /notes repeats the final item. Fix it and cover it with a test.", project: "atlas-api", agents: [CC], state: "Review · needs re-check", tone: "done" },
+  { id: "translate-errors", title: "Translate error messages", request: "Translate user-facing API error messages into Portuguese.", project: "atlas-api", agents: [CC, KM], state: "Plan · blocked", tone: "fail" },
+  { id: "onboarding-copy", title: "Draft onboarding copy", request: "Write the first-run onboarding copy for the web app.", project: "mochi-web", agents: [CC], state: "Context · not started", tone: "wait" },
 ];
 
 export interface MockProject {
@@ -56,7 +59,9 @@ export interface MockProject {
   worktrees: string;
   wts: { id: string; task: string; agent: string; tone: StatusTone; state: string }[];
   vault?: { name: string; notes: string };
-  tasks: { name: string; tone: StatusTone; state: string }[];
+  /** Sample note suggestions for the composer; empty when the project has no vault. */
+  suggestions: { id: string; title: string; where: string }[];
+  tasks: { id: string; name: string; tone: StatusTone; state: string }[];
 }
 
 export const MOCK_PROJECTS: MockProject[] = [
@@ -80,10 +85,16 @@ export const MOCK_PROJECTS: MockProject[] = [
       { id: "9c1e", task: "Fix pagination on /notes", agent: "claude-code", tone: "you", state: "approved · not applied" },
     ],
     vault: { name: "Cérebro", notes: "Projects/Atlas, Decisions/Auth 2026, Security, #backend" },
+    suggestions: [
+      { id: "tokens", title: "Security / Tokens", where: "Refresh" },
+      { id: "auth-2026", title: "Decisions / Auth 2026", where: "Decisions" },
+      { id: "journal", title: "Journal / October 2", where: "Journal" },
+    ],
     tasks: [
-      { name: "Move auth to server-side sessions", tone: "you", state: "terminals" },
-      { name: "Fix pagination on /notes", tone: "done", state: "review" },
-      { name: "Translate error messages", tone: "fail", state: "blocked" },
+      { id: "move-auth", name: "Move auth to server-side sessions", tone: "you", state: "terminals" },
+      { id: "note-search", name: "Speed up note search", tone: "you", state: "paused" },
+      { id: "pagination", name: "Fix pagination on /notes", tone: "done", state: "review" },
+      { id: "translate-errors", name: "Translate error messages", tone: "fail", state: "blocked" },
     ],
   },
   {
@@ -101,7 +112,8 @@ export const MOCK_PROJECTS: MockProject[] = [
     dirty: "clean",
     worktrees: "none",
     wts: [],
-    tasks: [{ name: "Draft onboarding copy", tone: "wait", state: "not started" }],
+    suggestions: [],
+    tasks: [{ id: "onboarding-copy", name: "Draft onboarding copy", tone: "wait", state: "not started" }],
   },
   {
     name: "synapse",
@@ -118,12 +130,13 @@ export const MOCK_PROJECTS: MockProject[] = [
     dirty: "clean",
     worktrees: "none",
     wts: [],
+    suggestions: [],
     tasks: [],
   },
   {
     name: "ensaios",
     path: "~/escrita/ensaios",
-    line: "no vault · 2 tasks",
+    line: "no vault · no tasks yet",
     stages: [
       { label: "Workspace", tone: "wait", text: "plain folder" },
       { label: "Context", tone: "wait", text: "no vault" },
@@ -135,6 +148,7 @@ export const MOCK_PROJECTS: MockProject[] = [
     dirty: "—",
     worktrees: "none",
     wts: [],
+    suggestions: [],
     tasks: [],
   },
 ];
@@ -169,3 +183,6 @@ export const MOCK_CONTEXT = {
   ],
   history: { where: "Decision · Oct 12, 23:27", tok: "64 tok", text: "“Accept old JWTs for 30 days” — decided by you in Move auth to sessions." },
 };
+
+export const findProject = (name: string | null | undefined) => MOCK_PROJECTS.find((p) => p.name === name);
+export const findTask = (id: string | undefined) => MOCK_TASKS.find((t) => t.id === id);

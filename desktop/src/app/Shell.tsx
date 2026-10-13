@@ -8,15 +8,29 @@ import { Home } from "../pages/Home";
 import { Projects } from "../pages/Projects";
 import { Sessions } from "../pages/Sessions";
 import { Settings } from "../pages/Settings";
+import { DraftPreview, TaskPreview } from "../pages/Preview";
 import { useSampleData } from "./SampleData";
-import { hrefFor, ROUTES, type RouteId } from "./routes";
+import { hrefFor, railRoute, ROUTES } from "./routes";
 import { useRoute } from "./useRoute";
+import { useWorkspace, WorkspaceProvider } from "./Workspace";
 
-const SAMPLE_ROUTES: RouteId[] = ["home", "projects", "sessions", "context"];
+const SAMPLE_ROUTES = ["home", "projects", "sessions", "context", "task", "preview"];
+const PAGE_LABELS = { task: "Task preview", preview: "Task preview" };
 
 export function Shell() {
-  const [route, go] = useRoute();
+  return (
+    <WorkspaceProvider>
+      <ShellFrame />
+    </WorkspaceProvider>
+  );
+}
+
+function ShellFrame() {
+  const [loc, go] = useRoute();
+  const route = loc.page;
+  const current = railRoute(loc);
   const { on } = useSampleData();
+  const { announcement } = useWorkspace();
   const mainRef = useRef<HTMLElement>(null);
   const first = useRef(true);
 
@@ -27,7 +41,7 @@ export function Shell() {
       return;
     }
     mainRef.current?.focus();
-  }, [route]);
+  }, [route, loc.param]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -50,10 +64,10 @@ export function Shell() {
         {ROUTES.map((r) => (
           <a
             key={r.id}
-            className={`rail__btn${route === r.id ? " is-on" : ""}`}
+            className={`rail__btn${current === r.id ? " is-on" : ""}`}
             href={hrefFor(r.id)}
             aria-label={r.label}
-            aria-current={route === r.id ? "page" : undefined}
+            aria-current={current === r.id ? "page" : undefined}
           >
             {RAIL_ICONS[r.id]}
           </a>
@@ -70,15 +84,22 @@ export function Shell() {
         </Button>
       </nav>
 
-      <main className="page" ref={mainRef} tabIndex={-1} aria-label={ROUTES.find((r) => r.id === route)?.label}>
-        {route === "home" && <Home go={go} />}
-        {route === "projects" && <Projects />}
-        {route === "sessions" && <Sessions />}
-        {route === "context" && <Context />}
-        {route === "agents" && <Agents />}
-        {route === "settings" && <Settings />}
+      <main className="page" ref={mainRef} tabIndex={-1} aria-label={route === "task" || route === "preview" ? PAGE_LABELS[route] : ROUTES.find((r) => r.id === route)?.label}>
+        <div className="page__scroll">
+          {route === "home" && <Home go={go} />}
+          {route === "projects" && <Projects param={loc.param} go={go} />}
+          {route === "task" && <TaskPreview id={loc.param} go={go} />}
+          {route === "preview" && <DraftPreview go={go} />}
+          {route === "sessions" && <Sessions />}
+          {route === "context" && <Context />}
+          {route === "agents" && <Agents />}
+          {route === "settings" && <Settings />}
+        </div>
         {on && SAMPLE_ROUTES.includes(route) && <SampleBar />}
       </main>
+      <div className="sr" role="status" aria-live="polite">
+        <span key={announcement.id}>{announcement.text}</span>
+      </div>
     </div>
   );
 }
