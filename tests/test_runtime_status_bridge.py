@@ -33,6 +33,14 @@ FORBIDDEN = ("socket.", "subprocess.", "os.system", "os.exec", "os.fork", "os.po
              "os.link", "shutil.", "urllib.", "http.", "ftplib.", "smtplib.", "os.putenv", "os.unsetenv",
              "os.startfile", "winreg.", "pty.")
 opens = []
+listings = []
+env_reads = []
+def absolute(path):
+    # Relative paths are resolved against the child's own working directory at the time of the call.
+    if isinstance(path, int):
+        return "<fd>"
+    path = os.fsdecode(os.fspath(path)) if path is not None else "."
+    return os.path.normpath(os.path.join(os.getcwd(), path or "."))
 def hook(event, args):
     if event.startswith(FORBIDDEN):
         events.append(event)
@@ -41,12 +49,25 @@ def hook(event, args):
         write = bool(flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND)) if isinstance(flags, int) else False
         if isinstance(mode, str) and any(c in mode for c in "wax+"):
             write = True
-        opens.append([os.fspath(path) if isinstance(path, (str, bytes, os.PathLike)) else repr(path), write])
+        opens.append([absolute(path) if isinstance(path, (str, bytes, os.PathLike, int)) else repr(path), write])
+    elif event in ("os.listdir", "os.scandir"):
+        listings.append(absolute(args[0]))
+# Environment reads raise no audit event, so watch the mapping that os.environ and os.getenv use.
+class WatchedEnviron(type(os.environ)):
+    def __getitem__(self, key):
+        env_reads.append(key)
+        return super().__getitem__(key)
+    def __iter__(self):
+        env_reads.append("<iterate>")
+        return super().__iter__()
+real = os.environ
+os.environ = WatchedEnviron(real._data, real.encodekey, real.decodekey, real.encodevalue, real.decodevalue)
 sys.addaudithook(hook)
 code = status.main()
 sys.addaudithook(lambda *a: None)
 runtime = sorted(m for m in sys.modules if m == "runtime" or m.startswith("runtime."))
-print("\n" + json.dumps({"code": code, "events": events, "opens": opens, "runtime": runtime}))
+print("\n" + json.dumps({"code": code, "events": events, "opens": opens, "listings": listings,
+                         "env_reads": env_reads, "runtime": runtime}))
 """
 
 
@@ -109,25 +130,46 @@ class RuntimeStatusEntryPointTests(unittest.TestCase):
             self.assertFalse([m for m in runtime if m == forbidden or m.startswith(forbidden + ".")], forbidden)
 
     def test_no_network_process_credential_or_write_activity(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = os.path.realpath(raw_tmp)
             Path(tmp, ".env").write_text("canary")
             Path(tmp, "vault").mkdir()
             Path(tmp, "vault", "note.md").write_text("canary")
-            observed = self.harness(cwd=tmp, env={"HOME": tmp, "OPENAI_API_KEY": "canary"})
+            observed = self.harness(cwd=tmp, env={"HOME": tmp, "OPENAI_API_KEY": "canary", "MCO_CONFIG_DIR": tmp})
             self.assertEqual(observed["events"], [])
             self.assertEqual([o for o in observed["opens"] if o[1]], [], "no file may be opened for writing")
-            self.assertEqual([o for o in observed["opens"] if tmp in o[0]], [], "nothing under cwd/HOME is opened")
+            self.assertEqual([o for o in observed["opens"] if o[0].startswith(tmp)], [], "nothing under cwd/HOME is opened")
+            self.assertEqual([d for d in observed["listings"] if d.startswith(tmp)], [], "nothing under cwd/HOME is listed")
+
+    def test_only_home_is_read_from_the_environment(self):
+        # runtime/config.py computes its default ~/.mco path at import time (os.path.expanduser), which reads
+        # HOME. That pre-existing side effect touches no file; any other key, such as a credential, fails here.
+        observed = self.harness(env={"HOME": "/nonexistent-home", "OPENAI_API_KEY": "canary", "MCO_CONFIG_DIR": "/x"})
+        self.assertTrue(observed["env_reads"], "the watched environment must observe the HOME read")
+        self.assertEqual(set(observed["env_reads"]), {"HOME"})
+
+    def allowed_python_roots(self):
+        return tuple(str(p) for p in {
+            Path(sys.base_prefix).resolve(), Path(sys.prefix).resolve(), Path(os.__file__).resolve().parent,
+        })
 
     def test_only_checkout_runtime_sources_and_the_standard_library_are_read(self):
-        allowed = tuple(str(p) for p in {
-            Path(sys.base_prefix).resolve(), Path(sys.prefix).resolve(), Path(os.__file__).resolve().parent,
-            ROOT / "runtime", BRIDGE_DIR,
-        })
+        allowed = self.allowed_python_roots() + (str(ROOT / "runtime"), str(BRIDGE_DIR))
         opens = self.harness()["opens"]
         self.assertTrue(opens, "the audit hook must observe the runtime source reads")
         for path, _write in opens:
             real = str(Path(path).resolve())
             self.assertTrue(real.startswith(allowed), real)
+
+    def test_only_import_machinery_lists_directories(self):
+        # Python's import system lists each sys.path entry it searches: the standard library, the checkout root
+        # (appended by status.py so `runtime` resolves) and runtime/ itself. Nothing else may be listed.
+        listings = self.harness()["listings"]
+        self.assertTrue(listings, "the audit hook must observe the import system's directory listings")
+        for path in listings:
+            real = str(Path(path).resolve())
+            self.assertTrue(real.startswith(self.allowed_python_roots()) or real in (str(ROOT), str(ROOT / "runtime")),
+                            real)
 
     def test_no_bytecode_is_written(self):
         before = {p: p.stat().st_mtime_ns for p in ROOT.joinpath("runtime").rglob("*.pyc")}
