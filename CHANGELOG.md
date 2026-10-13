@@ -11,6 +11,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - Added a library-only, authorization-gated Codex zero-model-call probe runner (`--version`, `--help`, `exec --help`) that builds bounded, unauthenticated runtime evidence; it is tested only with fake executables and does not enable dispatch.
 - Added library-only interactive terminal authorization for those probes (`/dev/tty` confirmation bound to the exact specification, default deny, no persistence); it is a same-user, process-local control, has no CLI command and enables no real provider execution.
 - Added a library-only, non-executing Execution Safety Gate that fails closed on missing, stale, mismatched, conflicting, provider-reported or unenforced evidence and always reports execution as unauthorized; no enforcement mechanism exists yet, there is no CLI command, and evidence stays unauthenticated.
+- Added a desktop UI foundation under `desktop/` (Tauri 2, React, TypeScript): a navigation shell with Home, Projects, Sessions, Context, Agents and Settings pages built from the supplied design references. It is disconnected from the Python runtime, grants the webview no Tauri permissions, shows labelled sample data only, and runs no agents (#24).
 
 ### Fixed
 - Rejected case-aliased and symlink-aliased paths inside the checkout in `mco context plan` private path validation by deciding overlap with file identity instead of path text.
