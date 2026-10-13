@@ -85,18 +85,20 @@ function ShellFrame() {
       </nav>
 
       <main className="page" ref={mainRef} tabIndex={-1} aria-label={route === "task" || route === "preview" ? PAGE_LABELS[route] : ROUTES.find((r) => r.id === route)?.label}>
-        {route === "home" && <Home go={go} />}
-        {route === "projects" && <Projects param={loc.param} go={go} />}
-        {route === "task" && <TaskPreview id={loc.param} go={go} />}
-        {route === "preview" && <DraftPreview go={go} />}
-        {route === "sessions" && <Sessions />}
-        {route === "context" && <Context />}
-        {route === "agents" && <Agents />}
-        {route === "settings" && <Settings />}
+        <div className="page__scroll">
+          {route === "home" && <Home go={go} />}
+          {route === "projects" && <Projects param={loc.param} go={go} />}
+          {route === "task" && <TaskPreview id={loc.param} go={go} />}
+          {route === "preview" && <DraftPreview go={go} />}
+          {route === "sessions" && <Sessions />}
+          {route === "context" && <Context />}
+          {route === "agents" && <Agents />}
+          {route === "settings" && <Settings />}
+        </div>
         {on && SAMPLE_ROUTES.includes(route) && <SampleBar />}
       </main>
       <div className="sr" role="status" aria-live="polite">
-        {announcement}
+        <span key={announcement.id}>{announcement.text}</span>
       </div>
     </div>
   );

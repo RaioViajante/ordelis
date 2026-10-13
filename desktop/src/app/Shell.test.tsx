@@ -68,7 +68,12 @@ describe("honesty of mock data", () => {
     const user = userEvent.setup();
     renderApp();
     const note = screen.getByRole("note", { name: "Sample data notice" });
+    const main = screen.getByRole("main");
+    const scroll = main.querySelector(":scope > .page__scroll");
     expect(note).toHaveTextContent("Nothing here was read from your machine, and nothing is running.");
+    expect(scroll).toContainElement(screen.getByRole("heading", { name: "What should we work on?" }));
+    expect(scroll).not.toContainElement(note);
+    expect(note.parentElement).toBe(main);
     await user.click(within(note).getByRole("button", { name: "Hide sample data" }));
     expect(screen.queryByRole("note", { name: "Sample data notice" })).not.toBeInTheDocument();
     expect(screen.queryByText("Move auth to server-side sessions")).not.toBeInTheDocument();

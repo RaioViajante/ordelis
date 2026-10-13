@@ -18,7 +18,15 @@ export interface Location {
 
 export function parseHash(hash: string): Location {
   const [id, ...rest] = hash.replace(/^#\/?/, "").split("/");
-  const param = rest.length ? decodeURIComponent(rest.join("/")) : undefined;
+  let param: string | undefined;
+  if (rest.length) {
+    const raw = rest.join("/");
+    try {
+      param = decodeURIComponent(raw);
+    } catch {
+      param = raw;
+    }
+  }
   if (id === "task" || id === "preview") return { page: id, param };
   const route = ROUTES.find((r) => r.id === id)?.id ?? "home";
   return { page: route, param: route === "projects" ? param : undefined };

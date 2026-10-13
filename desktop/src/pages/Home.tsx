@@ -66,24 +66,25 @@ export function Home({ go }: { go: (page: Location["page"], param?: string) => v
                 <span className="meta">none selected</span>
               )}
             </span>
-            <span className="sp" />
-            {draft && (
-              <Button small variant="ghost" onClick={clearDraft}>
-                Clear draft
+            <span className="ask__actions">
+              {draft && (
+                <Button small variant="ghost" onClick={clearDraft}>
+                  Clear draft
+                </Button>
+              )}
+              {on && suggestions.length > 0 ? (
+                <Button aria-expanded={picking} aria-controls="ctx-pick" onClick={() => setPicking(!picking)}>
+                  Select context
+                </Button>
+              ) : (
+                <Button reason={on ? "This project has no vault, so there are no notes to suggest." : "No sample notes while sample data is hidden."}>
+                  Select context
+                </Button>
+              )}
+              <Button variant="go" reason={blocker} onClick={() => go("preview")}>
+                Preview task
               </Button>
-            )}
-            {on && suggestions.length > 0 ? (
-              <Button aria-expanded={picking} aria-controls="ctx-pick" onClick={() => setPicking(!picking)}>
-                Select context
-              </Button>
-            ) : (
-              <Button reason={on ? "This project has no vault, so there are no notes to suggest." : "No sample notes while sample data is hidden."}>
-                Select context
-              </Button>
-            )}
-            <Button variant="go" reason={blocker} onClick={() => go("preview")}>
-              Preview task
-            </Button>
+            </span>
           </div>
           {picking && on && suggestions.length > 0 && (
             <fieldset className="ctx-pick" id="ctx-pick">

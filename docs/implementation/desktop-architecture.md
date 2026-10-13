@@ -41,7 +41,7 @@ The rail is a `<nav>` of links with accessible names and `aria-current`. `⌘/Ct
 
 ## Interaction state (issue #26)
 
-`app/Workspace.tsx` is one React context, mounted inside `Shell`, holding the UI state that Home and Projects share: the selected sample project, the task draft, the selected sample context notes and the text for a single polite live region (`role="status"`). It is in memory only (no storage, no persistence, no I/O), so it survives in-app navigation but not a restart. The selected project is derived against the sample-data switch, so hiding sample data also hides the selection. Changing project clears the context selection, because notes belong to a project.
+`app/Workspace.tsx` is one React context, mounted inside `Shell`, holding the UI state that Home and Projects share: the selected sample project, the task draft, the selected sample context notes and the text for a single polite live region (`role="status"`). It is in memory only (no storage, no persistence, no I/O), so it survives in-app navigation but not a restart. Hiding sample data invalidates its project and context selections, so stale fixture choices do not return when sample data is shown again; the user's draft remains. Changing project also clears the context selection, because notes belong to a project. Repeated live-region messages replace their text node so assistive technology receives each occurrence.
 
 Routes stay hash based and gain parameters: `#/projects/<name>` (opens that project, or shows *Project not found*), `#/task/<id>` (sample task preview, or *Task not found*) and `#/preview` (preview of the current draft). The two sub-pages are not rail destinations; the rail keeps its six, `#/preview` highlights Home and `#/task/…` highlights nothing.
 

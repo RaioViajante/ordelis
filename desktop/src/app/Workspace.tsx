@@ -13,52 +13,58 @@ interface WorkspaceState {
   contextIds: string[];
   toggleContext: (id: string) => void;
   /** Text for the polite live region. */
-  announcement: string;
+  announcement: { id: number; text: string };
   announce: (text: string) => void;
 }
 
 const WorkspaceContext = createContext<WorkspaceState | null>(null);
+const EMPTY_CONTEXT_IDS: string[] = [];
 
 // Session-only UI state shared by Home and Projects so the two never disagree. Nothing here is persisted.
 export function WorkspaceProvider({ children }: { children: ReactNode }) {
-  const { on } = useSampleData();
-  const [selected, setSelected] = useState<string | null>(MOCK_PROJECTS[0].name);
+  const { on, revision } = useSampleData();
+  const [selection, setSelection] = useState({ revision, name: MOCK_PROJECTS[0].name as string | null });
   const [draft, setDraftText] = useState("");
-  const [contextIds, setContextIds] = useState<string[]>([]);
-  const [announcement, announce] = useState("");
+  const [contextSelection, setContextSelection] = useState({ revision, ids: [] as string[] });
+  const [announcement, setAnnouncement] = useState({ id: 0, text: "" });
+  const contextIds = contextSelection.revision === revision ? contextSelection.ids : EMPTY_CONTEXT_IDS;
 
-  const project = on && findProject(selected) ? selected : null;
+  const announce = useCallback((text: string) => {
+    setAnnouncement((current) => ({ id: current.id + 1, text }));
+  }, []);
+
+  const project = on && selection.revision === revision && findProject(selection.name) ? selection.name : null;
 
   const selectProject = useCallback(
     (name: string | null) => {
-      if (name === selected) return;
-      setSelected(name);
+      if (name === project) return;
+      setSelection({ revision, name });
       // Context notes belong to a project, so they do not carry over.
-      setContextIds([]);
+      setContextSelection({ revision, ids: [] });
       announce(name ? `Project ${name} selected` : "No project selected");
     },
-    [selected],
+    [project, revision, announce],
   );
 
   const clearDraft = useCallback(() => {
     setDraftText("");
     announce("Draft cleared");
-  }, []);
+  }, [announce]);
 
   const toggleContext = useCallback(
     (id: string) => {
       const note = findProject(project)?.suggestions.find((s) => s.id === id);
       if (!note) return;
       const has = contextIds.includes(id);
-      setContextIds(has ? contextIds.filter((c) => c !== id) : [...contextIds, id]);
+      setContextSelection({ revision, ids: has ? contextIds.filter((c) => c !== id) : [...contextIds, id] });
       announce(`${note.title} ${has ? "removed from" : "added to"} sample context`);
     },
-    [project, contextIds],
+    [project, contextIds, revision, announce],
   );
 
   const value = useMemo(
     () => ({ project, selectProject, draft, setDraft: setDraftText, clearDraft, contextIds, toggleContext, announcement, announce }),
-    [project, selectProject, draft, clearDraft, contextIds, toggleContext, announcement],
+    [project, selectProject, draft, clearDraft, contextIds, toggleContext, announcement, announce],
   );
   return <WorkspaceContext.Provider value={value}>{children}</WorkspaceContext.Provider>;
 }

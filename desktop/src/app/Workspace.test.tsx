@@ -1,6 +1,6 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { render, screen, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { SampleDataProvider } from "./SampleData";
 import { Shell } from "./Shell";
@@ -36,6 +36,24 @@ describe("Home composer", () => {
     await user.click(screen.getByRole("button", { name: "Clear draft" }));
     expect(draftBox()).toHaveValue("");
     expect(status()).toHaveTextContent("Draft cleared");
+  });
+
+  it("updates the live region when the same action is announced twice", async () => {
+    const user = userEvent.setup();
+    renderApp();
+    await user.type(draftBox(), "first draft");
+    await user.click(screen.getByRole("button", { name: "Clear draft" }));
+    const mutations: MutationRecord[] = [];
+    const observer = new MutationObserver((records) => mutations.push(...records));
+    observer.observe(status(), { childList: true, subtree: true, characterData: true });
+
+    await user.type(draftBox(), "second draft");
+    await user.click(screen.getByRole("button", { name: "Clear draft" }));
+    await Promise.resolve();
+    observer.disconnect();
+
+    expect(status()).toHaveTextContent("Draft cleared");
+    expect(mutations.length).toBeGreaterThan(0);
   });
 
   it("keeps the draft and project across in-app navigation", async () => {
@@ -111,6 +129,20 @@ describe("Home composer", () => {
     expect(await screen.findByRole("heading", { level: 2, name: "atlas-api" })).toBeInTheDocument();
   });
 
+  it("restores preview and project detail routes through browser history", async () => {
+    const user = userEvent.setup();
+    window.history.replaceState(null, "", "#/home");
+    renderApp();
+    await user.click(screen.getByRole("link", { name: /Fix pagination on \/notes/ }));
+    await user.click(await screen.findByRole("button", { name: "Back to atlas-api" }));
+    expect(await screen.findByRole("heading", { level: 2, name: "atlas-api" })).toBeInTheDocument();
+
+    window.history.back();
+    expect(await screen.findByRole("heading", { level: 1, name: "Fix pagination on /notes" })).toBeInTheDocument();
+    window.history.forward();
+    await waitFor(() => expect(screen.getByRole("heading", { level: 2, name: "atlas-api" })).toBeInTheDocument());
+  });
+
   it("shows first-use guidance, keeps the draft and cannot preview when sample data is off", async () => {
     const user = userEvent.setup();
     renderApp(false);
@@ -119,6 +151,23 @@ describe("Home composer", () => {
     await user.type(draftBox(), "still typing");
     expect(screen.getByRole("button", { name: "Preview task" })).toHaveAccessibleDescription(/Sample data is hidden/);
     expect(screen.queryByRole("link", { name: /Fix pagination/ })).not.toBeInTheDocument();
+  });
+
+  it("does not restore stale project or context selections after sample data is hidden", async () => {
+    const user = userEvent.setup();
+    renderApp();
+    await user.click(screen.getByRole("button", { name: "Select context" }));
+    await user.click(screen.getByRole("checkbox", { name: /Security \/ Tokens/ }));
+    await user.click(screen.getByRole("button", { name: "Hide sample data" }));
+    await user.click(rail().getByRole("link", { name: "Settings" }));
+    await user.click(screen.getByRole("checkbox", { name: "Show sample data" }));
+    await user.click(rail().getByRole("link", { name: "Home" }));
+    expect(projectSelect()).toHaveValue("");
+    await user.selectOptions(projectSelect(), "atlas-api");
+    await user.click(screen.getByRole("button", { name: "Select context" }));
+
+    expect(screen.getByRole("checkbox", { name: /Security \/ Tokens/ })).not.toBeChecked();
+    expect(screen.getByText("3 suggested")).toBeInTheDocument();
   });
 });
 
@@ -179,6 +228,12 @@ describe("Projects", () => {
 
     window.location.hash = "#/task/nope";
     expect(await screen.findByRole("heading", { name: "Task not found" })).toBeInTheDocument();
+  });
+
+  it("treats a malformed encoded project id as not found", () => {
+    window.history.replaceState(null, "", "#/projects/%");
+    renderApp();
+    expect(screen.getByRole("heading", { name: "Project not found" })).toBeInTheDocument();
   });
 
   it("shows the empty state, and no selection, when sample data is off", async () => {
