@@ -47,6 +47,10 @@ Routes stay hash based and gain parameters: `#/projects/<name>` (opens that proj
 
 The composer offers **Preview task**, never Start or Run, and the page says so. Preview pages render only the request text, project, agents and a sample status, with a disabled *Open terminals* / *Plan with agents* that states why. There are no logs or progress. Sample project paths such as `~/code/atlas-api` are plain strings and are never resolved. `Workspace.test.tsx` also scans the app sources for Tauri, network, storage and process APIs.
 
+## Context experience (issue #28)
+
+Context reuses the same `WorkspaceProvider`: selection of synthetic notes and history lives there and is shared by Home, Context and the draft Preview. Rules, budget semantics and limits are in [desktop-context-experience.md](desktop-context-experience.md).
+
 ## Mock data policy
 
 All sample data is in `src/fixtures/mock.ts`, is on by default for layout review, and is always accompanied by a **Sample data** notice that states nothing was read from the machine and nothing is running. It can be hidden from the notice or from Settings; hidden, every page shows a truthful empty state. The Agents page uses no sample data at all: every capability is "unknown", and the Security tab lists what this build cannot do. Every control either performs a local UI action (navigation, selecting a row, switches, tabs, typing) or is disabled with a reason shown on hover and keyboard focus and exposed through `aria-describedby`.
