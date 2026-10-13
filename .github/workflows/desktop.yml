@@ -89,6 +89,12 @@ jobs:
       - name: Select the development interpreter (git-ignored local file)
         run: python -c 'import os, sys; print(os.path.realpath(sys.executable))' > src-tauri/.dev-python
 
+      - name: TEMP diagnostics
+        run: |
+          p="$(cat src-tauri/.dev-python)"; echo "$p"
+          while [ "$p" != "/" ]; do ls -ldn "$p"; p="$(dirname "$p")"; done
+          id -u
+
       - name: Rust tests with the development runtime bridge
         run: cargo test --locked --features dev-runtime --manifest-path src-tauri/Cargo.toml
 
