@@ -1,11 +1,15 @@
 import { createContext, useCallback, useContext, useMemo, useState, type ReactNode } from "react";
 import { entriesFor, findProject, isSelectable, MOCK_PROJECTS, type ContextEntry } from "../fixtures/mock";
+import { findSession } from "../fixtures/sessions";
 import { useSampleData } from "./SampleData";
 
 interface WorkspaceState {
   /** The selected sample project's name; null when nothing is selected or sample data is off. */
   project: string | null;
   selectProject: (name: string | null) => void;
+  /** The selected sample session's id; null when nothing is selected or sample data is off. */
+  session: string | null;
+  selectSession: (id: string | null) => void;
   draft: string;
   setDraft: (text: string) => void;
   clearDraft: () => void;
@@ -33,6 +37,7 @@ const EMPTY_ENTRIES: ContextEntry[] = [];
 export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const { on, revision } = useSampleData();
   const [selection, setSelection] = useState({ revision, name: MOCK_PROJECTS[0].name as string | null });
+  const [sessionSel, setSessionSel] = useState({ revision, id: "b71c" as string | null });
   const [draft, setDraftText] = useState("");
   const [contextSelection, setContextSelection] = useState({ revision, ids: [] as string[] });
   const [historyOffered, setHistoryOfferedState] = useState(true);
@@ -44,6 +49,8 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const project = on && selection.revision === revision && findProject(selection.name) ? selection.name : null;
+
+  const session = on && sessionSel.revision === revision && findSession(sessionSel.id) ? sessionSel.id : null;
 
   // The selection is always resolved against what is selectable now, so a stale id cannot surface.
   const selectable = useMemo(
@@ -62,6 +69,15 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       announce(name ? `Project ${name} selected` : "No project selected");
     },
     [project, revision, announce],
+  );
+
+  const selectSession = useCallback(
+    (id: string | null) => {
+      if (id === session) return;
+      setSessionSel({ revision, id });
+      announce(id ? `Session ${id} selected` : "No session selected");
+    },
+    [session, revision, announce],
   );
 
   const clearDraft = useCallback(() => {
@@ -99,10 +115,10 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
 
   const value = useMemo(
     () => ({
-      project, selectProject, draft, setDraft: setDraftText, clearDraft, selectable, contextIds, contextEntries,
+      project, selectProject, session, selectSession, draft, setDraft: setDraftText, clearDraft, selectable, contextIds, contextEntries,
       toggleContext, clearContext, historyOffered, setHistoryOffered, announcement, announce,
     }),
-    [project, selectProject, draft, clearDraft, selectable, contextIds, contextEntries, toggleContext, clearContext, historyOffered, setHistoryOffered, announcement, announce],
+    [project, selectProject, session, selectSession, draft, clearDraft, selectable, contextIds, contextEntries, toggleContext, clearContext, historyOffered, setHistoryOffered, announcement, announce],
   );
   return <WorkspaceContext.Provider value={value}>{children}</WorkspaceContext.Provider>;
 }
