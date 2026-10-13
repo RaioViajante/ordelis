@@ -91,6 +91,6 @@ macOS is the target and the only platform this increment was built and launched 
 | Platform icons (`icon.icns`, `icon.ico`, `icon.png`, `32×32`, `64×64`, `128×128`, `128×128@2x`) | Generated from the master with `tauri icon` | Android, iOS and Windows Store variants were deleted because they are not targeted. |
 | Rail mark and rail glyphs | SVG paths in `Synapse — telas.html` | Reproduced as inline SVG in `components/icons.tsx`. The rail uses the reference's ivory three-node mark rather than the amber raster, because that is what the design shows at 22 px. |
 | `icon-remove-gb.png` | supplied | Not used (visible cut-out noise). |
-| Fonts | extracted from the HTML export | See `src/assets/fonts/README.md`. |
+| Fonts | extracted from the HTML export | The three tracked WOFF2 files match the export resources by SHA-256. Copyright notices and the complete SIL OFL 1.1 text are tracked in `src/assets/fonts/FONT-LICENSES.txt` and included as a Tauri bundle resource; see `src/assets/fonts/README.md`. |
 
 The reference exports (PDF, HTML, PNGs, handoff) are not copied into the repository.

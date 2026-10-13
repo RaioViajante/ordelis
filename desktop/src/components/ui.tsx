@@ -35,11 +35,20 @@ export function Button({ variant = "default", small, reason, className = "", chi
   return (
     <span
       className={`has-reason${flip ? " has-reason--flip" : ""}`}
-      tabIndex={0}
       onMouseEnter={(e) => setFlip(e.currentTarget.getBoundingClientRect().left + 300 > window.innerWidth)}
       onFocus={(e) => setFlip(e.currentTarget.getBoundingClientRect().left + 300 > window.innerWidth)}
     >
-      <button type="button" className={cls} {...rest} aria-describedby={id} disabled>
+      <button
+        type="button"
+        className={cls}
+        {...rest}
+        aria-describedby={id}
+        aria-disabled="true"
+        onClick={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+        }}
+      >
         {children}
       </button>
       <span role="tooltip" id={id} className="reason">

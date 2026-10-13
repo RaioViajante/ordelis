@@ -45,6 +45,6 @@ At 900 px the sessions table drops its Project and Worktree columns, the task ta
 ## Missing fonts, spacing and elements
 
 - Only the Latin subsets in the export are bundled. Non-Latin text and Newsreader italics fall back to system fonts (no implemented screen uses italics).
-- The disabled-control reason tooltips were not captured in a screenshot. They are covered by component tests (every disabled button must expose a description) and by hover and focus CSS, but the visual tooltip was not inspected in the running window.
+- The disabled-control reason tooltips were not captured in a screenshot. They are covered by component tests: unavailable buttons remain in the keyboard order, expose their reason through `aria-describedby`, and suppress pointer and keyboard activation. Hover and focus CSS reveal the same reason visually.
 - The reference's rail has no separate inbox tooltip or disabled state; the app adds both.
 - Windows and Linux were not built or launched.

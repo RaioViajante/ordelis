@@ -1,5 +1,6 @@
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { Button } from "../components/ui";
 import { SampleDataProvider } from "./SampleData";
 import { Shell } from "./Shell";
 
@@ -94,6 +95,7 @@ describe("honesty of mock data", () => {
     await user.click(rail().getByRole("link", { name: "Agents" }));
     await screen.findByRole("heading", { level: 1, name: "Agents" });
     expect(screen.queryByRole("note", { name: "Sample data notice" })).not.toBeInTheDocument();
+    expect(rail().getByRole("button", { name: "Waiting on you" }).querySelector("b")).toBeNull();
   });
 
   it("never marks an agent capability as verified", async () => {
@@ -112,15 +114,36 @@ describe("honesty of mock data", () => {
 });
 
 describe("controls", () => {
+  it("keeps unavailable controls focusable and prevents activation", async () => {
+    const user = userEvent.setup();
+    const onClick = vi.fn();
+    render(
+      <Button reason="This action is unavailable." onClick={onClick}>
+        Unavailable action
+      </Button>,
+    );
+    const button = screen.getByRole("button", { name: "Unavailable action" });
+
+    button.focus();
+    expect(button).toHaveFocus();
+    expect(button).toHaveAttribute("aria-disabled", "true");
+    expect(button).toHaveAccessibleDescription("This action is unavailable.");
+
+    await user.click(button);
+    button.focus();
+    await user.keyboard("{Enter} ");
+    expect(onClick).not.toHaveBeenCalled();
+  });
+
   it("disables execution-shaped actions and states why", async () => {
     const user = userEvent.setup();
     renderApp();
     await user.click(rail().getByRole("link", { name: "Projects" }));
     const add = await screen.findByRole("button", { name: "Add a folder…" });
-    expect(add).toBeDisabled();
+    expect(add).toHaveAttribute("aria-disabled", "true");
     expect(add).toHaveAccessibleDescription(/never reads your filesystem/i);
     const task = screen.getByRole("button", { name: "New task here" });
-    expect(task).toBeDisabled();
+    expect(task).toHaveAttribute("aria-disabled", "true");
     expect(task).toHaveAccessibleDescription(/isn't connected to the runtime/i);
   });
 
@@ -130,7 +153,7 @@ describe("controls", () => {
     for (const name of ["Home", "Projects", "Sessions", "Context", "Agents", "Settings"]) {
       await user.click(rail().getByRole("link", { name }));
       await screen.findByRole("heading", { level: 1, name: name === "Home" ? "What should we work on?" : name });
-      for (const b of screen.getAllByRole("button").filter((el) => (el as HTMLButtonElement).disabled)) {
+      for (const b of screen.getAllByRole("button").filter((el) => el.getAttribute("aria-disabled") === "true")) {
         expect(b, `${name}: "${b.textContent}"`).toHaveAccessibleDescription(/.+/);
       }
     }

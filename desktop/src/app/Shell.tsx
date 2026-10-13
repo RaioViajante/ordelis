@@ -66,7 +66,7 @@ export function Shell() {
           aria-label="Waiting on you"
         >
           {INBOX_ICON}
-          {on && <b aria-hidden="true">3</b>}
+          {on && SAMPLE_ROUTES.includes(route) && <b aria-hidden="true">3</b>}
         </Button>
       </nav>
 

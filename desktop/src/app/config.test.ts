@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 const root = join(__dirname, "..", "..");
@@ -58,5 +58,22 @@ describe("desktop trust boundary", () => {
     walk(join(root, "src"));
     hits.push(...(read("index.html").match(/https?:\/\/[^\s"')]+/g) ?? []));
     expect(hits).toEqual([]);
+  });
+
+  it("bundles the font copyright notices and OFL license texts", () => {
+    const license = "src/assets/fonts/FONT-LICENSES.txt";
+    expect(conf.bundle.resources).toEqual({ [`../${license}`]: "FONT-LICENSES.txt" });
+    expect(existsSync(join(root, license))).toBe(true);
+    const notice = read(license);
+    expect(notice).toContain('Copyright © 2017 IBM Corp. with Reserved Font Name "Plex"');
+    expect(notice).toContain("Copyright 2020 The JetBrains Mono Project Authors");
+    expect(notice).toContain("Copyright 2020 The Newsreader Project Authors");
+    expect(notice).toContain("SIL OPEN FONT LICENSE Version 1.1");
+  });
+
+  it("removes control animation when reduced motion is requested", () => {
+    const css = read("src/styles/index.css");
+    expect(css).toMatch(/@media\s*\(prefers-reduced-motion:\s*reduce\)/);
+    expect(css).toMatch(/@media\s*\(prefers-reduced-motion:\s*reduce\)[\s\S]*?transition:\s*none/);
   });
 });
