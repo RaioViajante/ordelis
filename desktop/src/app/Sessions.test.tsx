@@ -252,6 +252,9 @@ describe("continuity", () => {
     expect(within(table).getByText("none exists")).toBeInTheDocument();
     expect(within(table).getAllByText("none produced")).toHaveLength(2);
     expect(within(table).getByText(/resume support for kimi is unknown/)).toBeInTheDocument();
+    const ctxRow = within(table).getByRole("row", { name: /Context passed/ });
+    expect(within(ctxRow).getAllByRole("cell")[1]).toHaveTextContent(/nothing to summarize/);
+    expect(within(ctxRow).getAllByRole("cell")[1]).not.toHaveTextContent(/diff|est\. tok/);
   });
 
   it("keeps every execution control disabled, described, inert and out of storage", async () => {
