@@ -1,6 +1,10 @@
-// Deliberately minimal: no plugins, no sidecar, one in-process command that only proves the IPC boundary.
+// Deliberately minimal: no plugins, no sidecar, one inert command that proves the IPC boundary and one
+// development-only runtime status command (see runtime_bridge.rs).
 // Authorization is enforced by the app manifest in build.rs plus capabilities/default.json.
 // See docs/implementation/desktop-architecture.md.
+mod runtime_bridge;
+
+use runtime_bridge::{BridgeError, ErrorCode, RuntimeStatus};
 use serde::Serialize;
 
 #[derive(Serialize)]
@@ -16,6 +20,15 @@ fn ipc_boundary_status() -> IpcBoundaryStatus {
     IpcBoundaryStatus { schema_version: 1, scope: "ipc_boundary_only" }
 }
 
+/// Takes no input: the interpreter, argv and environment are fixed by the build, never by the frontend.
+/// Runs on a blocking worker so the UI thread never waits for Python.
+#[tauri::command]
+async fn get_runtime_status() -> Result<RuntimeStatus, BridgeError> {
+    tauri::async_runtime::spawn_blocking(runtime_bridge::query)
+        .await
+        .unwrap_or_else(|_| Err(ErrorCode::RuntimeFailed.into()))
+}
+
 // generate_context! may expand only once per crate; the tests build the app from this same context.
 fn context<R: tauri::Runtime>() -> tauri::Context<R> {
     tauri::generate_context!()
@@ -23,7 +36,7 @@ fn context<R: tauri::Runtime>() -> tauri::Context<R> {
 
 pub fn run() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![ipc_boundary_status])
+        .invoke_handler(tauri::generate_handler![ipc_boundary_status, get_runtime_status])
         .run(context())
         .expect("error while running the Synapse desktop shell");
 }
@@ -59,7 +72,7 @@ mod tests {
     // capabilities/*.json exactly as in the shipped app.
     fn app() -> tauri::App<tauri::test::MockRuntime> {
         mock_builder()
-            .invoke_handler(tauri::generate_handler![ipc_boundary_status, unlisted_probe])
+            .invoke_handler(tauri::generate_handler![ipc_boundary_status, get_runtime_status, unlisted_probe])
             .build(context())
             .unwrap()
     }
@@ -84,6 +97,54 @@ mod tests {
     fn allowlisted_command_is_callable_from_the_local_origin() {
         let value = call("main", "ipc_boundary_status", LOCAL).unwrap();
         assert_eq!(value, serde_json::json!({ "schema_version": 1, "scope": "ipc_boundary_only" }));
+    }
+
+    // An allowed call may still fail inside the command; what matters here is that the ACL let it through.
+    #[test]
+    fn runtime_status_command_is_callable_from_the_local_origin() {
+        let _guard = runtime_bridge::GUARD_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        let result = call("main", "get_runtime_status", LOCAL);
+        #[cfg(not(feature = "dev-runtime"))]
+        assert_eq!(
+            result.unwrap_err(),
+            serde_json::json!({ "code": "runtime_not_installed", "message": "Development runtime is unavailable." })
+        );
+        #[cfg(feature = "dev-runtime")]
+        assert!(!rejected_by_acl(&result), "{result:?}");
+    }
+
+    #[cfg(feature = "dev-runtime")]
+    fn rejected_by_acl(result: &Result<serde_json::Value, serde_json::Value>) -> bool {
+        matches!(result, Err(e) if e.to_string().contains("not allowed"))
+    }
+
+    #[test]
+    fn runtime_status_command_is_denied_to_other_windows_and_remote_origins() {
+        let other_window = rejected(call("other", "get_runtime_status", LOCAL));
+        assert!(other_window.contains("not allowed"), "{other_window}");
+        let remote = rejected(call("main", "get_runtime_status", "https://example.com/"));
+        assert!(remote.contains("not allowed"), "{remote}");
+    }
+
+    // The command has no parameters, so a hostile payload has nothing to bind to.
+    #[test]
+    fn runtime_status_ignores_any_frontend_supplied_arguments() {
+        let _guard = runtime_bridge::GUARD_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        let app = app();
+        let window = webview(&app, "main");
+        let mut hostile = request("get_runtime_status", LOCAL);
+        hostile.body = InvokeBody::Json(serde_json::json!({
+            "python": "/bin/sh", "path": "/tmp", "args": ["-c", "id"], "env": { "PATH": "/tmp" }, "code": "print(1)"
+        }));
+        let plain = get_ipc_response(&window, request("get_runtime_status", LOCAL));
+        let with_payload = get_ipc_response(&window, hostile);
+        #[cfg(not(feature = "dev-runtime"))]
+        assert_eq!(
+            plain.map(|b| b.deserialize::<serde_json::Value>().unwrap()),
+            with_payload.map(|b| b.deserialize::<serde_json::Value>().unwrap())
+        );
+        #[cfg(feature = "dev-runtime")]
+        assert_eq!(plain.is_ok(), with_payload.is_ok());
     }
 
     #[test]
@@ -135,13 +196,10 @@ mod tests {
         use tauri::utils::acl::resolved::Resolved;
         let mut ctx = context();
         let resolved = Resolved { has_app_acl, ..Default::default() };
-        #[cfg(any(feature = "dynamic-acl", debug_assertions))]
         let authority = RuntimeAuthority::new(Default::default(), resolved);
-        #[cfg(not(any(feature = "dynamic-acl", debug_assertions)))]
-        let authority = RuntimeAuthority::new(resolved);
         *ctx.runtime_authority_mut() = authority;
         let app = mock_builder()
-            .invoke_handler(tauri::generate_handler![ipc_boundary_status, unlisted_probe])
+            .invoke_handler(tauri::generate_handler![ipc_boundary_status, get_runtime_status, unlisted_probe])
             .build(ctx)
             .unwrap();
         let window = webview(&app, "main");
@@ -151,6 +209,12 @@ mod tests {
     #[test]
     fn registered_command_is_denied_when_its_grant_is_removed_and_the_manifest_remains() {
         let message = rejected(call_without_grant(true, "ipc_boundary_status"));
+        assert!(message.contains("not allowed"), "{message}");
+    }
+
+    #[test]
+    fn runtime_status_is_denied_when_its_grant_is_removed_and_the_manifest_remains() {
+        let message = rejected(call_without_grant(true, "get_runtime_status"));
         assert!(message.contains("not allowed"), "{message}");
     }
 
@@ -164,7 +228,7 @@ mod tests {
     // tauri-build loads every file under permissions/ and never deletes stale ones, so an extra file
     // could be referenced by a later capability edit to grant a command outside the manifest.
     #[test]
-    fn permissions_directory_holds_only_the_generated_pair_for_the_declared_command() {
+    fn permissions_directory_holds_only_the_generated_pairs_for_the_declared_commands() {
         fn files(dir: &std::path::Path, out: &mut Vec<String>) {
             for entry in std::fs::read_dir(dir).unwrap() {
                 let path = entry.unwrap().path();
@@ -177,12 +241,21 @@ mod tests {
         }
         let mut found = Vec::new();
         files(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("permissions"), &mut found);
-        assert_eq!(found, ["permissions/autogenerated/ipc_boundary_status.toml"]);
-        let toml = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(&found[0])).unwrap();
-        let identifiers: Vec<&str> = toml.lines().filter(|l| l.starts_with("identifier")).collect();
-        assert_eq!(identifiers, ["identifier = \"allow-ipc-boundary-status\"", "identifier = \"deny-ipc-boundary-status\""]);
-        let commands: Vec<&str> = toml.lines().filter(|l| l.starts_with("commands.")).collect();
-        assert_eq!(commands, ["commands.allow = [\"ipc_boundary_status\"]", "commands.deny = [\"ipc_boundary_status\"]"]);
+        found.sort();
+        assert_eq!(
+            found,
+            ["permissions/autogenerated/get_runtime_status.toml", "permissions/autogenerated/ipc_boundary_status.toml"]
+        );
+        for (file, command, slug) in [
+            (&found[0], "get_runtime_status", "get-runtime-status"),
+            (&found[1], "ipc_boundary_status", "ipc-boundary-status"),
+        ] {
+            let toml = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(file)).unwrap();
+            let identifiers: Vec<&str> = toml.lines().filter(|l| l.starts_with("identifier")).collect();
+            assert_eq!(identifiers, [format!("identifier = \"allow-{slug}\""), format!("identifier = \"deny-{slug}\"")]);
+            let commands: Vec<&str> = toml.lines().filter(|l| l.starts_with("commands.")).collect();
+            assert_eq!(commands, [format!("commands.allow = [\"{command}\"]"), format!("commands.deny = [\"{command}\"]")]);
+        }
     }
 
     fn quoted_names(text: &str, open: &str) -> Vec<String> {
@@ -192,7 +265,7 @@ mod tests {
     }
 
     #[test]
-    fn manifest_handler_and_capability_name_the_same_single_command() {
+    fn manifest_handler_and_capability_name_the_same_two_commands() {
         let build = include_str!("../build.rs");
         let manifest = quoted_names(build, ".commands(&[");
         let source = include_str!("lib.rs");
@@ -207,9 +280,9 @@ mod tests {
             .map(|p| p.as_str().unwrap().to_string())
             .collect();
 
-        assert_eq!(manifest, ["ipc_boundary_status"]);
+        assert_eq!(manifest, ["ipc_boundary_status", "get_runtime_status"]);
         assert_eq!(handler, manifest);
-        assert_eq!(permissions, ["allow-ipc-boundary-status"]);
+        assert_eq!(permissions, ["allow-ipc-boundary-status", "allow-get-runtime-status"]);
         assert_eq!(capability["windows"], serde_json::json!(["main"]));
         assert!(capability.get("remote").is_none());
     }

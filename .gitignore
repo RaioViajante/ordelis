@@ -28,3 +28,6 @@ dist/
 # Generated CI and dry-run output. Release signoffs under reports/gate remain visible.
 /reports/adapter-contract/*/
 /reports/dry-run/*/
+
+# Local development interpreter for the dev-runtime bridge (an absolute path; never committed)
+/desktop/src-tauri/.dev-python
