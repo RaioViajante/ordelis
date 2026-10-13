@@ -86,14 +86,13 @@ jobs:
       - name: Generated permissions match the committed files
         run: git diff --exit-code -- src-tauri/permissions && test -z "$(git ls-files --others --exclude-standard src-tauri/permissions)"
 
+      # The runner's python.org framework install is group-writable (admin), which the bridge rejects on
+      # purpose. The VM is ephemeral, so tighten it there rather than weaken the check.
       - name: Select the development interpreter (git-ignored local file)
-        run: python -c 'import os, sys; print(os.path.realpath(sys.executable))' > src-tauri/.dev-python
-
-      - name: TEMP diagnostics
         run: |
-          p="$(cat src-tauri/.dev-python)"; echo "$p"
-          while [ "$p" != "/" ]; do ls -ldn "$p"; p="$(dirname "$p")"; done
-          id -u
+          python -c 'import os, sys; print(os.path.realpath(sys.executable))' > src-tauri/.dev-python
+          interpreter="$(cat src-tauri/.dev-python)"
+          sudo chmod g-w "$interpreter" "$(dirname "$interpreter")"
 
       - name: Rust tests with the development runtime bridge
         run: cargo test --locked --features dev-runtime --manifest-path src-tauri/Cargo.toml

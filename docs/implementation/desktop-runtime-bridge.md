@@ -69,6 +69,8 @@ React (main window) ──ACL: allow-get-runtime-status──▶ Rust command (a
 
 At each request the path is checked again, because the file system may have changed after the build: it must be absolute; it is **canonicalized once** (symlinks such as Homebrew's or a virtualenv's `python` are resolved and the resolved file is what runs, so a venv symlink runs its base interpreter, which `-I -S` makes irrelevant); the target must be a regular executable file owned by the current user or root and not group- or world-writable; and its directory must be owned by the user or root and not group- or world-writable. Any failure is `runtime_not_installed`.
 
+This rejects some common installs: the python.org macOS framework package is owned by root but group-writable by `admin`, so `/Library/Frameworks/Python.framework/Versions/3.x/bin/python3.x` and its `bin` directory fail the check. Use a Homebrew or other user-owned interpreter, or run `sudo chmod g-w` on the binary and its `bin` directory. The Desktop workflow does the latter on its ephemeral runner.
+
 ## Release isolation
 
 - `dev-runtime` is **off by default** and is the only feature.
