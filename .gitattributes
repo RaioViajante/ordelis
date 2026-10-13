@@ -1,0 +1,5 @@
+# Probe-local homes (HOME/CODEX_HOME pointed into the artifacts root) can contain
+# verbatim shell environments, session transcripts and provider state. Never render
+# their contents in any diff — including the deletion diff of a cleanup commit.
+**/.probe_*_home/** -diff
+**/shell_snapshots/** -diff

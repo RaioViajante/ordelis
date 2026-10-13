@@ -18,6 +18,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - Rejected case-aliased and symlink-aliased paths inside the checkout in `mco context plan` private path validation by deciding overlap with file identity instead of path text.
 - Fixed flaky session-daemon tests that treated the socket file's existence as readiness although the daemon creates it at `bind()` before `listen()`; tests now wait for a successful ping. Daemon behavior is unchanged (#21).
 
+### Security
+
+- Stopped tracking capability-probe local-home artifacts inherited from the MCO history: their shell snapshots and session transcripts could embed machine environment data, including an apparent credential whose revocation is still pending. Added narrow ignore rules, probe-script pruning of environment-capturing subtrees, regression tests and a hygiene guide. This changes only the current tree; Git history still contains the credential and credential revocation remains an external, unconfirmed action (#49).
+
 ## [0.12.1] - 2026-10-07
 
 ### Added

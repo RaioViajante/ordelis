@@ -264,6 +264,13 @@ run_probe "qwen" "C3" \
   "'$QWEN_BIN' 'Output two short thoughts.' --output-format stream-json --auth-type qwen-oauth" \
   "jq -s -e 'length >= 2' '$BASE_DIR/qwen/C3/raw/stdout.log'"
 
+# Probe-local homes: when a caller-supplied HOME/CODEX_HOME points into the artifacts
+# root, the provider writes shell snapshots and session transcripts there, which can
+# embed environment data from the machine running the probes. Drop those subtrees from
+# the artifact set before summaries are written; probe results above are already on disk
+# and are unaffected. Caller environments outside $BASE_DIR are never touched.
+find "$BASE_DIR" -type d \( -name shell_snapshots -o -name sessions \) -prune -exec rm -rf {} + 2>/dev/null || true
+
 LOCK_FILE="$BASE_DIR/lock-summary.yaml"
 aggregate_exit_code=0
 {
