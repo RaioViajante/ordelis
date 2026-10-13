@@ -162,8 +162,8 @@ All registry files live in `D = <app_data_dir>` (`~/Library/Application Support/
 | --- | --- |
 | `projects.json` | The registry |
 | `projects.lock` | Stable sidecar lock file. Created once, never written, renamed or removed |
-| `projects.json.tmp` | Temporary file of an in-progress write; ignored by reads |
-| `projects.json.corrupt-<ms>[-<n>]` | A corrupt registry preserved by `reset_projects` |
+| `projects.json.tmp` | Temporary file of an in-progress write; never read, and never promoted unless the same write created and synced it |
+| `projects.json.corrupt-<ms>[-<n>]` | A corrupt registry preserved by `reset_projects`; never read, renamed or removed by Synapse |
 
 ```json
 {
@@ -213,11 +213,13 @@ Outcomes map to errors as: **unavailable** → `registry_unavailable`, **corrupt
 5. Read the registry with the [read protocol](#read-protocol). **corrupt**, **newer** or **unavailable** → the matching error, nothing written. **empty** → `{ schema_version: 1, next_id: 1, projects: [] }`.
 6. Apply the change. If nothing changes (`already_registered`, `not_found`), release and return without writing.
 7. Serialize; over 256 records or 256 KiB → `registry_full`.
-8. `unlink(D/projects.json.tmp)`, ignoring `ENOENT` (unlink removes a symlink itself, never its target). Then `open(D/projects.json.tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)`; `O_EXCL` fails on any existing name, including a symlink (checked: `EEXIST`). Failure → `registry_unavailable`.
+8. `unlink(D/projects.json.tmp)`, ignoring `ENOENT` (unlink removes a symlink itself, never its target; a directory at that name fails). Any other unlink error → `registry_unavailable`, nothing written. Then `open(D/projects.json.tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)`; `O_EXCL` fails on any existing name, including a symlink (checked: `EEXIST`). Failure → `registry_unavailable`.
 9. `write_all`, then `File::sync_all` (on Apple targets Rust's std issues `fcntl(F_FULLFSYNC)`), close. Failure → unlink the temp file, `registry_unavailable`, old registry intact.
-10. `rename(projects.json.tmp, projects.json)`. Failure → unlink the temp file, `registry_unavailable`, old registry intact. **Success is the commit point**: every process now sees the new registry.
+10. `rename(projects.json.tmp, projects.json)`, renaming only the temp file this call created and synced. Failure → unlink the temp file, `registry_unavailable`, old registry intact. **Success is the commit point**: every process now sees the new registry.
 11. Open `D` and `sync_all` it. `EINVAL` or `ENOTSUP` are ignored. Any other failure returns `registry_unavailable` even though the change is committed; the frontend always re-lists after a mutation error rather than assuming nothing changed.
 12. Close the lock descriptor, release the mutex.
+
+Every file name in steps 3–11 is inside `D` as validated in step 2 (a same-user swap of `D` itself is out of scope, as in the [threat model](#threat-model)). Step 12 is the only place the lock is released: every early return and every cleanup from step 4 on happens while it is held. If a cleanup unlink in step 9 or 10 itself fails, the result is still `registry_unavailable` with the old registry intact; the leftover temp file is never read or promoted, and the next write's step 8 removes it.
 
 A crash before step 10 leaves the old registry and possibly a stale temp file (removed by the next write, ignored by reads). A crash after step 10 leaves the new registry visible.
 
@@ -238,13 +240,15 @@ Argument-free; offered by the UI only after `registry_corrupt`, behind a confirm
 2. Read the registry under the lock. The decision is taken from the file as it is now, never from an in-memory flag or from an earlier `list_projects`:
    - **valid** or **empty** → `{ "outcome": "not_needed" }`, nothing touched (another instance may have reset it, or the file was repaired).
    - **newer** → `registry_newer_version`; **unavailable** → `registry_unavailable`. Nothing touched.
-   - **corrupt** → continue.
-3. Preserve: `hard_link(projects.json, projects.json.corrupt-<ms>)`. `link` never overwrites (checked: `EEXIST`); on `EEXIST` retry with suffixes `-1` … `-15`, then `registry_unavailable`. Sync `D`.
-4. `unlink(projects.json)`, sync `D`. Return `{ "outcome": "reset" }`. The registry is now **empty**; nothing else is written until the next add.
+   - **corrupt** → continue, remembering the `(dev, ino)` of the descriptor the read protocol validated.
+3. Preserve: `hard_link(D/projects.json, D/projects.json.corrupt-<ms>)`, both names inside the `D` validated in step 1. `link` never overwrites (checked: `EEXIST`); on `EEXIST` retry with suffixes `-1` … `-15`, then `registry_unavailable`. Any other link error (including a filesystem without hard links; there is no copy fallback) → `registry_unavailable`, nothing changed.
+4. Verify: `lstat` both names; each must be a regular file with the `(dev, ino)` remembered in step 2, so the backup is the very file that was found corrupt. Then sync `D` (`EINVAL` or `ENOTSUP` ignored). A mismatch or another sync error → `registry_unavailable`, and `projects.json` is **not** removed.
+5. `unlink(D/projects.json)`. Failure → `registry_unavailable`; both names remain and the registry is still corrupt. **Success is the commit point.**
+6. Sync `D` (`EINVAL` or `ENOTSUP` ignored). Another error → `registry_unavailable` although the reset is committed; as after any mutation error, the frontend re-lists. Otherwise return `{ "outcome": "reset" }`.
 
-A crash between steps 3 and 4 leaves both names, so the registry is still corrupt and a second reset makes another preserved copy; nothing is lost. After a reset, IDs restart at `p1`; the frontend discards all cached selections and re-lists. Because step 2 refuses anything but a corrupt file, `reset_projects` can never discard a valid registry, whoever calls it.
+The empty registry is the absence of `projects.json`: nothing is written until the next add, which creates it through the [write protocol](#write-protocol). The backup is never read, renamed or removed by Synapse, so no later step can discard it. Any failure before step 5 leaves `projects.json` in place, still corrupt, so commands keep returning `registry_corrupt` and a retry makes another preserved copy; a crash anywhere behaves the same way or leaves the committed reset. After a reset, IDs restart at `p1`; the frontend discards all cached selections and re-lists. Because step 2 refuses anything but a corrupt file, and steps 3–5 only add a name and remove one name of that same file, `reset_projects` never modifies a valid or newer-schema registry, whoever calls it.
 
-A UI confirmation is not authentication: a script running in `main` with the grant can call `reset_projects` without it. The capability boundary governs who can call; step 2 bounds what any caller can do.
+A UI confirmation is not authentication: a script running in `main` with the grant can call `reset_projects` without it. The capability boundary governs who can call; step 2 bounds what any caller can do. The step 4 identity check confirms the link under the lock against cooperating writers; like every check here, it is not a defense against a same-user process racing the filesystem.
 
 ### IPC boundary
 
@@ -335,19 +339,19 @@ Each criterion names the layer that proves it: **[unit]** Rust registry tests, *
 
 Registry files
 
-1. **[unit]** A `projects.json.tmp` that is a symlink to a sentinel file: after an add, the sentinel is byte-identical and the registry holds the new record.
+1. **[unit]** A `projects.json.tmp` that is a symlink to a sentinel file: after an add, the sentinel is byte-identical and the registry holds the new record. A directory at `projects.json.tmp` makes the add return `registry_unavailable` with the registry unchanged. A valid-looking `projects.json.tmp` with no `projects.json` lists as empty and is never promoted.
 2. **[unit]** `projects.json` as a FIFO: `list_projects` returns `registry_unavailable` within 1 s. As a symlink to a valid registry: `registry_unavailable`. A directory or a file owned by another user (skipped when not root-capable): `registry_unavailable`.
 3. **[unit]** A 256 KiB + 1 byte file is `registry_corrupt`; a valid file of exactly 256 KiB parses; serializing past either limit returns `registry_full`.
 4. **[unit]** Every [validation](#validation) rule has a failing fixture (unknown field at each level, duplicate field, bad or duplicate ID, ID not below `next_id`, `next_id` out of range, relative, non-normalized, overlong or control-character path, duplicate path, `registered_at_ms` above `2^53 - 1`, `schema_version` missing or `0`). A file with two records sharing `(dev, ino)` is valid.
 5. **[unit]** A missing `D` or `projects.json` lists as empty and creates nothing; `D` that is a symlink or group-writable gives `registry_unavailable`; a created `D` is mode `0700` and files are `0600`.
 6. **[unit]** A second process (the test binary re-invoking itself) holding `projects.lock` makes a mutation return `registry_unavailable` within 2.5 s; after release it succeeds. Many threads and two processes adding distinct folders end with every record and unique IDs. `projects.lock` exists after every operation and is never replaced.
-7. **[unit]** With failures injected before `rename`, the previous `projects.json` is byte-identical and the temp file is gone. With a failure injected in the directory sync after `rename`, the command returns `registry_unavailable` and the next list shows the committed record.
+7. **[unit]** With failures injected before `rename`, the previous `projects.json` is byte-identical and the temp file is gone; if the cleanup unlink also fails, the result is still `registry_unavailable` with `projects.json` byte-identical, and the next write succeeds. With a failure injected in the directory sync after `rename`, the command returns `registry_unavailable` and the next list shows the committed record.
 8. **[unit]** Listing never changes `projects.json` (bytes and modification time) in any state, including corrupt and newer.
 
 Corruption and recovery
 
 9. **[unit, ipc]** A corrupt file: list, add and remove return `registry_corrupt` and leave it byte-identical.
-10. **[unit, ipc]** `reset_projects` on a corrupt file preserves its exact bytes as `projects.json.corrupt-<ms>`, never overwrites an existing `.corrupt-*` file (pre-created collision → suffixed name), and leaves an empty registry. On a valid, empty or repaired file it returns `not_needed` and touches nothing. On a newer-version file it returns `registry_newer_version` and touches nothing.
+10. **[unit, ipc]** `reset_projects` on a corrupt file preserves its exact bytes as `projects.json.corrupt-<ms>`, never overwrites an existing `.corrupt-*` file (pre-created collision → suffixed name), and leaves an empty registry. On a valid, empty or repaired file it returns `not_needed` and touches nothing. On a newer-version file it returns `registry_newer_version` and touches nothing. With failures injected at the link (other than `EEXIST`), the identity check, the directory sync before removal, or the unlink, it returns `registry_unavailable`, `projects.json` is still the corrupt file, any backup holds its exact bytes, and a retry completes the reset without overwriting that backup. With a failure injected in the final directory sync, it returns `registry_unavailable` and the next list is empty with the backup present. No command ever reads a `.corrupt-*` file.
 11. **[unit]** A newer `schema_version` is never written, renamed or reset by any command.
 
 Identity and selection
