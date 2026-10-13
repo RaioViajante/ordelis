@@ -2,15 +2,14 @@
 """Tests for --no-wait async send."""
 from __future__ import annotations
 
-import os
 import tempfile
 import threading
-import time
 import unittest
 from unittest.mock import patch
 
 from runtime.session.state import SessionState, save_state
-from runtime.session.daemon import run_daemon, _socket_path
+from tests.session_helpers import wait_for_daemon_ready
+from runtime.session.daemon import run_daemon
 from runtime.session.client import send_prompt_nowait
 from runtime.cli import build_parser
 
@@ -44,11 +43,7 @@ class TestSendPromptNowait(unittest.TestCase):
         }
         t = threading.Thread(target=run_daemon, args=(self.tmp, "test-nw"), daemon=True)
         t.start()
-        sock_path = _socket_path(self.tmp, "test-nw")
-        for _ in range(50):
-            if os.path.exists(sock_path):
-                break
-            time.sleep(0.05)
+        wait_for_daemon_ready(t, self.tmp, "test-nw")
 
         result = send_prompt_nowait(self.tmp, "test-nw", "hello")
         self.assertEqual(result["status"], "queued")
