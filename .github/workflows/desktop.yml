@@ -86,8 +86,9 @@ jobs:
       - name: Generated permissions match the committed files
         run: git diff --exit-code -- src-tauri/permissions && test -z "$(git ls-files --others --exclude-standard src-tauri/permissions)"
 
-      # The runner's python.org framework install is group-writable (admin), which the bridge rejects on
-      # purpose. The VM is ephemeral, so tighten it there rather than weaken the check.
+      # CI only: the runner's python.org framework install is group-writable (admin), which the bridge rejects
+      # on purpose. This VM is discarded after the job, so tightening it here affects no shared machine.
+      # Developers should use a user-owned interpreter instead (docs/implementation/desktop-runtime-bridge.md).
       - name: Select the development interpreter (git-ignored local file)
         run: |
           python -c 'import os, sys; print(os.path.realpath(sys.executable))' > src-tauri/.dev-python
@@ -109,3 +110,11 @@ jobs:
 
       - name: Release bundle holds no development runtime
         run: scripts/verify-release-isolation.sh src-tauri/target/release/bundle/macos/Synapse.app
+
+      # Negative control: the same verifier must reject a real bundle built with the bridge, and its fixture
+      # tests must reject missing, invalid or uninspectable executables.
+      - name: Build macOS app bundle with the development runtime (negative control, never distributed)
+        run: pnpm tauri build --debug --bundles app --features dev-runtime
+
+      - name: Release verifier rejects the development bundle and bad fixtures
+        run: scripts/test-verify-release-isolation.sh src-tauri/target/debug/bundle/macos/Synapse.app
