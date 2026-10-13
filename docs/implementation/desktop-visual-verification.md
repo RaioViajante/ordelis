@@ -96,30 +96,32 @@ What each kind of evidence covers:
 
 Verifies the whole path in the real Tauri window: React → WKWebView → authorized IPC → Rust bridge → Python identity query → validated answer → rendered Settings → Runtime. Run on 2026-10-13, macOS 27.0.1 (arm64), from `f5f1360`. Nothing in the app, its capabilities or the bridge was changed to do it.
 
-**Method.** Each build's `.app` was opened with `open -n`. The window was driven through the macOS accessibility API (AppleScript `System Events`, `AXPress` on the rail link, the Settings tab and Refresh, found by role and name), its text read back from the WebView's accessibility tree, and captured window-only with `screencapture -o -l <window id>`. Requests were counted outside the app with a kqueue `NOTE_FORK` watch on the app's PID (same user, no root; see the procedure below), and a `ps` poll named each child. The app forks for nothing else: across all runs every fork was a `status.py` child, and idle time and navigation produced none.
+**Method.** Each build's `.app` was opened with `open -n`. The window was driven through the macOS accessibility API (AppleScript `System Events`, `AXPress` on the rail link, the Settings tab and Refresh, found by role and name), its text read back from the WebView's accessibility tree, and captured window-only with `screencapture -o -l <window id>`. Child processes were observed outside the app with a kqueue `NOTE_FORK` watch on the app's PID (same user, no root; see the procedure below), and a `ps` poll named each child. Across all runs every fork was a `status.py` child; no other child appeared.
+
+**What the process watcher shows.** It observes child-process creation, not frontend IPC calls; nothing here is an IPC trace. A Python process starts only after a `get_runtime_status` call has reached Rust and passed the checks that come before spawning (interpreter validation, then the one-request guard). A call rejected earlier, for example with `runtime_busy` or by a failed interpreter check, starts no process. Observed spawns are therefore a lower bound on calls that got through the IPC path to Python, not an exact count of IPC requests, and zero spawns while idle does not by itself prove that no IPC call was made. That the frontend shares an in-flight request and never polls is shown separately, by `Runtime.test.tsx` and `runtimeStatus.test.ts` with mocked IPC. What the spawns do show natively: each action that should query reached the real Python runtime once, and the answer on screen changed with it.
 
 ### Development build (`pnpm tauri build --debug --features dev-runtime --bundles app`)
 
 Ground truth from the checkout: `pyproject.toml` version `0.12.1`; the configured interpreter's `platform.python_version()` `3.14.7`; `POLICY_VERSION = 1`.
 
-| Step | Native observation | Forks |
+| Step | Native observation | Python spawns |
 | --- | --- | --- |
-| Launch, Home, then Settings (opens on Preferences) | No query | 0 |
+| Launch on Home; a first scripted press landed on Sessions by mistake; then Settings (opens on Preferences) | Runtime tab not opened | 0 |
 | Press Runtime | *Checking the runtime…* captured, then *Answered by the runtime*: Runtime version `0.12.1`, Python `3.14.7`, Gate policy `version 1` with the metadata-only note, Source *Python runtime · development checkout*, Observed `17:32:47 · answered in 108 ms` | 1 (child `Python -I -S -B status.py`) |
 | Stay on the tab, no input, 70 s (30 s timed) | Nothing changes | 0 |
 | Press Refresh | Observed `17:33:59 · answered in 81 ms` | 1, new child PID |
 | Security policies, 10 s, back to Runtime | Observed `17:34:30 · answered in 83 ms` | 1 |
-| Home, then Settings again | Settings opens on Preferences; no query | 0 |
+| Home, then Settings again | Settings opens on Preferences | 0 |
 | Resize to 760×560, press Runtime | Same fields, `17:35:10 · 79 ms`; no horizontal overflow | 1 |
-| Quit | Watcher total **4**, one per action that should query | — |
+| Quit | Watcher total **4** spawns, matching the four actions expected to query | — |
 
-The rendered text was searched for `/Users`, the account name, `python3.` and the native error messages: none present.
+Before quitting, all static text in the accessibility tree was searched (case-insensitive) for `/Users`, the account name, `python3.` and `development runtime`, which appears in seven of the eight native error messages (the eighth, the `runtime_busy` message, was not searched for): no match.
 
 Captures: [loading](../assets/desktop/runtime-native-dev-loading-1280.png), [answered, 1280](../assets/desktop/runtime-native-dev-answered-1280.png), [answered, 760×560](../assets/desktop/runtime-native-dev-answered-760.png).
 
 ### Controlled failure: interpreter unavailable
 
-`.dev-python` (Git-ignored) was backed up, pointed at the nonexistent absolute path `/nonexistent/synapse-verification/python3`, the `dev-runtime` bundle rebuilt (the binary contains that path) and launched. Settings → Runtime showed *Not available in this build* with the generic detail, before and after Refresh, with **0 forks**: the run-time interpreter check fails before any spawn. Its capture was byte-identical (same MD5) to the release capture below, as the bridge intends (`runtime_not_installed` looks the same whatever the cause). `.dev-python` was then restored, its SHA-256 compared equal, and touched so Cargo would rebuild (see Troubleshooting).
+`.dev-python` (Git-ignored) was backed up, pointed at the nonexistent absolute path `/nonexistent/synapse-verification/python3`, the `dev-runtime` bundle rebuilt (the binary contains that path) and launched. Settings → Runtime showed *Not available in this build* with the generic detail, before and after Refresh, with **0 spawns** observed: the run-time interpreter check fails before any spawn. Its capture was byte-identical (same MD5) to the release capture below, as the bridge intends (`runtime_not_installed` looks the same whatever the cause). `.dev-python` was then restored, its SHA-256 compared equal, and touched so Cargo would rebuild (see Troubleshooting).
 
 Not exercised natively, because they need a different interpreter, a modified `status.py` or a test-only hook: unsupported version, timeout, oversize, malformed output, non-zero exit and `runtime_busy` (the frontend shares an in-flight request, so the UI cannot produce it). Each remains covered by the Rust process tests with fixture scripts and by `Runtime.test.tsx` with mocked IPC.
 
@@ -127,7 +129,8 @@ Not exercised natively, because they need a different interpreter, a modified `s
 
 - `scripts/verify-release-isolation.sh` accepted the bundle: `sha256 d7df64fb…7c25a15, 14 libraries, 290 imported symbols: no development runtime evidence`. The running process was that binary (same SHA-256).
 - Settings → Runtime: *Not available in this build* and its fixed detail; no identity fields. That copy is mapped only from `runtime_not_installed`, so the answer came from the Rust command (an IPC denial would show *Status couldn't be read*; no IPC would show *Browser preview*).
-- Refresh pressed three times: the same state, no identity text anywhere in the tree, **0 forks** for the whole session.
+- Refresh pressed three times: the same state. No static text in the accessibility tree contained `Runtime version` or `Answered by`. The Runtime section's text was read in full and held only the fixed copy; unlike the development run, the release tree was not searched for paths or the account name.
+- **0 child processes** from watcher attachment until the app exited. The watcher attached about 2 seconds after launch, before Settings was opened, so this covers the whole Runtime interaction but not the app's first seconds.
 - Capture: [release, unavailable](../assets/desktop/runtime-native-release-unavailable-1280.png).
 - `pnpm tauri build` with the configured default targets (`app`, `dmg`) built the `.app` but `bundle_dmg.sh` failed in this environment. DMG packaging is not part of this verification (see #38).
 
@@ -137,11 +140,13 @@ Not exercised natively, because they need a different interpreter, a modified `s
 | --- | --- | --- | --- | --- | --- | --- |
 | Real Python answer is shown | debug + `dev-runtime`, macOS arm64 | Native window, AX read, capture | Checkout's versions, dev-checkout source | Matches | Table and captures above | One interpreter (3.14.7) |
 | Loading state renders | same | Native capture | *Checking the runtime…* | Seen | Loading capture | Caught in one frame; ~100 ms |
-| Refresh makes a new native request | same | kqueue fork count + new child PID + new `observed_at`/`duration` | +1 fork | +1 | Table | Fast repeated clicks not tested natively (AX presses take ~1.5 s each) |
-| Tab return re-queries once, no polling | same | Fork count over idle and navigation | 1 per open, 0 idle | As expected | Table | 70 s idle window |
-| Errors sanitized | same and release | AX text search | No path, username or native message | None | Above | Text search, not exhaustive pixel review |
-| Missing interpreter fails closed | debug + `dev-runtime`, bogus path | Native window, fork count | *Not available*, no spawn | As expected | MD5 match with release capture | Only this failure natively |
-| Release cannot start Python | release | Verifier + native window + fork count | Unavailable, 0 forks | As expected | Above | Refresh's IPC calls not counted directly (no fork to count); state unchanged |
+| Refresh reaches Python again | same | Child-process watch (+1 spawn, new PID) + new `observed_at`/`duration` on screen | +1 spawn | +1 | Table | Spawns are a lower bound on IPC calls; fast repeated clicks not tested natively (AX presses take ~1.5 s each) |
+| Tab return reaches Python once; no spawn while idle | same | Child-process watch over idle and navigation | 1 spawn per open, 0 idle | As expected | Table | 70 s idle window; does not prove absence of IPC calls (rejected calls start no process) |
+| No duplicate or polling IPC calls | — | `Runtime.test.tsx`, `runtimeStatus.test.ts` | One call per open or Refresh, in-flight shared | Pass | jsdom, **mocked IPC** | Not native |
+| Errors sanitized (development) | debug + `dev-runtime` | Search of all accessibility text | No path, username or native message | None | Above | Text search, not a pixel review |
+| Errors sanitized (release) | release | Runtime section text read in full; tree searched for identity labels only | Fixed copy only | Fixed copy only | Above | No path or username search in release |
+| Missing interpreter fails closed | debug + `dev-runtime`, bogus path | Native window, child-process watch | *Not available*, no spawn | As expected | MD5 match with release capture | Only this failure natively |
+| Release cannot start Python | release | Verifier + native window + child-process watch | Unavailable, 0 spawns | As expected | Above | Watch began ~2 s after launch; Refresh's IPC calls not observable this way; state unchanged |
 | Narrow window | debug + `dev-runtime` | Native capture at 760×560 | No overflow | None | 760 capture | Visual check |
 | Answer shapes, every error code, Strict Mode, unmount | — | `Runtime.test.tsx`, `runtimeStatus.test.ts` | — | Pass | jsdom, **mocked IPC** | Not native |
 | Bridge process rules, ACL | default, `--release`, `dev-runtime` | `cargo test` | — | Pass | Rust tests | No webview |
@@ -153,7 +158,7 @@ Not exercised natively, because they need a different interpreter, a modified `s
 Prerequisites: macOS; `desktop/src-tauri/.dev-python` holding one absolute path to a Python ≥ 3.10 that passes the [interpreter checks](desktop-runtime-bridge.md#development-interpreter); `pnpm install` in `desktop/`. Window automation is optional: everything below can be done by hand.
 
 1. In `desktop/`: `pnpm tauri build --debug --features dev-runtime --bundles app`, then `open -n src-tauri/target/debug/bundle/macos/Synapse.app`. This bundle contains your interpreter and checkout paths: never distribute it.
-2. Optionally, in another terminal, count the app's forks. Each one should be a runtime query:
+2. Optionally, in another terminal, watch the app's child processes. Each fork should be one Python query that got past the bridge's checks; it is not an IPC count (see [What the process watcher shows](#native-end-to-end-runtime-status-issue-42)). The `pgrep` below assumes exactly one Synapse desktop instance is running; with several, find the intended PID (`pgrep -lf synapse-desktop`) and pass it instead.
 
    ```sh
    python3 -I - "$(pgrep -x synapse-desktop)" <<'PY'
@@ -179,4 +184,4 @@ Prerequisites: macOS; `desktop/src-tauri/.dev-python` holding one absolute path 
 
 **Why no automated native test.** Driving the window needs Accessibility (and capturing it Screen Recording) permission granted to the invoking terminal, which headless CI runners don't reliably have. It was also not robust here: AX enumeration of the WebView takes about 1.5 s per action, and a first JavaScript-for-Automation attempt pressed the wrong rail link (it landed on Sessions) before the AppleScript name match was used. A flaky GUI test in CI would cost more than the manual procedure above, which takes a few minutes.
 
-**Limitations.** The captures show a faint, illegible shape low in the window where the inactive macOS window material lets content behind it through; pixels were not edited. One machine, one interpreter version, Apple Silicon only. Request counts rely on the app forking only for runtime queries, which held throughout but is an observation, not a guarantee. Refresh in the release build was not counted at the IPC level. Concurrent Refresh clicks were not exercised natively.
+**Limitations.** The captures show a faint, illegible shape low in the window where the inactive macOS window material lets content behind it through; pixels were not edited. One machine, one interpreter version, Apple Silicon only. The child-process watch is not an IPC trace: spawns are a lower bound on calls that reached Python, and reading them as queries relies on the app forking only for those, which held throughout but is an observation, not a guarantee. IPC calls in the release build, including Refresh, were not observable this way. Concurrent Refresh clicks were not exercised natively.
