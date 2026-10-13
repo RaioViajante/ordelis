@@ -1,15 +1,22 @@
 name: Desktop
 
-# Frontend checks and a Tauri compile for the desktop UI foundation.
-# Independent of gate.yml; the Python runtime and root npm package are not involved.
+# Frontend checks, Tauri compiles and the development-only runtime bridge checks for the desktop app.
+# Runs on desktop changes and on changes to anything the bridge executes. gate.yml still owns the
+# full Python/Node/packaging suite on every pull request.
 on:
   pull_request:
     paths:
       - "desktop/**"
+      - "runtime/**"
+      - "tests/test_runtime_status_bridge.py"
+      - "pyproject.toml"
       - ".github/workflows/desktop.yml"
   push:
     paths:
       - "desktop/**"
+      - "runtime/**"
+      - "tests/test_runtime_status_bridge.py"
+      - "pyproject.toml"
       - ".github/workflows/desktop.yml"
   workflow_dispatch:
 
@@ -23,6 +30,11 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Setup Python (minimum supported by the runtime)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
@@ -59,11 +71,36 @@ jobs:
         with:
           workspaces: desktop/src-tauri
 
-      - name: Rust IPC authorization tests
+      - name: Runtime status entry point tests (Python)
+        working-directory: .
+        run: python -m unittest tests.test_runtime_status_bridge -v
+
+      - name: Rust tests (default features, bridge unavailable)
         run: cargo test --locked --manifest-path src-tauri/Cargo.toml
+
+      - name: Cargo check (default and dev-runtime features)
+        run: |
+          cargo check --locked --all-targets --manifest-path src-tauri/Cargo.toml
+          cargo check --locked --all-targets --features dev-runtime --manifest-path src-tauri/Cargo.toml
 
       - name: Generated permissions match the committed files
         run: git diff --exit-code -- src-tauri/permissions && test -z "$(git ls-files --others --exclude-standard src-tauri/permissions)"
 
+      - name: Select the development interpreter (git-ignored local file)
+        run: python -c 'import os, sys; print(os.path.realpath(sys.executable))' > src-tauri/.dev-python
+
+      - name: Rust tests with the development runtime bridge
+        run: cargo test --locked --features dev-runtime --manifest-path src-tauri/Cargo.toml
+
       - name: Build macOS app bundle (debug)
         run: pnpm tauri build --debug --bundles app
+
+      # The interpreter file from the previous steps is still present: the release build must ignore it.
+      - name: Rust tests with the release profile (default features)
+        run: cargo test --locked --release --manifest-path src-tauri/Cargo.toml
+
+      - name: Build macOS app bundle (release configuration)
+        run: pnpm tauri build --bundles app
+
+      - name: Release bundle holds no development runtime
+        run: scripts/verify-release-isolation.sh src-tauri/target/release/bundle/macos/Synapse.app
