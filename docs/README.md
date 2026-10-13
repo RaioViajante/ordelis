@@ -5,6 +5,7 @@ Synapse is in early development. The desktop app is an interface preview over sa
 ## Synapse desktop
 
 - [Desktop architecture](./implementation/desktop-architecture.md): structure of the app and its [IPC authorization](./implementation/desktop-architecture.md#ipc-authorization).
+- [Development-only runtime bridge](./implementation/desktop-runtime-bridge.md): the one fixed Rust-to-Python status query, its contract and limits.
 - [MVP plan and phase exit gates](./implementation/synapse-mvp-plan.md#implementation-phases-and-exit-gates): the roadmap.
 - [Visual verification](./implementation/desktop-visual-verification.md): how each screenshot was captured and what it does and does not prove.
 - Page notes: [Context](./implementation/desktop-context-experience.md), [Sessions](./implementation/desktop-sessions-experience.md), [UI design inventory](./implementation/desktop-ui-design-inventory.md).
