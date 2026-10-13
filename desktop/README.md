@@ -2,8 +2,8 @@
 
 Tauri 2 + React + TypeScript shell for Synapse. It is a **local UI only**: it does not start agents,
 read your filesystem, open a vault or call a provider. Its one link to the Python runtime is a
-development-only status query that is compiled out of default and release builds and that no page uses yet
-([details](../docs/implementation/desktop-runtime-bridge.md)). Pages render
+development-only status query that is compiled out of default and release builds; Settings → Runtime shows
+its answer ([details](../docs/implementation/desktop-runtime-bridge.md#runtime-status-in-settings)). Other pages render
 clearly labelled sample data. See [`docs/implementation/desktop-architecture.md`](../docs/implementation/desktop-architecture.md).
 
 This directory is separate from the inherited MCO npm package; the root `package.json` does not
