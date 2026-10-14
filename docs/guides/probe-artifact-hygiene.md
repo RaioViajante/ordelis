@@ -18,24 +18,22 @@ this document, the issue tracker, or the pull request.
 
 ## What we changed
 
-1. **Removed 24 of the 26 tracked probe-local home artifacts from the current tree**
-   (2 session rollouts, 18 bundled skill files, 4 temporary files). Before deletion it
+1. **Removed all 26 tracked probe-local home artifacts from the current tree**
+   (2 shell snapshots, 2 session rollouts, 18 bundled skill files, 4 temporary files),
+   across two stacked PRs. The base PR removes 24 and keeps the two credential-bearing
+   shell snapshots byte-identical to `main`, so its own rendered diff contains no
+   section for them at all; the stacked removal PR deletes those two. Before deletion it
    was verified that no runtime module, test, script, workflow or document references
    them; curated probe evidence (result, parsed and summary files) was left untouched.
-   The two credential-bearing shell snapshots stay byte-identical to `main` in this
-   change and are deleted by a stacked follow-up PR based on this branch: rendered
-   diffs take attributes from their merge base, so only a diff whose merge base already
-   contains the `.gitattributes` `-diff` rule renders their deletion as binary. This
-   guarantees no rendered diff in either PR displays their contents.
 2. **Narrow `.gitignore` rules** so the same categories cannot be staged again:
    - `.probe_*_home/` — probe-local `HOME`/`CODEX_HOME` directories at any depth
      (shell snapshots, session rollouts, provider auth state).
    - `shell_snapshots/` — environment captures, by directory name.
    - `docs/probes/**/raw/` — raw provider stdout/stderr transcripts from probe runs.
 3. **Diff redaction:** `.gitattributes` marks probe-home and shell-snapshot paths `-diff`,
-   so their contents are never rendered as line text in any diff whose merge base
-   carries that rule — which is what makes the stacked follow-up deletion render as
-   "binary files differ" instead of line content.
+   so local git diffs (`git show`, `git log -p`, `git diff`) report them as binary and
+   never print their contents. GitHub's hosted diff views ignore this attribute — see
+   "What this does not protect".
 4. **Probe script sanitization:** `scripts/run_capability_probes.sh` now prunes
    `shell_snapshots/` and `sessions/` subtrees from the artifacts root after probes
    finish and before summaries are written, so environment captures are absent from the
@@ -43,11 +41,10 @@ this document, the issue tracker, or the pull request.
    it does not strip credentials providers need for their C0 auth checks, and it never
    touches a home outside the artifacts root. No environment is ever logged in full.
 5. **Regression tests:** `tests/test_probe_artifact_hygiene.py` asserts that no
-   probe-home or shell-snapshot path is tracked outside the documented pending-removal
-   set, that only pending-removal files survive under the historical probe home, that
-   sensitive paths are ignored, that curated evidence remains committable and diffs as
-   binary, and that the probe script keeps its pruning and never points a provider at a
-   repository-local home.
+   probe-home or shell-snapshot path is tracked beyond a documented pending-removal set
+   that the stacked removal PR empties, that sensitive paths are ignored, that curated
+   evidence remains committable, that the paths are marked `-diff`, and that the probe
+   script keeps its pruning and never points a provider at a repository-local home.
 
 ## What this protects
 
@@ -63,6 +60,12 @@ this document, the issue tracker, or the pull request.
 - **Git history is unchanged.** The credential remains in historical commits.
   Removing files from the current tree neither revokes a credential nor erases it from
   history, and this change must not be described as doing so.
+- **GitHub still renders deleted file contents.** Hosted diff views (pull requests,
+  compare pages, commit pages) ignore the `-diff` attribute and display the removed
+  lines of the shell snapshots. Those lines are identical to the content `main` has
+  always served at the same paths, so no new material is disclosed — but any hosted
+  diff of this deletion will show them. Local git diffs remain silent thanks to the
+  `-diff` rule.
 - **Revocation is still required** and is still pending. Until revocation is confirmed,
   the credential must be treated as compromised regardless of what the tree contains.
 - **Historical raw transcripts stay tracked for now.** Audit evidence indicates they
