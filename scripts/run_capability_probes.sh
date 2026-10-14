@@ -4,7 +4,11 @@ set -o pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 DATE_STR="$(date +%F)"
-BASE_DIR="$ROOT_DIR/docs/probes/$DATE_STR"
+ARTIFACT_PARENT="${PROBE_ARTIFACT_ROOT:-$ROOT_DIR/docs/probes}"
+BASE_DIR="$ARTIFACT_PARENT/$DATE_STR"
+SANITIZER="$ROOT_DIR/scripts/sanitize_capability_probe_artifacts.py"
+CI_EXPORT_DIR="${PROBE_CI_EXPORT_DIR:-}"
+CI_SUMMARY_PATH=""
 OS_NAME="$(uname -s)"
 
 case "$OS_NAME" in
@@ -13,7 +17,75 @@ case "$OS_NAME" in
   *) TARGET_OS="windows" ;;
 esac
 
+if [ -n "$CI_EXPORT_DIR" ]; then
+  CI_SUMMARY_PATH="$CI_EXPORT_DIR/capability-probe-summary.json"
+fi
+
+layout_args=(
+  validate-layout
+  --repo-root "$ROOT_DIR"
+  --artifact-parent "$ARTIFACT_PARENT"
+  --run-root "$BASE_DIR"
+  --cwd "$PWD"
+)
+if [ -n "$CI_EXPORT_DIR" ]; then
+  layout_args+=(--export-dir "$CI_EXPORT_DIR")
+fi
+if [ -n "${HOME:-}" ]; then
+  layout_args+=(--home "$HOME")
+fi
+if [ -n "${CODEX_HOME:-}" ]; then
+  layout_args+=(--codex-home "$CODEX_HOME")
+fi
+python3 "$SANITIZER" "${layout_args[@]}" || exit 1
+
 mkdir -p "$BASE_DIR"
+
+ACTIVE_WRAPPER_PID=""
+
+discard_ci_export() {
+  if [ -n "$CI_SUMMARY_PATH" ]; then
+    rm -f -- "$CI_SUMMARY_PATH"
+  fi
+}
+
+cleanup_sensitive_artifacts() {
+  if ! python3 "$SANITIZER" cleanup --run-root "$BASE_DIR" --artifact-parent "$ARTIFACT_PARENT"; then
+    echo "Capability probe cleanup failed; CI export suppressed." >&2
+    return 1
+  fi
+}
+
+# shellcheck disable=SC2329 # invoked by signal traps
+handle_signal() {
+  local signal_name="$1"
+  local exit_code="$2"
+  trap - HUP INT TERM
+  if [ -n "$ACTIVE_WRAPPER_PID" ]; then
+    kill -s "$signal_name" "$ACTIVE_WRAPPER_PID" 2>/dev/null || true
+    wait "$ACTIVE_WRAPPER_PID" 2>/dev/null || true
+    ACTIVE_WRAPPER_PID=""
+  fi
+  exit "$exit_code"
+}
+
+# shellcheck disable=SC2329 # invoked by the EXIT trap
+handle_exit() {
+  local exit_code=$?
+  trap - EXIT HUP INT TERM
+  if ! cleanup_sensitive_artifacts; then
+    discard_ci_export
+    if [ "$exit_code" -eq 0 ]; then
+      exit_code=1
+    fi
+  fi
+  exit "$exit_code"
+}
+
+trap 'handle_signal HUP 129' HUP
+trap 'handle_signal INT 130' INT
+trap 'handle_signal TERM 143' TERM
+trap handle_exit EXIT
 
 providers=(claude codex gemini opencode qwen hermes pi copilot grok cursor agy)
 DEFAULT_TIMEOUT_SECONDS=45
@@ -86,7 +158,9 @@ json_result() {
 run_with_timeout() {
   local timeout_seconds="$1"
   shift
-  python3 - "$timeout_seconds" "$@" <<'PY'
+  exec python3 - "$timeout_seconds" "$@" <<'PY'
+import os
+import signal
 import subprocess
 import sys
 
@@ -95,19 +169,44 @@ command = sys.argv[2:]
 if not command:
     sys.exit(1)
 
+process = None
+
+
+def terminate_process_group(signum=signal.SIGTERM):
+    if process is None or process.poll() is not None:
+        return
+    try:
+        os.killpg(process.pid, signum)
+    except ProcessLookupError:
+        return
+
+
+def handle_signal(signum, _frame):
+    terminate_process_group(signum)
+    try:
+        process.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        terminate_process_group(signal.SIGKILL)
+        process.wait()
+    raise SystemExit(128 + signum)
+
+
+for handled_signal in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
+    signal.signal(handled_signal, handle_signal)
+
 try:
-    process = subprocess.Popen(command)
+    process = subprocess.Popen(command, start_new_session=True)
 except Exception:
     sys.exit(1)
 
 try:
     rc = process.wait(timeout=timeout)
 except subprocess.TimeoutExpired:
-    process.terminate()
+    terminate_process_group()
     try:
         process.wait(timeout=2)
     except subprocess.TimeoutExpired:
-        process.kill()
+        terminate_process_group(signal.SIGKILL)
         process.wait()
     sys.exit(142)
 
@@ -133,8 +232,11 @@ run_probe() {
   local version
   version="$(provider_version "$provider")"
 
-  run_with_timeout "$DEFAULT_TIMEOUT_SECONDS" bash -c "$cmd" >"$stdout_path" 2>"$stderr_path"
+  run_with_timeout "$DEFAULT_TIMEOUT_SECONDS" bash -c "$cmd" >"$stdout_path" 2>"$stderr_path" &
+  ACTIVE_WRAPPER_PID=$!
+  wait "$ACTIVE_WRAPPER_PID"
   local ec=$?
+  ACTIVE_WRAPPER_PID=""
 
   local status="FAIL"
   local reason="command_failed_exit_${ec}"
@@ -264,12 +366,13 @@ run_probe "qwen" "C3" \
   "'$QWEN_BIN' 'Output two short thoughts.' --output-format stream-json --auth-type qwen-oauth" \
   "jq -s -e 'length >= 2' '$BASE_DIR/qwen/C3/raw/stdout.log'"
 
-# Probe-local homes: when a caller-supplied HOME/CODEX_HOME points into the artifacts
-# root, the provider writes shell snapshots and session transcripts there, which can
-# embed environment data from the machine running the probes. Drop those subtrees from
-# the artifact set before summaries are written; probe results above are already on disk
-# and are unaffected. Caller environments outside $BASE_DIR are never touched.
-find "$BASE_DIR" -type d \( -name shell_snapshots -o -name sessions \) -prune -exec rm -rf {} + 2>/dev/null || true
+# Provider output is untrusted. Remove known environment/session capture directories
+# before producing any CI-safe export. The sanitizer verifies the dedicated run root
+# before deleting and fails closed if any cleanup cannot be completed.
+if ! cleanup_sensitive_artifacts; then
+  discard_ci_export
+  exit 1
+fi
 
 LOCK_FILE="$BASE_DIR/lock-summary.yaml"
 aggregate_exit_code=0
@@ -321,6 +424,18 @@ SUMMARY_MD="$BASE_DIR/summary.md"
   echo
   echo "Artifacts root: \`$BASE_DIR\`"
 } > "$SUMMARY_MD"
+
+if [ -n "$CI_SUMMARY_PATH" ]; then
+  if ! python3 "$SANITIZER" export \
+    --run-root "$BASE_DIR" \
+    --output "$CI_SUMMARY_PATH" \
+    --run-date "$DATE_STR" \
+    --target-os "$TARGET_OS"
+  then
+    discard_ci_export
+    exit 1
+  fi
+fi
 
 echo "Done. Probe artifacts in: $BASE_DIR"
 exit "$aggregate_exit_code"

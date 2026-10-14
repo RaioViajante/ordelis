@@ -34,26 +34,39 @@ this document, the issue tracker, or the pull request.
    so local git diffs (`git show`, `git log -p`, `git diff`) report them as binary and
    never print their contents. GitHub's hosted diff views ignore this attribute — see
    "What this does not protect".
-4. **Probe script sanitization:** `scripts/run_capability_probes.sh` now prunes
-   `shell_snapshots/` and `sessions/` subtrees from the artifacts root after probes
-   finish and before summaries are written, so environment captures are absent from the
-   artifacts that CI uploads. The script still never assigns `HOME` or `CODEX_HOME`:
-   it does not strip credentials providers need for their C0 auth checks, and it never
-   touches a home outside the artifacts root. No environment is ever logged in full.
-5. **Regression tests:** `tests/test_probe_artifact_hygiene.py` asserts that no
+4. **Probe script sanitization:** `scripts/run_capability_probes.sh` rejects any `HOME`
+   or `CODEX_HOME` that resolves inside the repository or probe artifact root, including
+   relative paths and symlink aliases. Legitimate external provider homes remain
+   unchanged, so configured authentication is not copied or stripped. Probe subprocesses
+   run in their own process groups; timeout and signal handling terminates the group.
+   Exit and signal traps remove `shell_snapshots/` and `sessions/` only below the
+   verified, dedicated run root, preserve the probe exit status, and turn cleanup errors
+   into failures.
+5. **Fail-closed CI export:** raw logs, `parsed.json`, `result.json`, human summaries and
+   lock files are not uploaded. They contain provider output, provider-controlled version
+   text or local paths and therefore have no safe upload contract. CI uploads one newly
+   staged JSON document outside the probe tree. Its exporter independently validates and
+   copies only fixed provider IDs, `C0`/`C1`/`C2` `PASS`/`FAIL` enums, target OS, run date
+   and aggregate status. Cleanup must succeed before that file is created, and cleanup
+   failure removes it.
+6. **Regression tests:** `tests/test_probe_artifact_hygiene.py` asserts that no
    probe-home or shell-snapshot path is tracked beyond a documented pending-removal set
    that the stacked removal PR empties, that sensitive paths are ignored, that curated
-   evidence remains committable, that the paths are marked `-diff`, and that the probe
-   script keeps its pruning and never points a provider at a repository-local home.
+   evidence remains committable, and that the paths are marked `-diff` for local Git.
+   Probe fixture tests cover ordinary provider failure, cleanup failure, signals, process
+   termination, unsafe provider homes and mutation attempts against the CI export.
 
 ## What this protects
 
-- New probe runs cannot reintroduce environment captures or session transcripts into
-  Git history: the paths are ignored, and the script removes them from the artifact set
-  before CI collects it.
+- New probe runs reject repository-local provider homes, known sensitive paths are
+  ignored, and cleanup removes environment/session captures from the verified run root.
+- CI never uploads the working probe tree. An unsuccessful probe can upload only the
+  independently validated status-only document; interruption or cleanup failure cannot
+  make raw or unexpected files eligible for upload.
 - Curated probe evidence (`result.json`, `parsed.json`, `summary.md`,
-  `lock-summary.yaml`) remains committable, so the documented capability-probe workflow
-  and the gate summary contract are unchanged.
+  `lock-summary.yaml`) remains locally committable for the documented workflow, but is
+  deliberately excluded from CI uploads because its content is not bounded tightly
+  enough to be considered non-sensitive.
 
 ## What this does not protect
 
@@ -71,10 +84,10 @@ this document, the issue tracker, or the pull request.
 - **Historical raw transcripts stay tracked for now.** Audit evidence indicates they
   contain absolute developer paths and third-party session output but no credential-shaped
   values; removing or retaining them is a separate, narrowly justified decision.
-- **A caller can still export `CODEX_HOME` into the repository.** Ignore rules and
-  script-level pruning contain the damage, but rejecting that configuration outright
-  trades it for an auth-state isolation decision (probes need the provider's real home to
-  check login status) and is deferred to a separate issue.
+- **Traps are not absolute cleanup guarantees.** `SIGKILL`, machine crashes and abrupt
+  runner termination cannot execute shell traps. Temporary raw artifacts can remain on
+  that machine until runner/workspace cleanup, but the CI upload allowlist never includes
+  the working tree or raw artifact root, even when probe cleanup never runs.
 
 ## Why Git history needs a separate decision
 

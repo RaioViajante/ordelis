@@ -84,6 +84,9 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Run capability probes
+        env:
+          PROBE_ARTIFACT_ROOT: ${{ runner.temp }}/synapse-capability-probe-work-${{ github.run_id }}-${{ github.run_attempt }}
+          PROBE_CI_EXPORT_DIR: ${{ runner.temp }}/synapse-capability-probe-export-${{ github.run_id }}-${{ github.run_attempt }}
         run: ./scripts/run_capability_probes.sh
 
       - name: Upload capability probe artifacts
@@ -91,7 +94,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: capability-probes-${{ github.run_id }}
-          path: docs/probes/**
+          path: ${{ runner.temp }}/synapse-capability-probe-export-${{ github.run_id }}-${{ github.run_attempt }}/capability-probe-summary.json
           if-no-files-found: ignore
 
   packaging-smoke-macos:

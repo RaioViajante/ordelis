@@ -1,23 +1,26 @@
 from __future__ import annotations
 
-import re
+import json
 import subprocess
+import tempfile
 import unittest
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+
+from runtime.contracts import PROVIDER_IDS
 
 ROOT = Path(__file__).resolve().parent.parent
-PROBE_SCRIPT = ROOT / "scripts" / "run_capability_probes.sh"
+SANITIZER = ROOT / "scripts" / "sanitize_capability_probe_artifacts.py"
 
-# Removal PR: empty, so the probes below assert that nothing at all is tracked under
-# a probe home. The stacked base PR kept this tuple pointing at the two
-# credential-bearing shell snapshots so that its own rendered diff never displayed
-# their contents; this PR deletes them, and `.gitattributes` marks the paths `-diff`
-# with the rule present in this diff's merge base.
-PENDING_REMOVAL_PREFIXES: tuple[str, ...] = ()
+# The base PR allowlists exactly the two retained files so it produces no deletion
+# section for them. This removal PR deletes both, so no probe-home path is allowed.
+# GitHub ignores `-diff` for hosted deletions; the attribute protects local Git only.
+PENDING_REMOVAL_PATHS: tuple[str, ...] = ()
 PROBE_HOME_ROOT = "docs/probes/2026-02-26/.probe_codex_home"
 
 # Synthetic paths only: they never existed and carry no real material.
 PROBE_HOME_PATHS = (
+    ".probe_codex_home/auth.json",
+    "shell_snapshots/snapshot.sh",
     "docs/probes/2099-01-01/.probe_codex_home/shell_snapshots/snapshot.sh",
     "docs/probes/2099-01-01/.probe_codex_home/sessions/rollout.jsonl",
     "docs/probes/2099-01-01/.probe_codex_home/auth.json",
@@ -42,6 +45,14 @@ def _git(*args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+def _is_forbidden_probe_path(path: str) -> bool:
+    parts = PurePosixPath(path).parts
+    return "shell_snapshots" in parts or any(
+        part.startswith(".probe_") and part.endswith("_home")
+        for part in parts
+    )
+
+
 class ProbeArtifactHygieneTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -55,8 +66,7 @@ class ProbeArtifactHygieneTests(unittest.TestCase):
         paths = [line for line in tracked.stdout.splitlines() if line]
         offenders = [
             p for p in paths
-            if ("/.probe_" in p or "/shell_snapshots/" in p)
-            and not p.startswith(PENDING_REMOVAL_PREFIXES)
+            if _is_forbidden_probe_path(p) and p not in PENDING_REMOVAL_PATHS
         ]
         self.assertEqual(
             offenders, [],
@@ -65,16 +75,15 @@ class ProbeArtifactHygieneTests(unittest.TestCase):
         )
 
     def test_only_pending_removal_files_remain_in_probe_home(self) -> None:
-        # With PENDING_REMOVAL_PREFIXES emptied by the follow-up PR this asserts
+        # With PENDING_REMOVAL_PATHS emptied by the follow-up PR this asserts
         # that no file at all survives under the historical probe-local home.
         home = ROOT / "docs" / "probes" / "2026-02-26" / ".probe_codex_home"
-        survivors = [p for p in home.rglob("*") if p.is_file()] if home.exists() else []
-        for path in survivors:
-            relative = path.relative_to(ROOT).as_posix()
-            self.assertTrue(
-                relative.startswith(PENDING_REMOVAL_PREFIXES),
-                f"unexpected file tracked under probe home: {relative}",
-            )
+        survivors = {
+            path.relative_to(ROOT).as_posix()
+            for path in home.rglob("*")
+            if path.is_file()
+        } if home.exists() else set()
+        self.assertEqual(survivors, set(PENDING_REMOVAL_PATHS))
 
     def test_sensitive_probe_paths_are_ignored(self) -> None:
         for path in PROBE_HOME_PATHS:
@@ -94,8 +103,8 @@ class ProbeArtifactHygieneTests(unittest.TestCase):
                     f"{path} is curated probe evidence and must not be ignored",
                 )
 
-    def test_probe_home_paths_render_as_binary_in_diffs(self) -> None:
-        # Deletions of these paths must never render line content in a diff.
+    def test_probe_home_paths_disable_local_git_text_diffs(self) -> None:
+        # GitHub-hosted diffs ignore this attribute; this assertion is local only.
         for path in (PROBE_HOME_PATHS[0], PROBE_HOME_PATHS[1]):
             with self.subTest(path=path):
                 result = _git("check-attr", "diff", "--", path)
@@ -105,25 +114,112 @@ class ProbeArtifactHygieneTests(unittest.TestCase):
                     f"{path} must be marked -diff in .gitattributes, got: {result.stdout.strip()}",
                 )
 
-    def test_capability_probe_script_prunes_environment_capturing_dirs(self) -> None:
-        script = PROBE_SCRIPT.read_text(encoding="utf-8")
+    def test_ci_upload_is_one_status_only_file_outside_the_checkout(self) -> None:
+        workflow = (ROOT / ".github" / "workflows" / "gate.yml").read_text(encoding="utf-8")
+        upload = workflow.split("- name: Upload capability probe artifacts", 1)[1]
+        upload = upload.split("\n  packaging-smoke-macos:", 1)[0]
+
+        self.assertNotIn("docs/probes", upload)
+        self.assertNotIn("**", upload)
         self.assertIn(
-            "-name shell_snapshots", script,
-            "probe script must drop shell snapshots from the artifact set",
+            "path: ${{ runner.temp }}/synapse-capability-probe-export-${{ github.run_id }}-${{ github.run_attempt }}/capability-probe-summary.json",
+            upload,
         )
-        self.assertIn(
-            "-name sessions", script,
-            "probe script must drop session transcripts from the artifact set",
-        )
-        # The script must never point a provider at a home inside the repository;
-        # that is how environment captures ended up in the artifact root before.
-        assignments = re.search(
-            r"^[ \t]*(export[ \t]+)?(HOME|CODEX_HOME)=", script, re.MULTILINE
-        )
-        self.assertIsNone(
-            assignments,
-            "probe script must not assign HOME/CODEX_HOME (would create a repo-local home)",
-        )
+
+    def test_ci_export_ignores_unexpected_files_and_rejects_invalid_status(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            test_root = Path(tmp)
+            artifact_parent = test_root / "probe-work"
+            run_root = artifact_parent / "2099-01-01"
+            output = test_root / "export" / "capability-probe-summary.json"
+            dummy_private_value = "DUMMY_NONFUNCTIONAL_PRIVATE_VALUE"
+            for provider in PROVIDER_IDS:
+                for capability in ("C0", "C1", "C2"):
+                    result = run_root / provider / capability / "result.json"
+                    result.parent.mkdir(parents=True, exist_ok=True)
+                    result.write_text(
+                        json.dumps(
+                            {
+                                "provider": provider,
+                                "capability": capability,
+                                "os": "linux",
+                                "status": "PASS",
+                                "provider_version": dummy_private_value,
+                                "unexpected": dummy_private_value,
+                            },
+                        ),
+                        encoding="utf-8",
+                    )
+            unexpected = run_root / "unexpected-provider-state" / "private.txt"
+            unexpected.parent.mkdir()
+            unexpected.write_text(dummy_private_value, encoding="utf-8")
+
+            completed = subprocess.run(
+                [
+                    "python3", str(SANITIZER), "export",
+                    "--run-root", str(run_root),
+                    "--output", str(output),
+                    "--run-date", "2099-01-01",
+                    "--target-os", "linux",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertNotIn(dummy_private_value, output.read_text(encoding="utf-8"))
+            self.assertEqual([path.name for path in output.parent.iterdir()], [output.name])
+
+            mutated = run_root / PROVIDER_IDS[0] / "C0" / "result.json"
+            payload = json.loads(mutated.read_text(encoding="utf-8"))
+            payload["status"] = dummy_private_value
+            mutated.write_text(json.dumps(payload), encoding="utf-8")
+            rejected_output = test_root / "rejected" / "summary.json"
+            rejected = subprocess.run(
+                [
+                    "python3", str(SANITIZER), "export",
+                    "--run-root", str(run_root),
+                    "--output", str(rejected_output),
+                    "--run-date", "2099-01-01",
+                    "--target-os", "linux",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertFalse(rejected_output.exists())
+
+    def test_cleanup_never_follows_sensitive_directory_symlinks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            test_root = Path(tmp)
+            artifact_parent = test_root / "probe-work"
+            run_root = artifact_parent / "2099-01-01"
+            external = test_root / "external"
+            victim = external / "must-remain.txt"
+            victim.parent.mkdir()
+            victim.write_text("DUMMY_SAFE_VALUE", encoding="utf-8")
+            nested = run_root / "provider"
+            nested.mkdir(parents=True)
+            (nested / "sessions").symlink_to(external, target_is_directory=True)
+            snapshot = nested / "shell_snapshots" / "snapshot.sh"
+            snapshot.parent.mkdir()
+            snapshot.write_text("DUMMY_SAFE_VALUE", encoding="utf-8")
+
+            completed = subprocess.run(
+                [
+                    "python3", str(SANITIZER), "cleanup",
+                    "--run-root", str(run_root),
+                    "--artifact-parent", str(artifact_parent),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertTrue(victim.exists())
+            self.assertFalse((nested / "sessions").exists())
+            self.assertFalse(snapshot.parent.exists())
 
 
 if __name__ == "__main__":
