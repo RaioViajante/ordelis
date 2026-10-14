@@ -13,4 +13,6 @@ export default tseslint.config(
     plugins: { "react-hooks": reactHooks },
     rules: reactHooks.configs.recommended.rules,
   },
+  // Build and verification scripts run in Node, not in the webview.
+  { files: ["scripts/**/*.mjs"], languageOptions: { globals: globals.node } },
 );

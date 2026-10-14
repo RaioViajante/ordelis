@@ -12,58 +12,22 @@ const COMMANDS = [
 ];
 const read = (p: string) => readFileSync(join(root, p), "utf8");
 
-// Every extension Vite resolves as a script module; tests and Vitest support files are not part of the app.
-const SCRIPT = /\.(?:[cm]?[jt]sx?)$/;
-const isTestSource = (path: string) =>
-  /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(path) || path.startsWith(join(root, "src", "test") + "/");
+// The files rustc compiles for the desktop library in each macOS configuration. verify-native-boundary.mjs checks
+// this list against the compiler's dep-info, so any other compiled file fails CI however it was brought in.
+const nativeSources: { configurations: Record<string, string[]> } = JSON.parse(read("scripts/native-sources.json"));
 
-function walkFiles(dir: string, out: string[] = []): string[] {
-  for (const name of readdirSync(dir)) {
-    const p = join(dir, name);
-    if (statSync(p).isDirectory()) walkFiles(p, out);
-    else out.push(p);
-  }
-  return out;
+// The production project registry files, as listed (and compiler-verified) above, keyed by path under src-tauri/src.
+function projectSources(): Record<string, string> {
+  const production = new Set(
+    ["default", "release", "dev-runtime"].flatMap((c) => nativeSources.configurations[c]).filter((f) => f.startsWith("src/projects")),
+  );
+  return Object.fromEntries([...production].map((f) => [f.slice("src/".length), read(`src-tauri/${f}`)]));
 }
 
-// Path -> text for every script module under src/, tests included (imports of them are checked).
-function frontendSources(): Record<string, string> {
-  const files = walkFiles(join(root, "src")).filter((p) => SCRIPT.test(p));
-  return Object.fromEntries(files.map((p) => [p, readFileSync(p, "utf8")]));
-}
-
-// Static tripwires, not a sandbox: code that rebuilds a global's name at run time is not detectable here. The
-// guarantees that matter are structural (only runtimeStatus.ts imports @tauri-apps; nothing names Tauri's
-// internals), and the authority over what may be called stays the capability ACL.
-function frontendViolations(files: Record<string, string>): string[] {
+// Content rules for the project registry: no listing, contents, processes, network, Git, Python or gate, and only
+// registry.rs touches files. Which files exist is not decided here; the compiler-verified list above decides it.
+function projectContentViolations(files: Record<string, string>): string[] {
   const violations: string[] = [];
-  const src = join(root, "src");
-  for (const [path, text] of Object.entries(files)) {
-    if (isTestSource(path)) continue;
-    if (/list_projects|add_project|remove_project|reset_projects/.test(text)) violations.push(`${path}: names a project command`);
-    if (/__TAURI/.test(text)) violations.push(`${path}: reaches Tauri internals`);
-    if (text.includes("@tauri-apps") && path !== join(src, "app", "runtimeStatus.ts")) violations.push(`${path}: imports @tauri-apps`);
-    for (const m of text.matchAll(/(?:from\s*|import\s*\(?\s*|require\s*\(\s*)["'](\.{1,2}\/[^"']*)["']/g)) {
-      const target = join(path, "..", m[1]);
-      if (!target.startsWith(src + "/")) violations.push(`${path}: imports ${m[1]} from outside src/`);
-      else if (isTestSource(target) || /\.(?:test|spec)$/.test(target)) violations.push(`${path}: imports test code ${m[1]}`);
-    }
-  }
-  return violations;
-}
-
-// Relative path (from src-tauri/src) -> text for every Rust source file.
-function rustSources(): Record<string, string> {
-  const base = join(root, "src-tauri", "src");
-  const files = walkFiles(base).filter((p) => p.endsWith(".rs"));
-  return Object.fromEntries(files.map((p) => [p.slice(base.length + 1), readFileSync(p, "utf8")]));
-}
-
-// Walks the production module tree from projects.rs through every `mod name;` that is not declared exactly
-// `#[cfg(test)]`, so a new submodule is scanned without being listed here. Only registry.rs touches files.
-function rustTreeViolations(files: Record<string, string>): string[] {
-  const violations: string[] = [];
-  const queue: [string, string][] = [["projects.rs", "projects"]];
   const fsAllowed: Record<string, string[]> = {
     "projects/registry.rs": ["DirBuilder", "File", "Metadata", "OpenOptions", "hard_link", "remove_file", "rename", "symlink_metadata"],
     "projects/folder.rs": ["Metadata", "canonicalize", "symlink_metadata"],
@@ -72,20 +36,7 @@ function rustTreeViolations(files: Record<string, string>): string[] {
     "EINTR", "EINVAL", "EIO", "ENOENT", "ENOTDIR", "ENOTSUP", "ERANGE", "EWOULDBLOCK", "LOCK_EX", "LOCK_NB",
     "O_DIRECTORY", "O_NOFOLLOW", "O_NONBLOCK", "c_char", "flock", "geteuid", "getpwuid_r", "passwd",
   ]);
-  for (let next = queue.shift(); next; next = queue.shift()) {
-    const [file, children] = next;
-    const text = files[file];
-    if (text === undefined) {
-      violations.push(`${file}: declared but not found`);
-      continue;
-    }
-    for (const m of text.matchAll(/((?:^[ \t]*#\[[^\n]*\]\n)*)^[ \t]*(?:pub(?:\([^)]*\))? )?mod (\w+);/gm)) {
-      if (/#\[path/.test(m[1])) violations.push(`${file}: #[path] on mod ${m[2]}`);
-      if (/^[ \t]*#\[cfg\(test\)\]$/m.test(m[1])) continue;
-      const candidates = [`${children}/${m[2]}.rs`, `${children}/${m[2]}/mod.rs`];
-      const found = candidates.find((c) => c in files) ?? candidates[0];
-      queue.push([found, found.endsWith("/mod.rs") ? found.slice(0, -"/mod.rs".length) : found.slice(0, -".rs".length)]);
-    }
+  for (const [file, text] of Object.entries(files)) {
     // Code only: full-line comments may describe what the code must not do.
     const code = text.replace(/^[ \t]*\/\/.*$/gm, "");
     const rust = code.replaceAll("spawn_blocking", "").replaceAll("tauri::async_runtime::spawn(", "");
@@ -93,13 +44,13 @@ function rustTreeViolations(files: Record<string, string>): string[] {
       /read_dir|walkdir|glob|std::process|\bCommand\b|\bspawn\b|std::net|TcpStream|UdpSocket|reqwest|hyper|tokio::net|\.plugin\(/,
       /runtime_bridge|python|\bgit\b|[Gg]ate|execute|provider|agent/,
       /fs::read\b|read_to_string|fs::write|fs::copy|File::|remove_dir|set_permissions|create_dir(?:_all)?\(|std::env/,
-      /#\[path|include!|include_str!|include_bytes!|use std::fs[^;]*\bas\b|extern crate/,
+      /use std::fs[^;]*\bas\b|extern crate/,
     ];
     for (const pattern of forbidden) {
       const hit = rust.match(pattern);
       if (hit) violations.push(`${file}: ${hit[0]}`);
     }
-    const fsItems = [...rust.matchAll(/std::fs::(\w+)|use std::fs::\{([^}]*)\}/g)].flatMap((m) => m[1] ? [m[1]] : m[2].split(",").map((x) => x.trim()));
+    const fsItems = [...rust.matchAll(/std::fs::(\w+)|use std::fs::\{([^}]*)\}/g)].flatMap((m) => (m[1] ? [m[1]] : m[2].split(",").map((x) => x.trim())));
     for (const item of fsItems) if (!(fsAllowed[file] ?? []).includes(item)) violations.push(`${file}: std::fs::${item}`);
     if (/use std::fs(?:;|::\*)/.test(rust)) violations.push(`${file}: imports all of std::fs`);
     if (file !== "projects/registry.rs" && /OpenOptions|DirBuilder|remove_file|rename\(|hard_link/.test(rust)) {
@@ -192,7 +143,9 @@ describe("desktop trust boundary", () => {
 
   // Registration is a bookmark: the registry module looks at folder metadata and its own files, nothing else.
   it("keeps the project registry away from folder contents, processes and the network", () => {
-    expect(rustTreeViolations(rustSources())).toEqual([]);
+    const files = projectSources();
+    expect(Object.keys(files).sort()).toEqual(["projects.rs", "projects/folder.rs", "projects/registry.rs"]);
+    expect(projectContentViolations(files)).toEqual([]);
     const production = (p: string) => {
       const text = read(p);
       // registry.rs ends with its test module declaration; tests live in their own file.
@@ -221,39 +174,26 @@ describe("desktop trust boundary", () => {
     expect(projects).toMatch(/#\[cfg\(target_os = "macos"\)\]\nmod folder;\n#\[cfg\(target_os = "macos"\)\]\nmod registry;/);
     expect(projects.match(/rfd::/g)).toEqual(["rfd::"]);
     expect(projects).toMatch(/\.set_can_create_directories\(false\)/);
-    // The crate has exactly these top-level modules, so a new one cannot sit outside both scans.
-    const lib = read("src-tauri/src/lib.rs");
-    expect(lib.slice(0, lib.indexOf("#[cfg(test)]")).match(/^\s*(?:pub )?mod \w+/gm)).toEqual(["mod projects", "mod runtime_bridge"]);
   });
 
-  it("finds prohibited operations anywhere in the project registry module tree", () => {
-    const actual = rustSources();
-    expect(rustTreeViolations(actual)).toEqual([]);
-    const withModule = (decl: string, file: string, text: string) => ({
-      ...actual,
-      "projects.rs": actual["projects.rs"].replace("mod registry;", `mod registry;\n${decl}`),
-      [file]: text,
-    });
+  // Which files compile is verified from rustc's dep-info by scripts/verify-native-boundary.mjs (with its own
+  // regression fixtures in scripts/test-verify-native-boundary.sh); these fixtures cover the content rules.
+  it("finds prohibited operations in any compiled project registry file", () => {
+    const actual = projectSources();
+    const add = (file: string, text: string) => ({ ...actual, [file]: actual[file] + "\n" + text });
     const bypasses: Record<string, Record<string, string>> = {
-      // The review's bypass: a new production submodule that the old hard-coded file list never read.
-      "new submodule": withModule('#[cfg(target_os = "macos")]\nmod scan;', "projects/scan.rs", "pub fn f(p: &std::path::Path) { let _ = std::fs::read_dir(p); }"),
-      "nested submodule": {
-        ...withModule("mod util;", "projects/util.rs", "mod deep;"),
-        "projects/util/deep.rs": "pub fn g() { let _ = std::process::Command::new(\"git\"); }",
-      },
-      "mod.rs layout": withModule("mod walk;", "projects/walk/mod.rs", "use std::fs::read_dir;"),
-      "path attribute": withModule('#[path = "../elsewhere.rs"]\nmod hidden;', "elsewhere.rs", ""),
-      "include macro": { ...actual, "projects/folder.rs": actual["projects/folder.rs"] + '\ninclude!("../elsewhere.rs");' },
-      "File::options outside the registry": { ...actual, "projects/folder.rs": actual["projects/folder.rs"] + "\nfn h(p: &Path) { let _ = std::fs::File::options().read(true).open(p); }" },
-      "raw libc open": { ...actual, "projects/folder.rs": actual["projects/folder.rs"] + "\nfn i() { unsafe { libc::opendir(std::ptr::null()) }; }" },
+      "directory listing": add("projects/folder.rs", "pub fn f(p: &Path) { let _ = std::fs::read_dir(p); }"),
+      "Path::read_dir": add("projects.rs", "fn f(p: &std::path::Path) { let _ = p.read_dir(); }"),
+      "process": add("projects/registry.rs", 'fn g() { let _ = std::process::Command::new("git"); }'),
+      "File::options outside the registry": add("projects/folder.rs", "fn h(p: &Path) { let _ = std::fs::File::options().read(true).open(p); }"),
+      "raw libc open": add("projects/folder.rs", "fn i() { unsafe { libc::opendir(std::ptr::null()) }; }"),
       "aliased import": { ...actual, "projects/registry.rs": actual["projects/registry.rs"].replace("use std::collections::HashSet;", "use std::collections::HashSet;\nuse std::fs::OpenOptions as Opener;") },
-      "network in projects.rs": { ...actual, "projects.rs": actual["projects.rs"] + "\nfn j() { let _ = std::net::TcpStream::connect(\"127.0.0.1:1\"); }" },
+      "network": add("projects.rs", 'fn j() { let _ = std::net::TcpStream::connect("127.0.0.1:1"); }'),
+      "reading contents": add("projects/folder.rs", "fn k(p: &Path) { let _ = std::fs::read_to_string(p); }"),
     };
-    for (const [name, tree] of Object.entries(bypasses)) {
-      expect(rustTreeViolations(tree), name).not.toEqual([]);
+    for (const [name, files] of Object.entries(bypasses)) {
+      expect(projectContentViolations(files), name).not.toEqual([]);
     }
-    // A test-only module may do what tests need.
-    expect(rustTreeViolations(withModule("#[cfg(test)]\nmod more_tests;", "projects/more_tests.rs", "use std::process::Command;"))).toEqual([]);
   });
 
   // Reviewed in issue #40: the frontend may depend on @tauri-apps/api, and only to call get_runtime_status.
@@ -261,13 +201,16 @@ describe("desktop trust boundary", () => {
     const pkg = JSON.parse(read("package.json"));
     const deps = Object.keys({ ...pkg.dependencies });
     expect(deps.filter((d) => d.startsWith("@tauri-apps"))).toEqual(["@tauri-apps/api"]);
+    // Everything the production bundle may take from node_modules comes from these packages.
+    expect(deps).toEqual(["@tauri-apps/api", "lucide-react", "react", "react-dom"]);
+    expect(Object.values(pkg.dependencies).every((v) => typeof v === "string" && /^\^?\d/.test(v))).toBe(true);
     const crate = read("src-tauri/Cargo.lock").match(/name = "tauri"\nversion = "([^"]+)"/)?.[1];
     expect(pkg.dependencies["@tauri-apps/api"]).toBe(crate);
   });
 
   it("calls exactly one native command, from one module, with no arguments", () => {
-    const files = frontendSources();
-    expect(frontendViolations(files)).toEqual([]);
+    // What the production bundle may contain, including which module may import @tauri-apps, is checked against a
+    // real build in frontend-boundary.test.ts.
     // index.html loads the app's one entry module, and there is no public/ directory to serve other scripts from.
     expect(read("index.html").match(/<script[^>]*>/g)).toEqual(['<script type="module" src="/src/main.tsx">']);
     expect(existsSync(join(root, "public"))).toBe(false);
@@ -280,32 +223,6 @@ describe("desktop trust boundary", () => {
     expect(adapter.match(/\binvoke\b/g)).toHaveLength(2);
     expect(adapter).toMatch(/\binvoke\(COMMAND\)/);
     expect(adapter).not.toMatch(/export[^\n]*\binvoke\b(?!\()|export \{|export \*/);
-  });
-
-  // The project commands have no frontend caller yet: the Projects UI, and with it the confirmed reset, is a
-  // separate increment. These are the shapes that escaped the earlier .ts/.tsx-only scan, plus close variants.
-  it("rejects every way a frontend module could reach a native command", () => {
-    const actual = frontendSources();
-    const main = actual[join(root, "src", "main.tsx")];
-    const startup = (name: string, text: string, importer = `import "./${name.replace(/\.[^.]+$/, "")}";\n`) => ({
-      ...actual,
-      [join(root, "src", "main.tsx")]: importer + main,
-      [join(root, "src", name)]: text,
-    });
-    const bypasses: Record<string, Record<string, string>> = {
-      // The review's bypass: a startup-imported JavaScript module.
-      "startup .js module": startup("boot.js", 'window.__TAURI_INTERNALS__.invoke("reset_projects");'),
-      ".mjs through @tauri-apps": startup("boot.mjs", 'import { invoke } from "@tauri-apps/api/core";\ninvoke("reset_" + "projects");'),
-      ".jsx reaching the internals": startup("Boot.jsx", 'const c = ["reset", "projects"].join("_");\nwindow["__TAURI_" + "INTERNALS__"].invoke(c);'),
-      ".mts naming a command": startup("boot.mts", 'export const c = "list_projects";'),
-      ".cjs required at startup": startup("boot.cjs", 'module.exports = "add_project";', 'require("./boot.cjs");\n'),
-      "a test-named module imported at startup": startup("boot.test.ts", 'import { invoke } from "@tauri-apps/api/core";\ninvoke("x");', 'import "./boot.test";\n'),
-      "a module outside src": { ...actual, [join(root, "src", "main.tsx")]: 'import "../scripts/boot.js";\n' + main },
-      "a dynamic import of test support": { ...actual, [join(root, "src", "main.tsx")]: 'void import("./test/setup");\n' + main },
-    };
-    for (const [name, files] of Object.entries(bypasses)) {
-      expect(frontendViolations(files), name).not.toEqual([]);
-    }
   });
 
   it("references no remote URL from the app sources", () => {

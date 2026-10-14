@@ -105,6 +105,14 @@ jobs:
       - name: Rust tests with the release profile (default features)
         run: cargo test --locked --release --manifest-path src-tauri/Cargo.toml
 
+      # Compiler-derived boundary: rustc's dep-info in every configuration must name exactly the files in
+      # scripts/native-sources.json, and every resolved dependency must come from crates.io.
+      - name: Compiled sources and dependency provenance
+        run: node scripts/verify-native-boundary.mjs
+
+      - name: Boundary verifier rejects known bypasses
+        run: scripts/test-verify-native-boundary.sh
+
       - name: Build macOS app bundle (release configuration)
         run: pnpm tauri build --bundles app
 

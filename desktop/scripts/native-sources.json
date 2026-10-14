@@ -1,0 +1,28 @@
+{
+  "_comment": "Every file rustc reads when compiling the desktop library crate, per macOS build configuration, relative to src-tauri/. verify-native-boundary.mjs compares this with the compiler's own dep-info, so a module added through any declaration form, a path attribute or an include macro fails until it is listed here. config.test.ts applies the project registry content rules to the listed src/projects files. Changing this list is a security review decision.",
+  "configurations": {
+    "default": ["src/lib.rs", "src/projects.rs", "src/projects/folder.rs", "src/projects/registry.rs", "src/runtime_bridge.rs"],
+    "release": ["src/lib.rs", "src/projects.rs", "src/projects/folder.rs", "src/projects/registry.rs", "src/runtime_bridge.rs"],
+    "dev-runtime": [
+      "src/lib.rs",
+      "src/projects.rs",
+      "src/projects/folder.rs",
+      "src/projects/registry.rs",
+      "src/runtime_bridge.rs",
+      "src/runtime_bridge/process.rs"
+    ],
+    "test": [
+      "Cargo.toml",
+      "build.rs",
+      "capabilities/default.json",
+      "src/lib.rs",
+      "src/projects.rs",
+      "src/projects/folder.rs",
+      "src/projects/registry.rs",
+      "src/projects/registry/tests.rs",
+      "src/runtime_bridge.rs",
+      "src/runtime_bridge/process.rs",
+      "src/runtime_bridge/process/tests.rs"
+    ]
+  }
+}
