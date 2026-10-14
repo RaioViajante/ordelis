@@ -45,12 +45,14 @@ this document, the issue tracker, or the pull request.
 5. **Fail-closed CI export:** raw logs, `parsed.json`, `result.json`, human summaries and
    lock files are not uploaded. They contain provider output, provider-controlled version
    text or local paths and therefore have no safe upload contract. Provider subprocesses
-   never receive a trusted export path. Only after the probe step succeeds and cleanup
-   succeeds does a separate workflow step create a randomly named mode-`0700` directory,
-   reconstruct one mode-`0600` JSON document from a strict allowlist, and validate its
-   path, ownership, type, directory contents and canonical bytes. The upload step requires
-   both preceding steps to have succeeded plus the staging step's explicit authorization
-   output; it does not use `always()`.
+   never receive a trusted export path. Only after the self-hosted probe job succeeds and
+   cleanup succeeds does a dependent GitHub-hosted job create a randomly named mode-`0700`
+   directory and a mode-`0600` status document. It receives no provider files or provider-
+   produced content; the document records only that GitHub reported the required probe job
+   successful. Before authorizing upload, the trusted job validates the candidate's path,
+   ownership, type, directory contents and canonical bytes. Upload requires the upstream
+   job, staging step and explicit authorization output all to be successful; it does not
+   use `always()`.
 6. **Regression tests:** `tests/test_probe_artifact_hygiene.py` asserts that no
    probe-home or shell-snapshot path is tracked beyond a documented pending-removal set
    that the stacked removal PR empties, that sensitive paths are ignored, that curated
@@ -64,9 +66,9 @@ this document, the issue tracker, or the pull request.
 - New probe runs reject repository-local provider homes, known sensitive paths are
   ignored, and cleanup removes environment/session captures from the verified run root.
 - CI never uploads the working probe tree. Failure, cancellation, interruption or cleanup
-  failure prevents trusted staging and makes the upload step ineligible. A provider-created
+  failure prevents the dependent GitHub-hosted artifact job from running. A provider-created
   file at the former export filename is untrusted even if it is structurally valid, because
-  the workflow neither validates nor uploads that location.
+  no provider files cross the runner boundary and the workflow never uploads that location.
 - Curated probe evidence (`result.json`, `parsed.json`, `summary.md`,
   `lock-summary.yaml`) remains locally committable for the documented workflow, but is
   deliberately excluded from CI uploads because its content is not bounded tightly
@@ -91,8 +93,8 @@ this document, the issue tracker, or the pull request.
 - **Traps are not absolute cleanup guarantees.** `SIGKILL`, machine crashes and abrupt
   runner termination cannot execute shell traps. Temporary raw artifacts and a provider-
   forged file can remain on that machine until runner/workspace cleanup. GitHub Actions
-  cancellation/failure semantics skip the success-gated trusted staging and upload steps,
-  so those files do not become upload candidates even when probe cleanup never runs.
+  cancellation/failure semantics skip the dependent trusted artifact job, so those files
+  do not become upload candidates even when probe cleanup never runs.
 
 ## Why Git history needs a separate decision
 
