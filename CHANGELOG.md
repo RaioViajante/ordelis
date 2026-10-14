@@ -20,7 +20,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Security
 
-- Stopped tracking capability-probe local-home artifacts inherited from the MCO history: their shell snapshots and session transcripts could embed machine environment data, including an apparent credential whose revocation is still pending. Removed all 26 artifacts across two stacked PRs, with the two credential-bearing shell snapshots deleted in the stacked removal PR; added narrow ignore rules, repository-local provider-home rejection, signal-safe process termination, fail-closed cleanup, a status-only CI upload contract, regression tests and a hygiene guide. This changes only the current tree; Git history still contains the credential and credential revocation remains an external, unconfirmed action (#49).
+- Stopped tracking capability-probe local-home artifacts inherited from the MCO history: their shell snapshots and session transcripts could embed machine environment data, including an apparent credential whose revocation is still pending. Removed all 26 artifacts across two stacked PRs, with the two credential-bearing shell snapshots deleted in the stacked removal PR; added narrow ignore rules, repository-local provider-home rejection, signal-safe process termination, fail-closed cleanup, provider-isolated trusted staging, a success-authorized status-only CI upload contract, regression tests and a hygiene guide. This changes only the current tree; Git history still contains the credential and credential revocation remains an external, unconfirmed action (#49).
 
 ## [0.12.1] - 2026-10-07
 
