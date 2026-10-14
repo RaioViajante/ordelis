@@ -5,10 +5,15 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
+import sys
 import tempfile
 import textwrap
+import time
 import unittest
+from contextlib import contextmanager
+from datetime import date
 from pathlib import Path
 
 from runtime.adapters import adapter_registry
@@ -21,22 +26,26 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ProviderValidationScriptTests(unittest.TestCase):
-    def _run_capability_probes(
-        self,
-        *,
-        code_fenced_c2_provider: str | None = None,
-        plain_text_c2_provider: str | None = None,
-        prose_c2_providers: tuple[str, ...] = (),
-    ) -> tuple[subprocess.CompletedProcess[str], dict[str, object]]:
+    @contextmanager
+    def _capability_probe_fixture(self):
         with tempfile.TemporaryDirectory() as tmp:
             test_root = Path(tmp)
-            scripts_dir = test_root / "scripts"
+            repo_root = test_root / "repo"
+            scripts_dir = repo_root / "scripts"
             fake_bin_dir = test_root / "bin"
-            scripts_dir.mkdir()
+            home_dir = test_root / "home"
+            artifact_parent = test_root / "probe-work"
+            export_dir = test_root / "probe-export"
+            scripts_dir.mkdir(parents=True)
             fake_bin_dir.mkdir()
+            home_dir.mkdir()
+            artifact_parent.mkdir()
 
             script_path = scripts_dir / "run_capability_probes.sh"
             shutil.copy2(ROOT / "scripts" / "run_capability_probes.sh", script_path)
+            sanitizer = ROOT / "scripts" / "sanitize_capability_probe_artifacts.py"
+            if sanitizer.exists():
+                shutil.copy2(sanitizer, scripts_dir / sanitizer.name)
 
             fake_driver = fake_bin_dir / "fake-provider"
             fake_driver.write_text(
@@ -50,12 +59,48 @@ class ProviderValidationScriptTests(unittest.TestCase):
                       provider="cursor"
                     fi
 
+                    if [ -n "${FAKE_INVOCATION_MARKER:-}" ]; then
+                      : > "$FAKE_INVOCATION_MARKER"
+                    fi
+
+                    if [ "$provider" = "claude" ] && [ -n "${FAKE_FORGED_SUMMARY_PATH:-}" ]; then
+                      mkdir -p "$(dirname "$FAKE_FORGED_SUMMARY_PATH")"
+                      if [ -n "${FAKE_FORGED_SUMMARY_SOURCE:-}" ]; then
+                        cp "$FAKE_FORGED_SUMMARY_SOURCE" "$FAKE_FORGED_SUMMARY_PATH"
+                      else
+                        printf '%s\n' 'DUMMY_NONFUNCTIONAL_SECRET_MARKER' > "$FAKE_FORGED_SUMMARY_PATH"
+                      fi
+                      if [ -n "${FAKE_FORGED_UNEXPECTED_PATH:-}" ]; then
+                        printf '%s\n' 'DUMMY_UNEXPECTED_FILE' > "$FAKE_FORGED_UNEXPECTED_PATH"
+                      fi
+                    fi
+
+                    if [ "$provider" = "claude" ] && [ -n "${PROBE_CI_EXPORT_DIR:-}" ]; then
+                      mkdir -p "$PROBE_CI_EXPORT_DIR"
+                      printf '%s\n' 'DUMMY_NONFUNCTIONAL_SECRET_MARKER' > \
+                        "$PROBE_CI_EXPORT_DIR/capability-probe-summary.json"
+                    fi
+
                     for arg in "$@"; do
                       if [ "$arg" = "--version" ] || [ "$arg" = "-v" ]; then
-                        echo "$provider 1.2.3"
+                        echo "$provider 1.2.3 ${FAKE_VERSION_SUFFIX:-}"
                         exit 0
                       fi
                     done
+
+                    if [ "${FAKE_CREATE_SENSITIVE:-}" = "1" ] && [ "$provider" = "claude" ]; then
+                      mkdir -p "$FAKE_SENSITIVE_ROOT/shell_snapshots" "$FAKE_SENSITIVE_ROOT/sessions"
+                      printf '%s\n' 'DUMMY_NONFUNCTIONAL_CREDENTIAL' > "$FAKE_SENSITIVE_ROOT/shell_snapshots/snapshot.sh"
+                      printf '%s\n' 'DUMMY_PRIVATE_SESSION' > "$FAKE_SENSITIVE_ROOT/sessions/session.jsonl"
+                      if [ "${FAKE_LOCK_SENSITIVE_PARENT:-}" = "1" ]; then
+                        chmod 0500 "$FAKE_SENSITIVE_ROOT"
+                      fi
+                    fi
+
+                    if [ "${FAKE_SLEEP_PROVIDER:-}" = "$provider" ]; then
+                      printf '%s\n' "$$" > "$FAKE_PROVIDER_PID_FILE"
+                      exec sleep 30
+                    fi
 
                     args="$*"
                     prose_c2=false
@@ -120,38 +165,153 @@ class ProviderValidationScriptTests(unittest.TestCase):
 
             env = os.environ.copy()
             env["PATH"] = f"{fake_bin_dir}{os.pathsep}{env['PATH']}"
-            env["HOME"] = str(test_root)
+            env["HOME"] = str(home_dir)
+            env.pop("CODEX_HOME", None)
             env["PROBE_CWD"] = str(test_root)
+            env["PROBE_ARTIFACT_ROOT"] = str(artifact_parent)
+            env.pop("PROBE_CI_EXPORT_DIR", None)
+            yield {
+                "test_root": test_root,
+                "repo_root": repo_root,
+                "script_path": script_path,
+                "artifact_parent": artifact_parent,
+                "export_dir": export_dir,
+                "env": env,
+            }
+
+    def _run_capability_probes(
+        self,
+        *,
+        code_fenced_c2_provider: str | None = None,
+        plain_text_c2_provider: str | None = None,
+        prose_c2_providers: tuple[str, ...] = (),
+        create_sensitive: bool = False,
+        cleanup_failure: bool = False,
+        version_suffix: str = "",
+        trusted_stage: bool = False,
+        forge_summary: bool = False,
+        structurally_valid_forgery: bool = False,
+        forge_unexpected_file: bool = False,
+    ) -> tuple[subprocess.CompletedProcess[str], dict[str, object]]:
+        with self._capability_probe_fixture() as fixture:
+            env = fixture["env"].copy()
             if code_fenced_c2_provider is not None:
                 env["FAKE_CODE_FENCED_C2_PROVIDER"] = code_fenced_c2_provider
             if plain_text_c2_provider is not None:
                 env["FAKE_PLAIN_TEXT_C2_PROVIDER"] = plain_text_c2_provider
             if prose_c2_providers:
                 env["FAKE_PROSE_C2_PROVIDERS"] = ",".join(prose_c2_providers)
+            sensitive_root = (
+                fixture["artifact_parent"] / date.today().isoformat() / "synthetic-provider-home"
+            )
+            if create_sensitive or cleanup_failure:
+                env["FAKE_CREATE_SENSITIVE"] = "1"
+                env["FAKE_SENSITIVE_ROOT"] = str(sensitive_root)
+            if cleanup_failure:
+                env["FAKE_LOCK_SENSITIVE_PARENT"] = "1"
+            if version_suffix:
+                env["FAKE_VERSION_SUFFIX"] = version_suffix
+            formerly_trusted = fixture["export_dir"] / "capability-probe-summary.json"
+            if forge_summary or structurally_valid_forgery:
+                env["FAKE_FORGED_SUMMARY_PATH"] = str(formerly_trusted)
+            if structurally_valid_forgery:
+                forged = fixture["test_root"] / "provider-forged-summary.json"
+                target_os = "macos" if sys.platform == "darwin" else "linux"
+                forged.write_text(
+                    json.dumps(
+                        {
+                            "schema_version": 1,
+                            "run_date": date.today().isoformat(),
+                            "target_os": target_os,
+                            "required_capabilities": ["C0", "C1", "C2"],
+                            "providers": {
+                                provider: {"C0": "PASS", "C1": "PASS", "C2": "PASS"}
+                                for provider in PROVIDER_IDS
+                            },
+                            "gate_status": "PASS",
+                        },
+                    ),
+                    encoding="utf-8",
+                )
+                env["FAKE_FORGED_SUMMARY_SOURCE"] = str(forged)
+            if forge_unexpected_file:
+                env["FAKE_FORGED_UNEXPECTED_PATH"] = str(
+                    fixture["export_dir"] / "unexpected-private-state.txt",
+                )
 
             completed = subprocess.run(
-                ["bash", str(script_path)],
-                cwd=test_root,
+                ["bash", str(fixture["script_path"])],
+                cwd=fixture["repo_root"],
                 env=env,
                 capture_output=True,
                 text=True,
                 timeout=30,
                 check=False,
             )
-            probe_roots = list((test_root / "docs" / "probes").iterdir())
+            if sensitive_root.exists():
+                sensitive_root.chmod(0o700)
+            probe_roots = list(fixture["artifact_parent"].iterdir())
             self.assertEqual(len(probe_roots), 1)
             probe_root = probe_roots[0]
-            artifacts: dict[str, object] = {
-                "lock_summary": (probe_root / "lock-summary.yaml").read_text(encoding="utf-8"),
-                "schema_c2": json.loads(
-                    (probe_root / "schema_c2.json").read_text(encoding="utf-8"),
-                ),
-                "summary": (probe_root / "summary.md").read_text(encoding="utf-8"),
-            }
-            for provider in PROVIDER_IDS:
-                artifacts[provider] = json.loads(
-                    (probe_root / provider / "C2" / "result.json").read_text(encoding="utf-8"),
+            artifacts: dict[str, object] = {}
+            if (probe_root / "lock-summary.yaml").exists():
+                artifacts["lock_summary"] = (probe_root / "lock-summary.yaml").read_text(
+                    encoding="utf-8",
                 )
+            if (probe_root / "schema_c2.json").exists():
+                artifacts["schema_c2"] = json.loads(
+                    (probe_root / "schema_c2.json").read_text(encoding="utf-8"),
+                )
+            if (probe_root / "summary.md").exists():
+                artifacts["summary"] = (probe_root / "summary.md").read_text(encoding="utf-8")
+            for provider in PROVIDER_IDS:
+                result_path = probe_root / provider / "C2" / "result.json"
+                if result_path.exists():
+                    artifacts[provider] = json.loads(result_path.read_text(encoding="utf-8"))
+            if trusted_stage and completed.returncode == 0:
+                staged = subprocess.run(
+                    [
+                        "python3",
+                        str(ROOT / "scripts" / "sanitize_capability_probe_artifacts.py"),
+                        "stage-success",
+                        "--staging-parent",
+                        str(fixture["test_root"]),
+                        "--run-date",
+                        date.today().isoformat(),
+                        "--target-os",
+                        "macos" if sys.platform == "darwin" else "linux",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                artifacts["stage_returncode"] = staged.returncode
+                artifacts["stage_stderr"] = staged.stderr
+                if staged.returncode == 0:
+                    staged_summary = Path(staged.stdout.strip())
+                    artifacts["staged_summary_path"] = str(staged_summary)
+                    artifacts["ci_summary"] = json.loads(
+                        staged_summary.read_text(encoding="utf-8"),
+                    )
+                    artifacts["staged_files"] = sorted(
+                        path.relative_to(staged_summary.parent).as_posix()
+                        for path in staged_summary.parent.iterdir()
+                    )
+            ci_summary = formerly_trusted
+            artifacts["ci_export_files"] = sorted(
+                path.relative_to(fixture["export_dir"]).as_posix()
+                for path in fixture["export_dir"].rglob("*")
+                if path.is_file()
+            ) if fixture["export_dir"].exists() else []
+            if ci_summary.exists():
+                artifacts["provider_forged_summary"] = ci_summary.read_text(encoding="utf-8")
+            artifacts["sensitive_survivors"] = sorted(
+                path.relative_to(probe_root).as_posix()
+                for path in probe_root.rglob("*")
+                if path.is_file() and (
+                    "shell_snapshots" in path.parts or "sessions" in path.parts
+                )
+            )
             return completed, artifacts
 
     def test_capability_probe_provider_list_matches_builtin_contract(self) -> None:
@@ -297,6 +457,230 @@ class ProviderValidationScriptTests(unittest.TestCase):
             lock_summary,
             r"(?s)  copilot:.*?C2: FAIL.*?gate_status: BLOCKED",
         )
+
+    def test_trusted_summary_contains_no_provider_controlled_content(self) -> None:
+        dummy_private_value = "DUMMY_NONFUNCTIONAL_PRIVATE_VALUE"
+        completed, artifacts = self._run_capability_probes(
+            version_suffix=dummy_private_value,
+            trusted_stage=True,
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(artifacts["ci_export_files"], [])
+        self.assertEqual(artifacts["stage_returncode"], 0, artifacts["stage_stderr"])
+        self.assertEqual(artifacts["staged_files"], ["capability-probe-summary.json"])
+        ci_summary = artifacts["ci_summary"]
+        self.assertEqual(
+            set(ci_summary),
+            {"schema_version", "run_date", "target_os", "gate_status", "validation_source"},
+        )
+        self.assertEqual(ci_summary["schema_version"], 2)
+        self.assertEqual(ci_summary["gate_status"], "PASS")
+        self.assertEqual(
+            ci_summary["validation_source"],
+            "successful-capability-probes-job",
+        )
+        self.assertNotIn(dummy_private_value, json.dumps(ci_summary, sort_keys=True))
+
+    def test_provider_failure_cleans_and_cannot_authorize_an_upload(self) -> None:
+        completed, artifacts = self._run_capability_probes(
+            plain_text_c2_provider="copilot",
+            create_sensitive=True,
+            forge_summary=True,
+        )
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertEqual(artifacts["sensitive_survivors"], [])
+        self.assertEqual(artifacts["ci_export_files"], ["capability-probe-summary.json"])
+        self.assertIn("DUMMY_NONFUNCTIONAL_SECRET_MARKER", artifacts["provider_forged_summary"])
+        self.assertNotIn("stage_returncode", artifacts)
+
+    def test_runner_removes_legacy_export_path_from_provider_environment(self) -> None:
+        with self._capability_probe_fixture() as fixture:
+            legacy_export = fixture["export_dir"]
+            env = fixture["env"].copy()
+            env["PROBE_CI_EXPORT_DIR"] = str(legacy_export)
+
+            completed = subprocess.run(
+                ["bash", str(fixture["script_path"])],
+                cwd=fixture["repo_root"],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertFalse((legacy_export / "capability-probe-summary.json").exists())
+
+    def test_cleanup_failure_is_observable_and_suppresses_ci_export(self) -> None:
+        completed, artifacts = self._run_capability_probes(cleanup_failure=True)
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("cleanup failed", completed.stderr.lower())
+        self.assertEqual(artifacts["ci_export_files"], [])
+
+    def test_success_ignores_provider_forged_structurally_valid_summary(self) -> None:
+        completed, artifacts = self._run_capability_probes(
+            structurally_valid_forgery=True,
+            forge_unexpected_file=True,
+            trusted_stage=True,
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(
+            artifacts["ci_export_files"],
+            ["capability-probe-summary.json", "unexpected-private-state.txt"],
+        )
+        self.assertEqual(artifacts["stage_returncode"], 0, artifacts["stage_stderr"])
+        self.assertEqual(artifacts["staged_files"], ["capability-probe-summary.json"])
+        self.assertNotEqual(
+            Path(artifacts["staged_summary_path"]).parent,
+            Path(artifacts["staged_summary_path"]).parents[1] / "probe-export",
+        )
+
+    def test_sigterm_cleans_artifacts_and_terminates_provider_process_group(self) -> None:
+        self._assert_signal_cleans_and_does_not_authorize(signal.SIGTERM, 143)
+
+    def test_sigint_cleans_artifacts_and_terminates_provider_process_group(self) -> None:
+        self._assert_signal_cleans_and_does_not_authorize(signal.SIGINT, 130)
+
+    def _assert_signal_cleans_and_does_not_authorize(
+        self,
+        sent_signal: signal.Signals,
+        expected_returncode: int,
+    ) -> None:
+        with self._capability_probe_fixture() as fixture:
+            provider_pid_file = fixture["test_root"] / "provider.pid"
+            sensitive_root = (
+                fixture["artifact_parent"] / date.today().isoformat() / "synthetic-provider-home"
+            )
+            env = fixture["env"].copy()
+            env.update(
+                {
+                    "FAKE_CREATE_SENSITIVE": "1",
+                    "FAKE_SENSITIVE_ROOT": str(sensitive_root),
+                    "FAKE_SLEEP_PROVIDER": "claude",
+                    "FAKE_PROVIDER_PID_FILE": str(provider_pid_file),
+                    "FAKE_FORGED_SUMMARY_PATH": str(
+                        fixture["export_dir"] / "capability-probe-summary.json"
+                    ),
+                },
+            )
+            process = subprocess.Popen(
+                ["bash", str(fixture["script_path"])],
+                cwd=fixture["repo_root"],
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            deadline = time.monotonic() + 5
+            while not provider_pid_file.exists() and process.poll() is None:
+                if time.monotonic() >= deadline:
+                    process.kill()
+                    self.fail("fake provider did not start")
+                time.sleep(0.02)
+            provider_pid = int(provider_pid_file.read_text(encoding="utf-8"))
+            process.send_signal(sent_signal)
+            _, stderr = process.communicate(timeout=5)
+
+            self.assertEqual(process.returncode, expected_returncode, stderr)
+            self.assertFalse(any(
+                path.is_dir() and path.name in {"shell_snapshots", "sessions"}
+                for path in fixture["artifact_parent"].rglob("*")
+            ))
+            self.assertTrue((fixture["export_dir"] / "capability-probe-summary.json").exists())
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                try:
+                    os.kill(provider_pid, 0)
+                except ProcessLookupError:
+                    break
+                time.sleep(0.02)
+            else:
+                state = subprocess.run(
+                    ["ps", "-o", "pid=,ppid=,pgid=,state=,command=", "-p", str(provider_pid)],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.fail(f"fake provider process survived SIGTERM: {state.stdout.strip()}")
+
+    def test_sigkill_provider_forgery_is_not_a_trusted_staged_artifact(self) -> None:
+        with self._capability_probe_fixture() as fixture:
+            provider_pid_file = fixture["test_root"] / "provider.pid"
+            forged_summary = fixture["export_dir"] / "capability-probe-summary.json"
+            env = fixture["env"].copy()
+            env.update(
+                {
+                    "FAKE_SLEEP_PROVIDER": "claude",
+                    "FAKE_PROVIDER_PID_FILE": str(provider_pid_file),
+                    "FAKE_FORGED_SUMMARY_PATH": str(forged_summary),
+                },
+            )
+            process = subprocess.Popen(
+                ["bash", str(fixture["script_path"])],
+                cwd=fixture["repo_root"],
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            deadline = time.monotonic() + 5
+            while not provider_pid_file.exists() and process.poll() is None:
+                if time.monotonic() >= deadline:
+                    process.kill()
+                    self.fail("fake provider did not start")
+                time.sleep(0.02)
+            provider_pid = int(provider_pid_file.read_text(encoding="utf-8"))
+            process.kill()
+            process.communicate(timeout=5)
+            self.assertEqual(process.returncode, -signal.SIGKILL)
+            self.assertTrue(forged_summary.exists())
+            self.assertNotIn("PROBE_CI_EXPORT_DIR", env)
+            self.assertFalse(any(
+                path.is_dir() and path.name.startswith("capability-probe-export-")
+                for path in fixture["test_root"].iterdir()
+            ))
+            try:
+                os.killpg(provider_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+    def test_repo_local_provider_homes_are_rejected_before_provider_launch(self) -> None:
+        with self._capability_probe_fixture() as fixture:
+            marker = fixture["test_root"] / "provider-invoked"
+            repo_local = fixture["repo_root"] / "arbitrary-provider-home"
+            repo_local.mkdir()
+            alias = fixture["test_root"] / "repo-alias"
+            alias.symlink_to(repo_local, target_is_directory=True)
+            unsafe_cases = (
+                ("HOME", str(repo_local)),
+                ("HOME", "arbitrary-provider-home"),
+                ("HOME", str(alias)),
+                ("CODEX_HOME", str(repo_local)),
+                ("CODEX_HOME", str(fixture["artifact_parent"] / "another-name")),
+            )
+
+            for variable, value in unsafe_cases:
+                with self.subTest(variable=variable, value=value):
+                    marker.unlink(missing_ok=True)
+                    env = fixture["env"].copy()
+                    env["FAKE_INVOCATION_MARKER"] = str(marker)
+                    env[variable] = value
+                    completed = subprocess.run(
+                        ["bash", str(fixture["script_path"])],
+                        cwd=fixture["repo_root"],
+                        env=env,
+                        capture_output=True,
+                        text=True,
+                        timeout=5,
+                        check=False,
+                    )
+                    self.assertNotEqual(completed.returncode, 0)
+                    self.assertFalse(marker.exists(), completed.stderr)
 
     def test_copilot_c0_probe_denies_write_and_shell_tools(self) -> None:
         script = (ROOT / "scripts" / "run_capability_probes.sh").read_text(encoding="utf-8")

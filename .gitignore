@@ -31,3 +31,14 @@ dist/
 
 # Local development interpreter for the dev-runtime bridge (an absolute path; never committed)
 /desktop/src-tauri/.dev-python
+
+# Capability probe local homes (HOME/CODEX_HOME pointed into the artifacts root can
+# capture shell snapshots, session transcripts and auth state — never committed)
+.probe_*_home/
+
+# Codex shell snapshots (verbatim environment of the invoking shell — never committed)
+shell_snapshots/
+
+# Raw provider stdout/stderr transcripts from capability probes (may embed environment
+# details). Curated probe evidence (result.json, parsed.json, summaries) stays committable.
+docs/probes/**/raw/

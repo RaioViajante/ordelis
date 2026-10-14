@@ -16,6 +16,7 @@ Synapse is in early development. The desktop app is an interface preview over sa
 - [Execution safety gate](./implementation/execution-safety-gate.md): currently always answers no.
 - [Private authorization ledger](./implementation/private-authorization-ledger.md) and [controlled probe entry point](./implementation/controlled-probe-entry-point.md).
 - [Interactive probe authorization](./guides/interactive-probe-authorization.md) and [private execution plan](./guides/private-execution-plan.md).
+- [Probe artifact hygiene](./guides/probe-artifact-hygiene.md): why probe-local homes and raw transcripts are never tracked, and what that does and does not protect.
 
 ## Inherited from MCO
 

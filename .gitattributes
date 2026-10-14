@@ -1,0 +1,5 @@
+# Probe-local homes can contain verbatim shell environments, session transcripts and
+# provider state. Disable text rendering in local Git diffs. GitHub-hosted diffs ignore
+# this attribute and can still render deleted lines.
+**/.probe_*_home/** -diff
+**/shell_snapshots/** -diff
