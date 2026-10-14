@@ -1249,7 +1249,7 @@ fn registering_needs_no_access_to_the_folder_contents() {
     std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o000)).unwrap();
     let project = added(add(&scratch.data(), &folder));
     assert_eq!(project.status, Status::Available);
-    assert_eq!(listed(&scratch.data()), [project.clone()]);
+    assert_eq!(listed(&scratch.data()), std::slice::from_ref(&project));
     assert_eq!(remove(&scratch.data(), &project.id), Ok(RemoveOutcome::Removed));
     std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)).unwrap();
     assert_eq!(std::fs::read(folder.join("secret.txt")).unwrap(), b"not for synapse");
