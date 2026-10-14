@@ -273,9 +273,7 @@ class ProviderValidationScriptTests(unittest.TestCase):
                     [
                         "python3",
                         str(ROOT / "scripts" / "sanitize_capability_probe_artifacts.py"),
-                        "stage",
-                        "--run-root",
-                        str(probe_root),
+                        "stage-success",
                         "--staging-parent",
                         str(fixture["test_root"]),
                         "--run-date",
@@ -460,7 +458,7 @@ class ProviderValidationScriptTests(unittest.TestCase):
             r"(?s)  copilot:.*?C2: FAIL.*?gate_status: BLOCKED",
         )
 
-    def test_ci_export_contains_only_validated_statuses(self) -> None:
+    def test_trusted_summary_contains_no_provider_controlled_content(self) -> None:
         dummy_private_value = "DUMMY_NONFUNCTIONAL_PRIVATE_VALUE"
         completed, artifacts = self._run_capability_probes(
             version_suffix=dummy_private_value,
@@ -474,19 +472,15 @@ class ProviderValidationScriptTests(unittest.TestCase):
         ci_summary = artifacts["ci_summary"]
         self.assertEqual(
             set(ci_summary),
-            {"schema_version", "run_date", "target_os", "required_capabilities", "providers", "gate_status"},
+            {"schema_version", "run_date", "target_os", "gate_status", "validation_source"},
         )
-        self.assertEqual(ci_summary["required_capabilities"], ["C0", "C1", "C2"])
-        self.assertEqual(set(ci_summary["providers"]), set(PROVIDER_IDS))
+        self.assertEqual(ci_summary["schema_version"], 2)
+        self.assertEqual(ci_summary["gate_status"], "PASS")
+        self.assertEqual(
+            ci_summary["validation_source"],
+            "successful-capability-probes-job",
+        )
         self.assertNotIn(dummy_private_value, json.dumps(ci_summary, sort_keys=True))
-        for provider in PROVIDER_IDS:
-            self.assertEqual(
-                set(ci_summary["providers"][provider]),
-                {"C0", "C1", "C2"},
-            )
-            self.assertTrue(
-                set(ci_summary["providers"][provider].values()) <= {"PASS", "FAIL"},
-            )
 
     def test_provider_failure_cleans_and_cannot_authorize_an_upload(self) -> None:
         completed, artifacts = self._run_capability_probes(

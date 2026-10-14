@@ -89,16 +89,22 @@ jobs:
           PROBE_ARTIFACT_ROOT: ${{ runner.temp }}/synapse-capability-probe-work-${{ github.run_id }}-${{ github.run_attempt }}
         run: ./scripts/run_capability_probes.sh
 
+  capability-probe-artifact:
+    name: Capability probe artifact
+    needs: capability-probes
+    if: ${{ needs.capability-probes.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Stage validated capability summary
         id: stage_capability_summary
-        if: ${{ success() && steps.capability_probes.outcome == 'success' }}
-        env:
-          PROBE_ARTIFACT_ROOT: ${{ runner.temp }}/synapse-capability-probe-work-${{ github.run_id }}-${{ github.run_attempt }}
+        if: ${{ success() && needs.capability-probes.result == 'success' }}
         run: |
           set -euo pipefail
           run_date="$(date +%F)"
-          artifact_path="$(python3 ./scripts/sanitize_capability_probe_artifacts.py stage \
-            --run-root "$PROBE_ARTIFACT_ROOT/$run_date" \
+          artifact_path="$(python3 -I ./scripts/sanitize_capability_probe_artifacts.py stage-success \
             --staging-parent "$RUNNER_TEMP" \
             --run-date "$run_date" \
             --target-os macos)"
@@ -106,7 +112,7 @@ jobs:
           echo "upload_ready=true" >> "$GITHUB_OUTPUT"
 
       - name: Upload capability probe artifacts
-        if: ${{ success() && steps.capability_probes.outcome == 'success' && steps.stage_capability_summary.outcome == 'success' && steps.stage_capability_summary.outputs.upload_ready == 'true' }}
+        if: ${{ success() && needs.capability-probes.result == 'success' && steps.stage_capability_summary.outcome == 'success' && steps.stage_capability_summary.outputs.upload_ready == 'true' }}
         uses: actions/upload-artifact@v4
         with:
           name: capability-probes-${{ github.run_id }}

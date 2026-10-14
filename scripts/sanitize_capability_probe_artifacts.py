@@ -12,22 +12,7 @@ from datetime import date
 from pathlib import Path
 
 
-PROVIDERS = (
-    "claude",
-    "codex",
-    "gemini",
-    "opencode",
-    "qwen",
-    "hermes",
-    "pi",
-    "copilot",
-    "grok",
-    "cursor",
-    "agy",
-)
-REQUIRED_CAPABILITIES = ("C0", "C1", "C2")
 SENSITIVE_DIRECTORY_NAMES = {"sessions", "shell_snapshots"}
-VALID_STATUSES = {"PASS", "FAIL"}
 VALID_TARGETS = {"linux", "macos", "windows"}
 
 
@@ -63,16 +48,15 @@ def validate_layout(
     if resolved_parent == resolved_repo or resolved_parent in resolved_repo.parents:
         raise ValueError("probe artifact root cannot contain the repository")
 
-    provider_homes: list[tuple[str, Path]] = []
     for name, value in (("HOME", home), ("CODEX_HOME", codex_home)):
         if not value:
             continue
         resolved_home = _resolve(value, resolved_cwd)
-        provider_homes.append((name, resolved_home))
         if _within(resolved_home, resolved_repo):
             raise ValueError(f"{name} resolves inside the repository")
         if _within(resolved_home, resolved_parent):
             raise ValueError(f"{name} resolves inside the probe artifact root")
+
 
 def cleanup_sensitive_directories(*, run_root: str, artifact_parent: str) -> None:
     root = Path(run_root).resolve(strict=True)
@@ -99,61 +83,28 @@ def cleanup_sensitive_directories(*, run_root: str, artifact_parent: str) -> Non
             shutil.rmtree(candidate)
 
 
-def _validated_summary(*, run_root: str, run_date: str, target_os: str) -> dict[str, object]:
-    root = Path(run_root).resolve(strict=True)
+def _trusted_success_summary(*, run_date: str, target_os: str) -> dict[str, object]:
     if date.fromisoformat(run_date).isoformat() != run_date:
         raise ValueError("invalid probe run date")
     if target_os not in VALID_TARGETS:
         raise ValueError("unsupported target OS")
-
-    statuses: dict[str, dict[str, str]] = {}
-    for provider in PROVIDERS:
-        provider_statuses: dict[str, str] = {}
-        for capability in REQUIRED_CAPABILITIES:
-            result_path = root / provider / capability / "result.json"
-            payload = json.loads(result_path.read_text(encoding="utf-8"))
-            if not isinstance(payload, dict):
-                raise ValueError(f"invalid result document for {provider}/{capability}")
-            if payload.get("provider") != provider:
-                raise ValueError(f"provider mismatch for {provider}/{capability}")
-            if payload.get("capability") != capability:
-                raise ValueError(f"capability mismatch for {provider}/{capability}")
-            if payload.get("os") != target_os:
-                raise ValueError(f"target OS mismatch for {provider}/{capability}")
-            status = payload.get("status")
-            if status not in VALID_STATUSES:
-                raise ValueError(f"invalid status for {provider}/{capability}")
-            provider_statuses[capability] = status
-        statuses[provider] = provider_statuses
-
-    gate_status = "PASS" if all(
-        status == "PASS"
-        for provider_statuses in statuses.values()
-        for status in provider_statuses.values()
-    ) else "FAIL"
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "run_date": run_date,
         "target_os": target_os,
-        "required_capabilities": list(REQUIRED_CAPABILITIES),
-        "providers": statuses,
-        "gate_status": gate_status,
+        "gate_status": "PASS",
+        "validation_source": "successful-capability-probes-job",
     }
 
 
-def stage_ci_summary(*, run_root: str, staging_parent: str, run_date: str, target_os: str) -> Path:
-    root = Path(run_root).resolve(strict=True)
+def stage_ci_success_summary(*, staging_parent: str, run_date: str, target_os: str) -> Path:
     parent_path = Path(staging_parent)
     if parent_path.is_symlink():
         raise ValueError("trusted staging parent cannot be a symlink")
     parent = parent_path.resolve(strict=True)
     if not parent.is_dir():
         raise ValueError("trusted staging parent must be a directory")
-    if _within(parent, root):
-        raise ValueError("trusted staging parent cannot be inside the probe run root")
-
-    summary = _validated_summary(
-        run_root=run_root,
+    summary = _trusted_success_summary(
         run_date=run_date,
         target_os=target_os,
     )
@@ -229,8 +180,7 @@ def main() -> int:
     cleanup.add_argument("--run-root", required=True)
     cleanup.add_argument("--artifact-parent", required=True)
 
-    stage = subparsers.add_parser("stage")
-    stage.add_argument("--run-root", required=True)
+    stage = subparsers.add_parser("stage-success")
     stage.add_argument("--staging-parent", required=True)
     stage.add_argument("--run-date", required=True)
     stage.add_argument("--target-os", required=True)
@@ -252,8 +202,7 @@ def main() -> int:
                 artifact_parent=args.artifact_parent,
             )
         else:
-            output = stage_ci_summary(
-                run_root=args.run_root,
+            output = stage_ci_success_summary(
                 staging_parent=args.staging_parent,
                 run_date=args.run_date,
                 target_os=args.target_os,
