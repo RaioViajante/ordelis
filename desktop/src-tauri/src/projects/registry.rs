@@ -99,6 +99,9 @@ pub(super) fn add(dir: &Path, picked: &Path) -> Result<AddOutcome, ErrorCode> {
     };
     stored.next_id += 1;
     stored.projects.push(record.clone());
+    // Test builds only: lets a test change the folder between the check above and this recheck.
+    #[cfg(test)]
+    tests::before_recheck();
     folder::recheck(&candidate)?;
     commit(dir, &stored)?;
     Ok(AddOutcome::Added { project: record.project(home.as_deref()) })

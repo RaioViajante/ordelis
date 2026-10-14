@@ -19,6 +19,22 @@ fn arm(step: Step, errno: i32) {
     FAULTS.with(|faults| faults.borrow_mut().insert(step, errno));
 }
 
+thread_local! {
+    static BEFORE_RECHECK: RefCell<Option<Box<dyn FnOnce()>>> = RefCell::new(None);
+}
+
+/// Runs `change` on this thread once, in add, after the registry is loaded and right before the pre-commit
+/// recheck of the chosen folder.
+fn arm_before_recheck(change: impl FnOnce() + 'static) {
+    BEFORE_RECHECK.with(|hook| *hook.borrow_mut() = Some(Box::new(change)));
+}
+
+pub(super) fn before_recheck() {
+    if let Some(change) = BEFORE_RECHECK.with(|hook| hook.borrow_mut().take()) {
+        change();
+    }
+}
+
 pub(super) fn fault(step: Step) -> std::io::Result<()> {
     match FAULTS.with(|faults| faults.borrow_mut().remove(&step)) {
         Some(errno) => Err(std::io::Error::from_raw_os_error(errno)),
@@ -333,7 +349,37 @@ fn a_symlinked_or_directory_registry_is_unavailable() {
     std::fs::create_dir(scratch.file(REGISTRY)).unwrap();
     assert_eq!(list(&scratch.data()).unwrap_err(), ErrorCode::RegistryUnavailable);
     assert_eq!(remove(&scratch.data(), "p1").unwrap_err(), ErrorCode::RegistryUnavailable);
-    // A registry owned by another user needs root to set up, so that case is covered by the owner check alone.
+}
+
+// A file owned by another user, without root: a second name (hard link) for a root-owned system file in the
+// same volume. Every command must refuse it at fstat; nothing reads, writes or renames it. Skipped where the
+// link cannot be made (another volume) or when running as root.
+#[test]
+fn a_registry_or_lock_file_owned_by_another_user_is_unavailable() {
+    let foreign = Path::new("/private/etc/hosts");
+    let scratch = Scratch::new("foreign-owner");
+    std::fs::DirBuilder::new().mode(0o700).create(scratch.data()).unwrap();
+    if is_root() || std::fs::hard_link(foreign, scratch.file(REGISTRY)).is_err() {
+        eprintln!("skipped: cannot create a foreign-owned file here");
+        return;
+    }
+    let owner = std::fs::symlink_metadata(scratch.file(REGISTRY)).unwrap().uid();
+    assert_ne!(owner, euid());
+    let before = (std::fs::read(foreign).unwrap(), modified(foreign));
+    assert_eq!(list(&scratch.data()).unwrap_err(), ErrorCode::RegistryUnavailable);
+    assert_eq!(add(&scratch.data(), &scratch.folder("a")).unwrap_err(), ErrorCode::RegistryUnavailable);
+    assert_eq!(remove(&scratch.data(), "p1").unwrap_err(), ErrorCode::RegistryUnavailable);
+    assert_eq!(reset(&scratch.data()).unwrap_err(), ErrorCode::RegistryUnavailable);
+    assert_eq!(identity(&scratch.file(REGISTRY)), identity(foreign), "the name still points at the same file");
+    std::fs::remove_file(scratch.file(REGISTRY)).unwrap();
+
+    std::fs::remove_file(scratch.file(LOCK)).unwrap();
+    std::fs::hard_link(foreign, scratch.file(LOCK)).unwrap();
+    assert_eq!(add(&scratch.data(), &scratch.folder("a")).unwrap_err(), ErrorCode::RegistryUnavailable);
+    assert_eq!(reset(&scratch.data()).unwrap_err(), ErrorCode::RegistryUnavailable);
+    std::fs::remove_file(scratch.file(LOCK)).unwrap();
+    assert!(!scratch.file(REGISTRY).exists());
+    assert_eq!((std::fs::read(foreign).unwrap(), modified(foreign)), before);
 }
 
 #[test]
@@ -638,6 +684,40 @@ fn concurrent_threads_and_a_second_process_all_register_with_unique_ids() {
     let mut expected: Vec<String> = theirs.iter().chain(&ours).map(|p| p.file_name().unwrap().to_str().unwrap().into()).collect();
     expected.sort();
     assert_eq!(names, expected);
+    assert_eq!(scratch.names(), [REGISTRY, LOCK]);
+}
+
+#[test]
+fn concurrent_adds_and_removes_leave_a_consistent_registry() {
+    let scratch = Scratch::new("mixed");
+    let old: Vec<String> = (0..12).map(|n| added(add(&scratch.data(), &scratch.folder(&format!("old-{n}")))).id).collect();
+    let new: Vec<PathBuf> = (0..12).map(|n| scratch.folder(&format!("new-{n}"))).collect();
+    std::thread::scope(|threads| {
+        for (removing, adding) in old.chunks(3).zip(new.chunks(3)) {
+            let data = scratch.data();
+            threads.spawn(move || {
+                for id in removing {
+                    assert_eq!(remove(&data, id), Ok(RemoveOutcome::Removed));
+                }
+            });
+            let data = scratch.data();
+            threads.spawn(move || {
+                for folder in adding {
+                    added(add(&data, folder));
+                }
+            });
+        }
+    });
+    let projects = listed(&scratch.data());
+    let mut names: Vec<&str> = projects.iter().map(|p| p.name.as_str()).collect();
+    names.sort();
+    let mut expected: Vec<String> = (0..12).map(|n| format!("new-{n}")).collect();
+    expected.sort();
+    assert_eq!(names, expected);
+    let mut ids: Vec<u64> = projects.iter().map(|p| id_number(&p.id).unwrap()).collect();
+    ids.sort();
+    assert_eq!(ids, (13..=24).collect::<Vec<_>>(), "no removed ID is reused");
+    assert_eq!(stored(&scratch).next_id, 25);
     assert_eq!(scratch.names(), [REGISTRY, LOCK]);
 }
 
@@ -1083,6 +1163,42 @@ fn a_folder_that_changes_after_the_check_is_not_written() {
     assert_eq!(folder::recheck(&candidate), Err(ErrorCode::FolderChanged));
     std::fs::write(&folder, b"now a file").unwrap();
     assert_eq!(folder::recheck(&candidate), Err(ErrorCode::FolderChanged));
+}
+
+// Step 5 of the registration check, through the real add path: the folder passed inspection, then changed
+// before the registry was written.
+#[test]
+fn a_folder_changed_before_the_pre_commit_recheck_is_not_written() {
+    let scratch = Scratch::new("precommit");
+    added(add(&scratch.data(), &scratch.folder("existing")));
+    let (before, names) = (scratch.registry(), scratch.names());
+    let swapped = scratch.folder("swapped");
+    let replaced = |folder: PathBuf, away: PathBuf| {
+        move || {
+            std::fs::rename(&folder, &away).unwrap();
+            std::fs::create_dir(&folder).unwrap();
+        }
+    };
+    let removed = |folder: PathBuf| move || std::fs::remove_dir(&folder).unwrap();
+    let to_symlink = |folder: PathBuf, away: PathBuf| {
+        move || {
+            std::fs::rename(&folder, &away).unwrap();
+            std::os::unix::fs::symlink(&away, &folder).unwrap();
+        }
+    };
+    arm_before_recheck(replaced(swapped.clone(), scratch.0.join("away-1")));
+    assert_eq!(add(&scratch.data(), &swapped).unwrap_err(), ErrorCode::FolderChanged);
+    std::fs::remove_dir(&swapped).unwrap();
+    std::fs::create_dir(&swapped).unwrap();
+    arm_before_recheck(to_symlink(swapped.clone(), scratch.0.join("away-2")));
+    assert_eq!(add(&scratch.data(), &swapped).unwrap_err(), ErrorCode::FolderChanged);
+    std::fs::remove_file(&swapped).unwrap();
+    std::fs::create_dir(&swapped).unwrap();
+    arm_before_recheck(removed(swapped.clone()));
+    assert_eq!(add(&scratch.data(), &swapped).unwrap_err(), ErrorCode::FolderChanged);
+    assert_eq!(scratch.registry(), before, "the previous registry is byte-identical");
+    assert_eq!(scratch.names(), names, "no temp file or anything else was left");
+    assert!(!scratch.file(TEMP).exists());
 }
 
 #[test]
