@@ -385,6 +385,109 @@ mod tests {
         assert!(capability.get("remote").is_none());
     }
 
+    // Direct dependencies as Cargo itself resolves the manifest: every table, quoted or dotted key, rename and
+    // target cfg. Adding, renaming or reconfiguring one is a deliberate review decision.
+    const REVIEWED_DEPENDENCIES: [&str; 7] = [
+        "build tauri-build ^2 default=true features=[]",
+        "dev tauri ^2 default=true features=[\"test\"]",
+        "normal libc ^0.2 default=true features=[]",
+        "normal serde ^1 default=true features=[\"derive\"]",
+        "normal serde_json ^1 default=true features=[]",
+        "normal tauri ^2 default=true features=[]",
+        "normal rfd ^0.17.2 default=false features=[] target=cfg(target_os = \"macos\")",
+    ];
+
+    fn direct_dependencies(manifest_dir: &Path) -> (Vec<String>, serde_json::Value) {
+        // A cleared environment: another test sets hostile process-wide variables (DYLD_INSERT_LIBRARIES, PATH)
+        // to check what the runtime bridge passes to Python, and they must not reach this child either.
+        let mut cargo = std::process::Command::new(env!("CARGO"));
+        cargo.env_clear();
+        for key in ["HOME", "CARGO_HOME", "RUSTUP_HOME", "RUSTUP_TOOLCHAIN"] {
+            if let Some(value) = std::env::var_os(key) {
+                cargo.env(key, value);
+            }
+        }
+        let output = cargo
+            .args(["metadata", "--format-version", "1", "--no-deps", "--offline", "--manifest-path"])
+            .arg(manifest_dir.join("Cargo.toml"))
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let metadata: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let package = &metadata["packages"][0];
+        let mut found: Vec<String> = package["dependencies"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| {
+                let mut line = format!(
+                    "{} {} {} default={} features={}",
+                    d["kind"].as_str().unwrap_or("normal"),
+                    d["name"].as_str().unwrap(),
+                    d["req"].as_str().unwrap(),
+                    d["uses_default_features"],
+                    d["features"]
+                );
+                if let Some(target) = d["target"].as_str() {
+                    line += &format!(" target={target}");
+                }
+                for key in ["rename", "registry", "path"] {
+                    if !d[key].is_null() {
+                        line += &format!(" {key}={}", d[key]);
+                    }
+                }
+                if d["optional"] != serde_json::json!(false) {
+                    line += " optional";
+                }
+                if d["source"].as_str() != Some("registry+https://github.com/rust-lang/crates.io-index") {
+                    line += &format!(" source={}", d["source"]);
+                }
+                line
+            })
+            .collect();
+        found.sort();
+        (found, package["features"].clone())
+    }
+
+    fn reviewed() -> Vec<String> {
+        let mut reviewed: Vec<String> = REVIEWED_DEPENDENCIES.iter().map(|d| d.to_string()).collect();
+        reviewed.sort();
+        reviewed
+    }
+
+    #[test]
+    fn direct_dependencies_are_exactly_the_reviewed_set() {
+        let (found, features) = direct_dependencies(Path::new(env!("CARGO_MANIFEST_DIR")));
+        assert_eq!(found, reviewed());
+        assert_eq!(features, serde_json::json!({ "dev-runtime": [] }));
+    }
+
+    // Spellings the earlier line-based check in config.test.ts could not see; each must change the result.
+    #[test]
+    fn the_dependency_check_sees_every_manifest_spelling() {
+        let manifest = include_str!("../Cargo.toml");
+        let mutations: [(&str, &str); 8] = [
+            ("libc = \"0.2\"", "libc = \"0.2\"\n\"walkdir\" = \"2\""),
+            ("libc = \"0.2\"", "libc = \"0.2\"\n'walkdir' = \"2\""),
+            ("libc = \"0.2\"", "libc = \"0.2\"\nfs = { package = \"walkdir\", version = \"2\" }"),
+            ("[dev-dependencies]", "[dependencies.walkdir]\nversion = \"2\"\n\n[dev-dependencies]"),
+            ("[dev-dependencies]", "[target.\"cfg(unix)\".dependencies]\n\"walkdir\" = \"2\"\n\n[dev-dependencies]"),
+            ("[package]", "target.'cfg(unix)'.dependencies.walkdir = \"2\"\n\n[package]"),
+            ("rfd = { version = \"0.17.2\", default-features = false }", "rfd = { version = \"0.17.2\" }"),
+            ("serde_json = \"1\"", "serde_json = { version = \"1\", optional = true }"),
+        ];
+        let scratch = Scratch::new("cargo-mutations");
+        std::fs::create_dir(scratch.0.join("src")).unwrap();
+        std::fs::write(scratch.0.join("src/lib.rs"), "").unwrap();
+        std::fs::write(scratch.0.join("Cargo.toml"), manifest).unwrap();
+        assert_eq!(direct_dependencies(&scratch.0).0, reviewed(), "the unmodified copy is the positive control");
+        for (anchor, replacement) in mutations {
+            assert_eq!(manifest.matches(anchor).count(), 1, "{anchor}");
+            std::fs::write(scratch.0.join("Cargo.toml"), manifest.replacen(anchor, replacement, 1)).unwrap();
+            assert_ne!(direct_dependencies(&scratch.0).0, reviewed(), "not detected: {replacement}");
+        }
+    }
+
     // Local project registration commands (projects.rs). Registry behavior itself is covered by
     // projects/registry/tests.rs; these prove the IPC boundary and the panel guard.
 

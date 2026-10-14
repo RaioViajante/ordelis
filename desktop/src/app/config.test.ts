@@ -12,6 +12,104 @@ const COMMANDS = [
 ];
 const read = (p: string) => readFileSync(join(root, p), "utf8");
 
+// Every extension Vite resolves as a script module; tests and Vitest support files are not part of the app.
+const SCRIPT = /\.(?:[cm]?[jt]sx?)$/;
+const isTestSource = (path: string) =>
+  /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(path) || path.startsWith(join(root, "src", "test") + "/");
+
+function walkFiles(dir: string, out: string[] = []): string[] {
+  for (const name of readdirSync(dir)) {
+    const p = join(dir, name);
+    if (statSync(p).isDirectory()) walkFiles(p, out);
+    else out.push(p);
+  }
+  return out;
+}
+
+// Path -> text for every script module under src/, tests included (imports of them are checked).
+function frontendSources(): Record<string, string> {
+  const files = walkFiles(join(root, "src")).filter((p) => SCRIPT.test(p));
+  return Object.fromEntries(files.map((p) => [p, readFileSync(p, "utf8")]));
+}
+
+// Static tripwires, not a sandbox: code that rebuilds a global's name at run time is not detectable here. The
+// guarantees that matter are structural (only runtimeStatus.ts imports @tauri-apps; nothing names Tauri's
+// internals), and the authority over what may be called stays the capability ACL.
+function frontendViolations(files: Record<string, string>): string[] {
+  const violations: string[] = [];
+  const src = join(root, "src");
+  for (const [path, text] of Object.entries(files)) {
+    if (isTestSource(path)) continue;
+    if (/list_projects|add_project|remove_project|reset_projects/.test(text)) violations.push(`${path}: names a project command`);
+    if (/__TAURI/.test(text)) violations.push(`${path}: reaches Tauri internals`);
+    if (text.includes("@tauri-apps") && path !== join(src, "app", "runtimeStatus.ts")) violations.push(`${path}: imports @tauri-apps`);
+    for (const m of text.matchAll(/(?:from\s*|import\s*\(?\s*|require\s*\(\s*)["'](\.{1,2}\/[^"']*)["']/g)) {
+      const target = join(path, "..", m[1]);
+      if (!target.startsWith(src + "/")) violations.push(`${path}: imports ${m[1]} from outside src/`);
+      else if (isTestSource(target) || /\.(?:test|spec)$/.test(target)) violations.push(`${path}: imports test code ${m[1]}`);
+    }
+  }
+  return violations;
+}
+
+// Relative path (from src-tauri/src) -> text for every Rust source file.
+function rustSources(): Record<string, string> {
+  const base = join(root, "src-tauri", "src");
+  const files = walkFiles(base).filter((p) => p.endsWith(".rs"));
+  return Object.fromEntries(files.map((p) => [p.slice(base.length + 1), readFileSync(p, "utf8")]));
+}
+
+// Walks the production module tree from projects.rs through every `mod name;` that is not declared exactly
+// `#[cfg(test)]`, so a new submodule is scanned without being listed here. Only registry.rs touches files.
+function rustTreeViolations(files: Record<string, string>): string[] {
+  const violations: string[] = [];
+  const queue: [string, string][] = [["projects.rs", "projects"]];
+  const fsAllowed: Record<string, string[]> = {
+    "projects/registry.rs": ["DirBuilder", "File", "Metadata", "OpenOptions", "hard_link", "remove_file", "rename", "symlink_metadata"],
+    "projects/folder.rs": ["Metadata", "canonicalize", "symlink_metadata"],
+  };
+  const libcAllowed = new Set([
+    "EINTR", "EINVAL", "EIO", "ENOENT", "ENOTDIR", "ENOTSUP", "ERANGE", "EWOULDBLOCK", "LOCK_EX", "LOCK_NB",
+    "O_DIRECTORY", "O_NOFOLLOW", "O_NONBLOCK", "c_char", "flock", "geteuid", "getpwuid_r", "passwd",
+  ]);
+  for (let next = queue.shift(); next; next = queue.shift()) {
+    const [file, children] = next;
+    const text = files[file];
+    if (text === undefined) {
+      violations.push(`${file}: declared but not found`);
+      continue;
+    }
+    for (const m of text.matchAll(/((?:^[ \t]*#\[[^\n]*\]\n)*)^[ \t]*(?:pub(?:\([^)]*\))? )?mod (\w+);/gm)) {
+      if (/#\[path/.test(m[1])) violations.push(`${file}: #[path] on mod ${m[2]}`);
+      if (/^[ \t]*#\[cfg\(test\)\]$/m.test(m[1])) continue;
+      const candidates = [`${children}/${m[2]}.rs`, `${children}/${m[2]}/mod.rs`];
+      const found = candidates.find((c) => c in files) ?? candidates[0];
+      queue.push([found, found.endsWith("/mod.rs") ? found.slice(0, -"/mod.rs".length) : found.slice(0, -".rs".length)]);
+    }
+    // Code only: full-line comments may describe what the code must not do.
+    const code = text.replace(/^[ \t]*\/\/.*$/gm, "");
+    const rust = code.replaceAll("spawn_blocking", "").replaceAll("tauri::async_runtime::spawn(", "");
+    const forbidden = [
+      /read_dir|walkdir|glob|std::process|\bCommand\b|\bspawn\b|std::net|TcpStream|UdpSocket|reqwest|hyper|tokio::net|\.plugin\(/,
+      /runtime_bridge|python|\bgit\b|[Gg]ate|execute|provider|agent/,
+      /fs::read\b|read_to_string|fs::write|fs::copy|File::|remove_dir|set_permissions|create_dir(?:_all)?\(|std::env/,
+      /#\[path|include!|include_str!|include_bytes!|use std::fs[^;]*\bas\b|extern crate/,
+    ];
+    for (const pattern of forbidden) {
+      const hit = rust.match(pattern);
+      if (hit) violations.push(`${file}: ${hit[0]}`);
+    }
+    const fsItems = [...rust.matchAll(/std::fs::(\w+)|use std::fs::\{([^}]*)\}/g)].flatMap((m) => m[1] ? [m[1]] : m[2].split(",").map((x) => x.trim()));
+    for (const item of fsItems) if (!(fsAllowed[file] ?? []).includes(item)) violations.push(`${file}: std::fs::${item}`);
+    if (/use std::fs(?:;|::\*)/.test(rust)) violations.push(`${file}: imports all of std::fs`);
+    if (file !== "projects/registry.rs" && /OpenOptions|DirBuilder|remove_file|rename\(|hard_link/.test(rust)) {
+      violations.push(`${file}: file operation outside the registry`);
+    }
+    for (const m of rust.matchAll(/libc::(\w+)/g)) if (!libcAllowed.has(m[1])) violations.push(`${file}: libc::${m[1]}`);
+  }
+  return violations;
+}
+
 describe("desktop trust boundary", () => {
   const conf = JSON.parse(read("src-tauri/tauri.conf.json"));
 
@@ -47,33 +145,16 @@ describe("desktop trust boundary", () => {
     expect(conf.build.devUrl).toMatch(/^http:\/\/localhost:/);
   });
 
-  it("pins every Cargo dependency table, including target-specific ones", () => {
+  it("pins the Cargo dependencies structurally, including target-specific ones", () => {
     const cargo = read("src-tauri/Cargo.toml");
     expect(cargo).not.toMatch(/tauri-plugin|sidecar/i);
-    // Every table that can hold dependencies, whatever its spelling ([x.dependencies], [x.dependencies.name],
-    // [target.'cfg(...)'.dependencies]) and every dotted key mentioning dependencies outside a header.
-    const lines = cargo.split("\n").filter((l) => !l.trimStart().startsWith("#"));
-    const headers = lines.filter((l) => l.startsWith("["));
-    expect(headers.filter((h) => h.includes("dependencies"))).toEqual([
-      "[build-dependencies]",
-      "[dependencies]",
-      `[target.'cfg(target_os = "macos")'.dependencies]`,
-      "[dev-dependencies]",
-    ]);
-    expect(lines.filter((l) => !l.startsWith("[") && l.includes("dependencies"))).toEqual([]);
-    const tables: Record<string, string[]> = {};
-    let current = "";
-    for (const line of lines) {
-      if (line.startsWith("[")) current = line;
-      else if (/^[A-Za-z0-9_-]+ *=/.test(line)) (tables[current] ??= []).push(line.split("=")[0].trim());
-    }
-    // tauri, serde, serde_json (response parsing) and libc (poll and process groups for the bridge, file
-    // locking and identity for the project registry); adding another is a deliberate review decision.
-    expect(tables["[dependencies]"]).toEqual(["tauri", "serde", "serde_json", "libc"]);
-    expect(tables["[build-dependencies]"]).toEqual(["tauri-build"]);
-    expect(tables["[dev-dependencies]"]).toEqual(["tauri"]);
+    // The exact set of direct dependencies (every table, quoted or dotted key, rename, target cfg, features) is
+    // pinned from `cargo metadata` by the Rust tests in src-tauri/src/lib.rs, together with mutation fixtures for
+    // the spellings a line-based check misses. They must stay in the suite.
+    const lib = read("src-tauri/src/lib.rs");
+    expect(lib).toContain("fn direct_dependencies_are_exactly_the_reviewed_set()");
+    expect(lib).toContain("fn the_dependency_check_sees_every_manifest_spelling()");
     // The native folder panel, macOS only, without its Linux-only default features (xdg-portal, wayland).
-    expect(tables[`[target.'cfg(target_os = "macos")'.dependencies]`]).toEqual(["rfd"]);
     expect(cargo).toMatch(/^rfd = \{ version = "0\.17\.2", default-features = false \}$/m);
     expect(read("src-tauri/Cargo.lock")).toMatch(/^name = "rfd"\nversion = "0\.17\.2"$/m);
   });
@@ -111,40 +192,18 @@ describe("desktop trust boundary", () => {
 
   // Registration is a bookmark: the registry module looks at folder metadata and its own files, nothing else.
   it("keeps the project registry away from folder contents, processes and the network", () => {
-    const module = ["src-tauri/src/projects.rs", "src-tauri/src/projects/folder.rs", "src-tauri/src/projects/registry.rs"];
+    expect(rustTreeViolations(rustSources())).toEqual([]);
     const production = (p: string) => {
       const text = read(p);
       // registry.rs ends with its test module declaration; tests live in their own file.
       return p.endsWith("registry.rs") ? text.slice(0, text.lastIndexOf("#[cfg(test)]\nmod tests;")) : text;
     };
-    for (const file of module) {
-      const rust = production(file).replaceAll("spawn_blocking", "");
-      expect(rust, file).not.toMatch(
-        /read_dir|walkdir|glob|std::process|Command::|\bspawn\b|std::net|TcpStream|UdpSocket|reqwest|hyper|tokio::net|\.plugin\(/,
-      );
-      expect(rust, file).not.toMatch(/runtime_bridge|python|\bgit\b|[Gg]ate|execute|provider|agent/);
-      expect(rust, file).not.toMatch(/fs::read\b|read_to_string|fs::write|fs::copy|File::create|remove_dir|set_permissions|create_dir(?:_all)?\(|std::env/);
-    }
-    // Only folder.rs looks at chosen or registered folders, through canonicalize and lstat alone.
-    expect(production(module[0])).not.toMatch(/std::fs|\bFile\b|OpenOptions|canonicalize|metadata\(/);
-    const folder = production(module[1]);
-    expect(folder).not.toMatch(/\bFile\b|OpenOptions|\bopen\(|remove_file|rename|hard_link|DirBuilder/);
-    expect(folder.match(/std::fs::\w+/g)?.sort()).toEqual([
-      "std::fs::Metadata",
-      "std::fs::canonicalize",
-      "std::fs::canonicalize",
-      "std::fs::canonicalize",
-      "std::fs::symlink_metadata",
-      "std::fs::symlink_metadata",
-      "std::fs::symlink_metadata",
-    ]);
     // The registry opens files only in its four registry-file functions, and changes only its own fixed names.
-    const registry = production(module[2]);
+    const registry = production("src-tauri/src/projects/registry.rs");
     const functions = [...registry.matchAll(/^(?:pub\(super\) )?fn (\w+)[\s\S]*?^\}/gm)];
-    const opening = functions.filter((f) => /OpenOptions|File::open/.test(f[0])).map((f) => f[1]);
+    const opening = functions.filter((f) => /OpenOptions/.test(f[0])).map((f) => f[1]);
     expect(opening).toEqual(["open_registry", "open_lock", "create_temp", "open_dir"]);
     expect(registry.match(/OpenOptions::new\(\)/g)).toHaveLength(4);
-    expect(registry).not.toMatch(/File::open/);
     expect(registry.match(/remove_file\([^)]*\)/g)).toEqual(["remove_file(&registry)", "remove_file(&temp)", "remove_file(&temp)"]);
     expect(registry.match(/rename\([^)]*\)/g)).toEqual(["rename(&temp, dir.join(REGISTRY)"]);
     expect(registry.match(/hard_link\([^)]*\)/g)).toEqual(["hard_link(registry, &backup)"]);
@@ -153,13 +212,48 @@ describe("desktop trust boundary", () => {
     expect(registry).toMatch(/^const LOCK: &str = "projects\.lock";$/m);
     expect(registry).toMatch(/^const TEMP: &str = "projects\.json\.tmp";$/m);
     expect(registry).toMatch(/^const BACKUP_PREFIX: &str = "projects\.json\.corrupt-";$/m);
-    // Failure injection is compiled out of production builds.
+    // Failure injection and the pre-commit test hook are compiled out of production builds.
     expect(registry).toMatch(/#\[cfg\(not\(test\)\)\]\nfn fault\(_: Step\) -> std::io::Result<\(\)> \{\n {4}Ok\(\(\)\)\n\}/);
+    expect(registry.match(/tests::\w+\(/g)).toEqual(["tests::before_recheck(", "tests::fault("]);
+    expect(registry).toMatch(/ {4}#\[cfg\(test\)\]\n {4}tests::before_recheck\(\);\n {4}folder::recheck\(&candidate\)\?;/);
     // The registry and the panel are macOS-only; other targets answer unsupported_platform.
-    const projects = read(module[0]);
+    const projects = read("src-tauri/src/projects.rs");
     expect(projects).toMatch(/#\[cfg\(target_os = "macos"\)\]\nmod folder;\n#\[cfg\(target_os = "macos"\)\]\nmod registry;/);
     expect(projects.match(/rfd::/g)).toEqual(["rfd::"]);
     expect(projects).toMatch(/\.set_can_create_directories\(false\)/);
+    // The crate has exactly these top-level modules, so a new one cannot sit outside both scans.
+    const lib = read("src-tauri/src/lib.rs");
+    expect(lib.slice(0, lib.indexOf("#[cfg(test)]")).match(/^\s*(?:pub )?mod \w+/gm)).toEqual(["mod projects", "mod runtime_bridge"]);
+  });
+
+  it("finds prohibited operations anywhere in the project registry module tree", () => {
+    const actual = rustSources();
+    expect(rustTreeViolations(actual)).toEqual([]);
+    const withModule = (decl: string, file: string, text: string) => ({
+      ...actual,
+      "projects.rs": actual["projects.rs"].replace("mod registry;", `mod registry;\n${decl}`),
+      [file]: text,
+    });
+    const bypasses: Record<string, Record<string, string>> = {
+      // The review's bypass: a new production submodule that the old hard-coded file list never read.
+      "new submodule": withModule('#[cfg(target_os = "macos")]\nmod scan;', "projects/scan.rs", "pub fn f(p: &std::path::Path) { let _ = std::fs::read_dir(p); }"),
+      "nested submodule": {
+        ...withModule("mod util;", "projects/util.rs", "mod deep;"),
+        "projects/util/deep.rs": "pub fn g() { let _ = std::process::Command::new(\"git\"); }",
+      },
+      "mod.rs layout": withModule("mod walk;", "projects/walk/mod.rs", "use std::fs::read_dir;"),
+      "path attribute": withModule('#[path = "../elsewhere.rs"]\nmod hidden;', "elsewhere.rs", ""),
+      "include macro": { ...actual, "projects/folder.rs": actual["projects/folder.rs"] + '\ninclude!("../elsewhere.rs");' },
+      "File::options outside the registry": { ...actual, "projects/folder.rs": actual["projects/folder.rs"] + "\nfn h(p: &Path) { let _ = std::fs::File::options().read(true).open(p); }" },
+      "raw libc open": { ...actual, "projects/folder.rs": actual["projects/folder.rs"] + "\nfn i() { unsafe { libc::opendir(std::ptr::null()) }; }" },
+      "aliased import": { ...actual, "projects/registry.rs": actual["projects/registry.rs"].replace("use std::collections::HashSet;", "use std::collections::HashSet;\nuse std::fs::OpenOptions as Opener;") },
+      "network in projects.rs": { ...actual, "projects.rs": actual["projects.rs"] + "\nfn j() { let _ = std::net::TcpStream::connect(\"127.0.0.1:1\"); }" },
+    };
+    for (const [name, tree] of Object.entries(bypasses)) {
+      expect(rustTreeViolations(tree), name).not.toEqual([]);
+    }
+    // A test-only module may do what tests need.
+    expect(rustTreeViolations(withModule("#[cfg(test)]\nmod more_tests;", "projects/more_tests.rs", "use std::process::Command;"))).toEqual([]);
   });
 
   // Reviewed in issue #40: the frontend may depend on @tauri-apps/api, and only to call get_runtime_status.
@@ -172,31 +266,46 @@ describe("desktop trust boundary", () => {
   });
 
   it("calls exactly one native command, from one module, with no arguments", () => {
-    const files: string[] = [];
-    const walk = (dir: string) => {
-      for (const name of readdirSync(dir)) {
-        const p = join(dir, name);
-        if (statSync(p).isDirectory()) walk(p);
-        else if (/\.tsx?$/.test(name) && !/\.test\.tsx?$/.test(name)) files.push(p);
-      }
-    };
-    walk(join(root, "src"));
-    const users = files.filter((f) => readFileSync(f, "utf8").includes("@tauri-apps"));
-    expect(users).toEqual([join(root, "src", "app", "runtimeStatus.ts")]);
+    const files = frontendSources();
+    expect(frontendViolations(files)).toEqual([]);
+    // index.html loads the app's one entry module, and there is no public/ directory to serve other scripts from.
+    expect(read("index.html").match(/<script[^>]*>/g)).toEqual(['<script type="module" src="/src/main.tsx">']);
+    expect(existsSync(join(root, "public"))).toBe(false);
 
     const adapter = read("src/app/runtimeStatus.ts");
     expect(adapter.match(/from "@tauri-apps[^"]*"/g)).toEqual(['from "@tauri-apps/api/core"']);
     expect(adapter).toMatch(/^import \{ invoke, isTauri \} from "@tauri-apps\/api\/core";$/m);
     expect(adapter).toMatch(/^const COMMAND = "get_runtime_status";$/m);
-    // The project commands have no frontend caller yet: the Projects UI, and with it the confirmed reset, is a
-    // separate increment.
-    for (const file of files) {
-      expect(readFileSync(file, "utf8"), file).not.toMatch(/list_projects|add_project|remove_project|reset_projects/);
-    }
     // One call site, with the fixed name and nothing else; invoke itself is never handed to other code.
     expect(adapter.match(/\binvoke\b/g)).toHaveLength(2);
     expect(adapter).toMatch(/\binvoke\(COMMAND\)/);
     expect(adapter).not.toMatch(/export[^\n]*\binvoke\b(?!\()|export \{|export \*/);
+  });
+
+  // The project commands have no frontend caller yet: the Projects UI, and with it the confirmed reset, is a
+  // separate increment. These are the shapes that escaped the earlier .ts/.tsx-only scan, plus close variants.
+  it("rejects every way a frontend module could reach a native command", () => {
+    const actual = frontendSources();
+    const main = actual[join(root, "src", "main.tsx")];
+    const startup = (name: string, text: string, importer = `import "./${name.replace(/\.[^.]+$/, "")}";\n`) => ({
+      ...actual,
+      [join(root, "src", "main.tsx")]: importer + main,
+      [join(root, "src", name)]: text,
+    });
+    const bypasses: Record<string, Record<string, string>> = {
+      // The review's bypass: a startup-imported JavaScript module.
+      "startup .js module": startup("boot.js", 'window.__TAURI_INTERNALS__.invoke("reset_projects");'),
+      ".mjs through @tauri-apps": startup("boot.mjs", 'import { invoke } from "@tauri-apps/api/core";\ninvoke("reset_" + "projects");'),
+      ".jsx reaching the internals": startup("Boot.jsx", 'const c = ["reset", "projects"].join("_");\nwindow["__TAURI_" + "INTERNALS__"].invoke(c);'),
+      ".mts naming a command": startup("boot.mts", 'export const c = "list_projects";'),
+      ".cjs required at startup": startup("boot.cjs", 'module.exports = "add_project";', 'require("./boot.cjs");\n'),
+      "a test-named module imported at startup": startup("boot.test.ts", 'import { invoke } from "@tauri-apps/api/core";\ninvoke("x");', 'import "./boot.test";\n'),
+      "a module outside src": { ...actual, [join(root, "src", "main.tsx")]: 'import "../scripts/boot.js";\n' + main },
+      "a dynamic import of test support": { ...actual, [join(root, "src", "main.tsx")]: 'void import("./test/setup");\n' + main },
+    };
+    for (const [name, files] of Object.entries(bypasses)) {
+      expect(frontendViolations(files), name).not.toEqual([]);
+    }
   });
 
   it("references no remote URL from the app sources", () => {
