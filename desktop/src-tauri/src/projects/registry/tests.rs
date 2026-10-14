@@ -359,8 +359,17 @@ fn a_registry_or_lock_file_owned_by_another_user_is_unavailable() {
     let foreign = Path::new("/private/etc/hosts");
     let scratch = Scratch::new("foreign-owner");
     std::fs::DirBuilder::new().mode(0o700).create(scratch.data()).unwrap();
-    if is_root() || std::fs::hard_link(foreign, scratch.file(REGISTRY)).is_err() {
-        eprintln!("skipped: cannot create a foreign-owned file here");
+    let unavailable = if is_root() {
+        Some("running as root, so no file is foreign-owned".to_string())
+    } else {
+        std::fs::hard_link(foreign, scratch.file(REGISTRY)).err().map(|e| format!("cannot link {foreign:?}: {e}"))
+    };
+    if let Some(reason) = unavailable {
+        // Written to the stderr handle rather than through eprintln!, which the test harness captures, so a skip
+        // shows in every test log. CI runs on the volume layout this needs, so there it is a failure instead.
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stderr(), "SKIPPED a_registry_or_lock_file_owned_by_another_user: {reason}");
+        assert!(std::env::var_os("CI").is_none(), "the foreign-owner fixture must run in CI: {reason}");
         return;
     }
     let owner = std::fs::symlink_metadata(scratch.file(REGISTRY)).unwrap().uid();
