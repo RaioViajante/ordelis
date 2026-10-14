@@ -44,25 +44,29 @@ this document, the issue tracker, or the pull request.
    into failures.
 5. **Fail-closed CI export:** raw logs, `parsed.json`, `result.json`, human summaries and
    lock files are not uploaded. They contain provider output, provider-controlled version
-   text or local paths and therefore have no safe upload contract. CI uploads one newly
-   staged JSON document outside the probe tree. Its exporter independently validates and
-   copies only fixed provider IDs, `C0`/`C1`/`C2` `PASS`/`FAIL` enums, target OS, run date
-   and aggregate status. Cleanup must succeed before that file is created, and cleanup
-   failure removes it.
+   text or local paths and therefore have no safe upload contract. Provider subprocesses
+   never receive a trusted export path. Only after the probe step succeeds and cleanup
+   succeeds does a separate workflow step create a randomly named mode-`0700` directory,
+   reconstruct one mode-`0600` JSON document from a strict allowlist, and validate its
+   path, ownership, type, directory contents and canonical bytes. The upload step requires
+   both preceding steps to have succeeded plus the staging step's explicit authorization
+   output; it does not use `always()`.
 6. **Regression tests:** `tests/test_probe_artifact_hygiene.py` asserts that no
    probe-home or shell-snapshot path is tracked beyond a documented pending-removal set
    that the stacked removal PR empties, that sensitive paths are ignored, that curated
    evidence remains committable, and that the paths are marked `-diff` for local Git.
    Probe fixture tests cover ordinary provider failure, cleanup failure, signals, process
-   termination, unsafe provider homes and mutation attempts against the CI export.
+   termination, unsafe provider homes, provider-forged summaries, unexpected files,
+   symlink attempts and mutation attempts against trusted staging.
 
 ## What this protects
 
 - New probe runs reject repository-local provider homes, known sensitive paths are
   ignored, and cleanup removes environment/session captures from the verified run root.
-- CI never uploads the working probe tree. An unsuccessful probe can upload only the
-  independently validated status-only document; interruption or cleanup failure cannot
-  make raw or unexpected files eligible for upload.
+- CI never uploads the working probe tree. Failure, cancellation, interruption or cleanup
+  failure prevents trusted staging and makes the upload step ineligible. A provider-created
+  file at the former export filename is untrusted even if it is structurally valid, because
+  the workflow neither validates nor uploads that location.
 - Curated probe evidence (`result.json`, `parsed.json`, `summary.md`,
   `lock-summary.yaml`) remains locally committable for the documented workflow, but is
   deliberately excluded from CI uploads because its content is not bounded tightly
@@ -85,9 +89,10 @@ this document, the issue tracker, or the pull request.
   contain absolute developer paths and third-party session output but no credential-shaped
   values; removing or retaining them is a separate, narrowly justified decision.
 - **Traps are not absolute cleanup guarantees.** `SIGKILL`, machine crashes and abrupt
-  runner termination cannot execute shell traps. Temporary raw artifacts can remain on
-  that machine until runner/workspace cleanup, but the CI upload allowlist never includes
-  the working tree or raw artifact root, even when probe cleanup never runs.
+  runner termination cannot execute shell traps. Temporary raw artifacts and a provider-
+  forged file can remain on that machine until runner/workspace cleanup. GitHub Actions
+  cancellation/failure semantics skip the success-gated trusted staging and upload steps,
+  so those files do not become upload candidates even when probe cleanup never runs.
 
 ## Why Git history needs a separate decision
 

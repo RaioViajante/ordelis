@@ -7,6 +7,7 @@ import shlex
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 import textwrap
 import time
@@ -60,6 +61,24 @@ class ProviderValidationScriptTests(unittest.TestCase):
 
                     if [ -n "${FAKE_INVOCATION_MARKER:-}" ]; then
                       : > "$FAKE_INVOCATION_MARKER"
+                    fi
+
+                    if [ "$provider" = "claude" ] && [ -n "${FAKE_FORGED_SUMMARY_PATH:-}" ]; then
+                      mkdir -p "$(dirname "$FAKE_FORGED_SUMMARY_PATH")"
+                      if [ -n "${FAKE_FORGED_SUMMARY_SOURCE:-}" ]; then
+                        cp "$FAKE_FORGED_SUMMARY_SOURCE" "$FAKE_FORGED_SUMMARY_PATH"
+                      else
+                        printf '%s\n' 'DUMMY_NONFUNCTIONAL_SECRET_MARKER' > "$FAKE_FORGED_SUMMARY_PATH"
+                      fi
+                      if [ -n "${FAKE_FORGED_UNEXPECTED_PATH:-}" ]; then
+                        printf '%s\n' 'DUMMY_UNEXPECTED_FILE' > "$FAKE_FORGED_UNEXPECTED_PATH"
+                      fi
+                    fi
+
+                    if [ "$provider" = "claude" ] && [ -n "${PROBE_CI_EXPORT_DIR:-}" ]; then
+                      mkdir -p "$PROBE_CI_EXPORT_DIR"
+                      printf '%s\n' 'DUMMY_NONFUNCTIONAL_SECRET_MARKER' > \
+                        "$PROBE_CI_EXPORT_DIR/capability-probe-summary.json"
                     fi
 
                     for arg in "$@"; do
@@ -150,7 +169,7 @@ class ProviderValidationScriptTests(unittest.TestCase):
             env.pop("CODEX_HOME", None)
             env["PROBE_CWD"] = str(test_root)
             env["PROBE_ARTIFACT_ROOT"] = str(artifact_parent)
-            env["PROBE_CI_EXPORT_DIR"] = str(export_dir)
+            env.pop("PROBE_CI_EXPORT_DIR", None)
             yield {
                 "test_root": test_root,
                 "repo_root": repo_root,
@@ -169,6 +188,10 @@ class ProviderValidationScriptTests(unittest.TestCase):
         create_sensitive: bool = False,
         cleanup_failure: bool = False,
         version_suffix: str = "",
+        trusted_stage: bool = False,
+        forge_summary: bool = False,
+        structurally_valid_forgery: bool = False,
+        forge_unexpected_file: bool = False,
     ) -> tuple[subprocess.CompletedProcess[str], dict[str, object]]:
         with self._capability_probe_fixture() as fixture:
             env = fixture["env"].copy()
@@ -188,6 +211,33 @@ class ProviderValidationScriptTests(unittest.TestCase):
                 env["FAKE_LOCK_SENSITIVE_PARENT"] = "1"
             if version_suffix:
                 env["FAKE_VERSION_SUFFIX"] = version_suffix
+            formerly_trusted = fixture["export_dir"] / "capability-probe-summary.json"
+            if forge_summary or structurally_valid_forgery:
+                env["FAKE_FORGED_SUMMARY_PATH"] = str(formerly_trusted)
+            if structurally_valid_forgery:
+                forged = fixture["test_root"] / "provider-forged-summary.json"
+                target_os = "macos" if sys.platform == "darwin" else "linux"
+                forged.write_text(
+                    json.dumps(
+                        {
+                            "schema_version": 1,
+                            "run_date": date.today().isoformat(),
+                            "target_os": target_os,
+                            "required_capabilities": ["C0", "C1", "C2"],
+                            "providers": {
+                                provider: {"C0": "PASS", "C1": "PASS", "C2": "PASS"}
+                                for provider in PROVIDER_IDS
+                            },
+                            "gate_status": "PASS",
+                        },
+                    ),
+                    encoding="utf-8",
+                )
+                env["FAKE_FORGED_SUMMARY_SOURCE"] = str(forged)
+            if forge_unexpected_file:
+                env["FAKE_FORGED_UNEXPECTED_PATH"] = str(
+                    fixture["export_dir"] / "unexpected-private-state.txt",
+                )
 
             completed = subprocess.run(
                 ["bash", str(fixture["script_path"])],
@@ -218,14 +268,45 @@ class ProviderValidationScriptTests(unittest.TestCase):
                 result_path = probe_root / provider / "C2" / "result.json"
                 if result_path.exists():
                     artifacts[provider] = json.loads(result_path.read_text(encoding="utf-8"))
-            ci_summary = fixture["export_dir"] / "capability-probe-summary.json"
+            if trusted_stage and completed.returncode == 0:
+                staged = subprocess.run(
+                    [
+                        "python3",
+                        str(ROOT / "scripts" / "sanitize_capability_probe_artifacts.py"),
+                        "stage",
+                        "--run-root",
+                        str(probe_root),
+                        "--staging-parent",
+                        str(fixture["test_root"]),
+                        "--run-date",
+                        date.today().isoformat(),
+                        "--target-os",
+                        "macos" if sys.platform == "darwin" else "linux",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                artifacts["stage_returncode"] = staged.returncode
+                artifacts["stage_stderr"] = staged.stderr
+                if staged.returncode == 0:
+                    staged_summary = Path(staged.stdout.strip())
+                    artifacts["staged_summary_path"] = str(staged_summary)
+                    artifacts["ci_summary"] = json.loads(
+                        staged_summary.read_text(encoding="utf-8"),
+                    )
+                    artifacts["staged_files"] = sorted(
+                        path.relative_to(staged_summary.parent).as_posix()
+                        for path in staged_summary.parent.iterdir()
+                    )
+            ci_summary = formerly_trusted
             artifacts["ci_export_files"] = sorted(
                 path.relative_to(fixture["export_dir"]).as_posix()
                 for path in fixture["export_dir"].rglob("*")
                 if path.is_file()
             ) if fixture["export_dir"].exists() else []
             if ci_summary.exists():
-                artifacts["ci_summary"] = json.loads(ci_summary.read_text(encoding="utf-8"))
+                artifacts["provider_forged_summary"] = ci_summary.read_text(encoding="utf-8")
             artifacts["sensitive_survivors"] = sorted(
                 path.relative_to(probe_root).as_posix()
                 for path in probe_root.rglob("*")
@@ -383,10 +464,13 @@ class ProviderValidationScriptTests(unittest.TestCase):
         dummy_private_value = "DUMMY_NONFUNCTIONAL_PRIVATE_VALUE"
         completed, artifacts = self._run_capability_probes(
             version_suffix=dummy_private_value,
+            trusted_stage=True,
         )
 
         self.assertEqual(completed.returncode, 0, completed.stderr)
-        self.assertEqual(artifacts["ci_export_files"], ["capability-probe-summary.json"])
+        self.assertEqual(artifacts["ci_export_files"], [])
+        self.assertEqual(artifacts["stage_returncode"], 0, artifacts["stage_stderr"])
+        self.assertEqual(artifacts["staged_files"], ["capability-probe-summary.json"])
         ci_summary = artifacts["ci_summary"]
         self.assertEqual(
             set(ci_summary),
@@ -404,16 +488,37 @@ class ProviderValidationScriptTests(unittest.TestCase):
                 set(ci_summary["providers"][provider].values()) <= {"PASS", "FAIL"},
             )
 
-    def test_provider_failure_still_cleans_before_safe_export(self) -> None:
+    def test_provider_failure_cleans_and_cannot_authorize_an_upload(self) -> None:
         completed, artifacts = self._run_capability_probes(
             plain_text_c2_provider="copilot",
             create_sensitive=True,
+            forge_summary=True,
         )
 
         self.assertNotEqual(completed.returncode, 0)
         self.assertEqual(artifacts["sensitive_survivors"], [])
         self.assertEqual(artifacts["ci_export_files"], ["capability-probe-summary.json"])
-        self.assertEqual(artifacts["ci_summary"]["gate_status"], "FAIL")
+        self.assertIn("DUMMY_NONFUNCTIONAL_SECRET_MARKER", artifacts["provider_forged_summary"])
+        self.assertNotIn("stage_returncode", artifacts)
+
+    def test_runner_removes_legacy_export_path_from_provider_environment(self) -> None:
+        with self._capability_probe_fixture() as fixture:
+            legacy_export = fixture["export_dir"]
+            env = fixture["env"].copy()
+            env["PROBE_CI_EXPORT_DIR"] = str(legacy_export)
+
+            completed = subprocess.run(
+                ["bash", str(fixture["script_path"])],
+                cwd=fixture["repo_root"],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertFalse((legacy_export / "capability-probe-summary.json").exists())
 
     def test_cleanup_failure_is_observable_and_suppresses_ci_export(self) -> None:
         completed, artifacts = self._run_capability_probes(cleanup_failure=True)
@@ -422,7 +527,36 @@ class ProviderValidationScriptTests(unittest.TestCase):
         self.assertIn("cleanup failed", completed.stderr.lower())
         self.assertEqual(artifacts["ci_export_files"], [])
 
+    def test_success_ignores_provider_forged_structurally_valid_summary(self) -> None:
+        completed, artifacts = self._run_capability_probes(
+            structurally_valid_forgery=True,
+            forge_unexpected_file=True,
+            trusted_stage=True,
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(
+            artifacts["ci_export_files"],
+            ["capability-probe-summary.json", "unexpected-private-state.txt"],
+        )
+        self.assertEqual(artifacts["stage_returncode"], 0, artifacts["stage_stderr"])
+        self.assertEqual(artifacts["staged_files"], ["capability-probe-summary.json"])
+        self.assertNotEqual(
+            Path(artifacts["staged_summary_path"]).parent,
+            Path(artifacts["staged_summary_path"]).parents[1] / "probe-export",
+        )
+
     def test_sigterm_cleans_artifacts_and_terminates_provider_process_group(self) -> None:
+        self._assert_signal_cleans_and_does_not_authorize(signal.SIGTERM, 143)
+
+    def test_sigint_cleans_artifacts_and_terminates_provider_process_group(self) -> None:
+        self._assert_signal_cleans_and_does_not_authorize(signal.SIGINT, 130)
+
+    def _assert_signal_cleans_and_does_not_authorize(
+        self,
+        sent_signal: signal.Signals,
+        expected_returncode: int,
+    ) -> None:
         with self._capability_probe_fixture() as fixture:
             provider_pid_file = fixture["test_root"] / "provider.pid"
             sensitive_root = (
@@ -435,6 +569,9 @@ class ProviderValidationScriptTests(unittest.TestCase):
                     "FAKE_SENSITIVE_ROOT": str(sensitive_root),
                     "FAKE_SLEEP_PROVIDER": "claude",
                     "FAKE_PROVIDER_PID_FILE": str(provider_pid_file),
+                    "FAKE_FORGED_SUMMARY_PATH": str(
+                        fixture["export_dir"] / "capability-probe-summary.json"
+                    ),
                 },
             )
             process = subprocess.Popen(
@@ -452,15 +589,15 @@ class ProviderValidationScriptTests(unittest.TestCase):
                     self.fail("fake provider did not start")
                 time.sleep(0.02)
             provider_pid = int(provider_pid_file.read_text(encoding="utf-8"))
-            process.send_signal(signal.SIGTERM)
+            process.send_signal(sent_signal)
             _, stderr = process.communicate(timeout=5)
 
-            self.assertEqual(process.returncode, 143, stderr)
+            self.assertEqual(process.returncode, expected_returncode, stderr)
             self.assertFalse(any(
                 path.is_dir() and path.name in {"shell_snapshots", "sessions"}
                 for path in fixture["artifact_parent"].rglob("*")
             ))
-            self.assertFalse((fixture["export_dir"] / "capability-probe-summary.json").exists())
+            self.assertTrue((fixture["export_dir"] / "capability-probe-summary.json").exists())
             deadline = time.monotonic() + 2
             while time.monotonic() < deadline:
                 try:
@@ -476,6 +613,47 @@ class ProviderValidationScriptTests(unittest.TestCase):
                     check=False,
                 )
                 self.fail(f"fake provider process survived SIGTERM: {state.stdout.strip()}")
+
+    def test_sigkill_provider_forgery_is_not_a_trusted_staged_artifact(self) -> None:
+        with self._capability_probe_fixture() as fixture:
+            provider_pid_file = fixture["test_root"] / "provider.pid"
+            forged_summary = fixture["export_dir"] / "capability-probe-summary.json"
+            env = fixture["env"].copy()
+            env.update(
+                {
+                    "FAKE_SLEEP_PROVIDER": "claude",
+                    "FAKE_PROVIDER_PID_FILE": str(provider_pid_file),
+                    "FAKE_FORGED_SUMMARY_PATH": str(forged_summary),
+                },
+            )
+            process = subprocess.Popen(
+                ["bash", str(fixture["script_path"])],
+                cwd=fixture["repo_root"],
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            deadline = time.monotonic() + 5
+            while not provider_pid_file.exists() and process.poll() is None:
+                if time.monotonic() >= deadline:
+                    process.kill()
+                    self.fail("fake provider did not start")
+                time.sleep(0.02)
+            provider_pid = int(provider_pid_file.read_text(encoding="utf-8"))
+            process.kill()
+            process.communicate(timeout=5)
+            self.assertEqual(process.returncode, -signal.SIGKILL)
+            self.assertTrue(forged_summary.exists())
+            self.assertNotIn("PROBE_CI_EXPORT_DIR", env)
+            self.assertFalse(any(
+                path.is_dir() and path.name.startswith("capability-probe-export-")
+                for path in fixture["test_root"].iterdir()
+            ))
+            try:
+                os.killpg(provider_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
 
     def test_repo_local_provider_homes_are_rejected_before_provider_launch(self) -> None:
         with self._capability_probe_fixture() as fixture:

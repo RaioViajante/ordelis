@@ -84,18 +84,34 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Run capability probes
+        id: capability_probes
         env:
           PROBE_ARTIFACT_ROOT: ${{ runner.temp }}/synapse-capability-probe-work-${{ github.run_id }}-${{ github.run_attempt }}
-          PROBE_CI_EXPORT_DIR: ${{ runner.temp }}/synapse-capability-probe-export-${{ github.run_id }}-${{ github.run_attempt }}
         run: ./scripts/run_capability_probes.sh
 
+      - name: Stage validated capability summary
+        id: stage_capability_summary
+        if: ${{ success() && steps.capability_probes.outcome == 'success' }}
+        env:
+          PROBE_ARTIFACT_ROOT: ${{ runner.temp }}/synapse-capability-probe-work-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          run_date="$(date +%F)"
+          artifact_path="$(python3 ./scripts/sanitize_capability_probe_artifacts.py stage \
+            --run-root "$PROBE_ARTIFACT_ROOT/$run_date" \
+            --staging-parent "$RUNNER_TEMP" \
+            --run-date "$run_date" \
+            --target-os macos)"
+          echo "artifact_path=$artifact_path" >> "$GITHUB_OUTPUT"
+          echo "upload_ready=true" >> "$GITHUB_OUTPUT"
+
       - name: Upload capability probe artifacts
-        if: always()
+        if: ${{ success() && steps.capability_probes.outcome == 'success' && steps.stage_capability_summary.outcome == 'success' && steps.stage_capability_summary.outputs.upload_ready == 'true' }}
         uses: actions/upload-artifact@v4
         with:
           name: capability-probes-${{ github.run_id }}
-          path: ${{ runner.temp }}/synapse-capability-probe-export-${{ github.run_id }}-${{ github.run_attempt }}/capability-probe-summary.json
-          if-no-files-found: ignore
+          path: ${{ steps.stage_capability_summary.outputs.artifact_path }}
+          if-no-files-found: error
 
   packaging-smoke-macos:
     name: Packaging smoke (macOS)

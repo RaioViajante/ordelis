@@ -117,25 +117,43 @@ class ProbeArtifactHygieneTests(unittest.TestCase):
                     f"{path} must be marked -diff in .gitattributes, got: {result.stdout.strip()}",
                 )
 
-    def test_ci_upload_is_one_status_only_file_outside_the_checkout(self) -> None:
+    def test_ci_upload_requires_successful_trusted_staging(self) -> None:
         workflow = (ROOT / ".github" / "workflows" / "gate.yml").read_text(encoding="utf-8")
+        probe_step = workflow.split("- name: Run capability probes", 1)[1]
+        probe_step = probe_step.split("- name: Stage validated capability summary", 1)[0]
+        stage = workflow.split("- name: Stage validated capability summary", 1)[1]
+        stage = stage.split("- name: Upload capability probe artifacts", 1)[0]
         upload = workflow.split("- name: Upload capability probe artifacts", 1)[1]
         upload = upload.split("\n  packaging-smoke-macos:", 1)[0]
 
+        self.assertNotIn("PROBE_CI_EXPORT_DIR", probe_step)
+        self.assertIn("id: stage_capability_summary", stage)
+        self.assertIn("success()", stage)
+        self.assertIn("steps.capability_probes.outcome == 'success'", stage)
+        self.assertIn("sanitize_capability_probe_artifacts.py stage", stage)
         self.assertNotIn("docs/probes", upload)
         self.assertNotIn("**", upload)
+        self.assertNotIn("if: always()", upload)
+        self.assertIn("success()", upload)
+        self.assertIn("steps.capability_probes.outcome == 'success'", upload)
+        self.assertIn("steps.stage_capability_summary.outcome == 'success'", upload)
+        self.assertIn("steps.stage_capability_summary.outputs.upload_ready == 'true'", upload)
         self.assertIn(
-            "path: ${{ runner.temp }}/synapse-capability-probe-export-${{ github.run_id }}-${{ github.run_attempt }}/capability-probe-summary.json",
+            "path: ${{ steps.stage_capability_summary.outputs.artifact_path }}",
             upload,
         )
+        self.assertIn("if-no-files-found: error", upload)
 
-    def test_ci_export_ignores_unexpected_files_and_rejects_invalid_status(self) -> None:
+    def test_ci_staging_ignores_precreated_paths_and_rejects_invalid_status(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             test_root = Path(tmp)
             artifact_parent = test_root / "probe-work"
             run_root = artifact_parent / "2099-01-01"
-            output = test_root / "export" / "capability-probe-summary.json"
+            staging_parent = test_root / "trusted-staging"
+            staging_parent.mkdir()
+            precreated = staging_parent / "capability-probe-summary.json"
             dummy_private_value = "DUMMY_NONFUNCTIONAL_PRIVATE_VALUE"
+            precreated.write_text(dummy_private_value, encoding="utf-8")
             for provider in PROVIDER_IDS:
                 for capability in ("C0", "C1", "C2"):
                     result = run_root / provider / capability / "result.json"
@@ -159,9 +177,9 @@ class ProbeArtifactHygieneTests(unittest.TestCase):
 
             completed = subprocess.run(
                 [
-                    "python3", str(SANITIZER), "export",
+                    "python3", str(SANITIZER), "stage",
                     "--run-root", str(run_root),
-                    "--output", str(output),
+                    "--staging-parent", str(staging_parent),
                     "--run-date", "2099-01-01",
                     "--target-os", "linux",
                 ],
@@ -170,19 +188,42 @@ class ProbeArtifactHygieneTests(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(completed.returncode, 0, completed.stderr)
+            output = Path(completed.stdout.strip())
+            self.assertNotEqual(output, precreated)
             self.assertNotIn(dummy_private_value, output.read_text(encoding="utf-8"))
             self.assertEqual([path.name for path in output.parent.iterdir()], [output.name])
+            self.assertEqual(precreated.read_text(encoding="utf-8"), dummy_private_value)
+
+            precreated.unlink()
+            symlink_target = test_root / "provider-controlled-summary.json"
+            symlink_target.write_text(dummy_private_value, encoding="utf-8")
+            precreated.symlink_to(symlink_target)
+            symlink_attempt = subprocess.run(
+                [
+                    "python3", str(SANITIZER), "stage",
+                    "--run-root", str(run_root),
+                    "--staging-parent", str(staging_parent),
+                    "--run-date", "2099-01-01",
+                    "--target-os", "linux",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(symlink_attempt.returncode, 0, symlink_attempt.stderr)
+            symlink_output = Path(symlink_attempt.stdout.strip())
+            self.assertFalse(symlink_output.is_symlink())
+            self.assertEqual(symlink_target.read_text(encoding="utf-8"), dummy_private_value)
 
             mutated = run_root / PROVIDER_IDS[0] / "C0" / "result.json"
             payload = json.loads(mutated.read_text(encoding="utf-8"))
             payload["status"] = dummy_private_value
             mutated.write_text(json.dumps(payload), encoding="utf-8")
-            rejected_output = test_root / "rejected" / "summary.json"
             rejected = subprocess.run(
                 [
-                    "python3", str(SANITIZER), "export",
+                    "python3", str(SANITIZER), "stage",
                     "--run-root", str(run_root),
-                    "--output", str(rejected_output),
+                    "--staging-parent", str(staging_parent),
                     "--run-date", "2099-01-01",
                     "--target-os", "linux",
                 ],
@@ -191,7 +232,28 @@ class ProbeArtifactHygieneTests(unittest.TestCase):
                 check=False,
             )
             self.assertNotEqual(rejected.returncode, 0)
-            self.assertFalse(rejected_output.exists())
+
+    def test_ci_staging_rejects_symlink_parent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            test_root = Path(tmp)
+            real_parent = test_root / "real"
+            real_parent.mkdir()
+            alias = test_root / "alias"
+            alias.symlink_to(real_parent, target_is_directory=True)
+
+            completed = subprocess.run(
+                [
+                    "python3", str(SANITIZER), "stage",
+                    "--run-root", str(test_root / "missing-run"),
+                    "--staging-parent", str(alias),
+                    "--run-date", "2099-01-01",
+                    "--target-os", "linux",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertNotEqual(completed.returncode, 0)
 
     def test_cleanup_never_follows_sensitive_directory_symlinks(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
