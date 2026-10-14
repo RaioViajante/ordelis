@@ -8,13 +8,10 @@ from pathlib import Path, PurePosixPath
 ROOT = Path(__file__).resolve().parent.parent
 SANITIZER = ROOT / "scripts" / "sanitize_capability_probe_artifacts.py"
 
-# The base PR retains exactly these two files byte-identical to main, so it has no
-# deletion section for them. GitHub ignores `-diff` for hosted deletion diffs; the
-# attribute protects local Git rendering only. The stacked PR empties this tuple.
-PENDING_REMOVAL_PATHS = (
-    "docs/probes/2026-02-26/.probe_codex_home/shell_snapshots/019c97c8-a15b-7453-bebd-bb882448604b.sh",
-    "docs/probes/2026-02-26/.probe_codex_home/shell_snapshots/019c97c9-bc32-7643-bddc-e43dd4ae712f.sh",
-)
+# The base PR allowlists exactly the two retained files so it produces no deletion
+# section for them. This removal PR deletes both, so no probe-home path is allowed.
+# GitHub ignores `-diff` for hosted deletions; the attribute protects local Git only.
+PENDING_REMOVAL_PATHS: tuple[str, ...] = ()
 PROBE_HOME_ROOT = "docs/probes/2026-02-26/.probe_codex_home"
 
 # Synthetic paths only: they never existed and carry no real material.
