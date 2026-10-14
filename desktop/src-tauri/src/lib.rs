@@ -595,24 +595,51 @@ mod tests {
         assert!(!projects::selecting());
     }
 
+    // rfd cannot dismiss a sheet, and dropping its future leaves the sheet up, so a dropped call must not free
+    // the guard while the panel is still open: another call would put a second sheet on the window.
     #[test]
-    fn the_panel_guard_is_released_when_the_call_is_dropped() {
+    fn a_dropped_call_keeps_the_guard_until_its_panel_closes_and_registers_nothing() {
         let _guard = projects::GUARD_TESTS.lock().unwrap_or_else(|e| e.into_inner());
         let scratch = Scratch::new("dropped");
+        let (panel, release) = held();
         let app = app_with(Some(scratch.data()), cancels());
         let main = webview(&app, "main");
         let dropped = {
             let (main, data) = (main.clone(), scratch.data());
             tauri::async_runtime::spawn(async move {
-                let never = FakePicker(Box::new(|| Box::pin(std::future::pending())));
-                Projects::new(Some(data)).add(&main, &Picker::new(Box::new(never))).await
+                Projects::new(Some(data)).add(&main, &Picker::new(Box::new(panel))).await
             })
         };
-        wait_until(|| projects::selecting() || dropped.inner().is_finished());
-        assert!(projects::selecting(), "the panel never opened");
+        wait_until(projects::selecting);
         dropped.abort();
+        wait_until(|| dropped.inner().is_finished());
+        assert!(projects::selecting(), "the panel is still open, so the guard must be held");
+        assert_eq!(invoke(&main, "add_project", serde_json::json!({})), Err(error(projects::ErrorCode::SelectionInProgress)));
+
+        // The user picks a folder in the orphaned panel: the guard is released and nothing is registered.
+        release.send(Some(scratch.folder())).unwrap();
         wait_until(|| !projects::selecting());
+        assert!(!scratch.data().exists());
         assert_eq!(invoke(&main, "add_project", serde_json::json!({})), Ok(serde_json::json!({ "outcome": "cancelled" })));
+    }
+
+    #[test]
+    fn a_cancelled_panel_releases_the_guard_for_the_next_call() {
+        let _guard = projects::GUARD_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        let scratch = Scratch::new("cancel-release");
+        let (panel, release) = held();
+        let app = app_with(Some(scratch.data()), panel);
+        let main = webview(&app, "main");
+        for _ in 0..3 {
+            let call = {
+                let main = main.clone();
+                std::thread::spawn(move || invoke(&main, "add_project", serde_json::json!({})))
+            };
+            wait_until(projects::selecting);
+            release.send(None).unwrap();
+            assert_eq!(call.join().unwrap(), Ok(serde_json::json!({ "outcome": "cancelled" })));
+            assert!(!projects::selecting());
+        }
         assert!(!scratch.data().exists());
     }
 

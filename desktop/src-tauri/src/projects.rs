@@ -185,7 +185,7 @@ impl<R: Runtime> Picker<R> {
 
 static SELECTING: AtomicBool = AtomicBool::new(false);
 
-/// One panel at a time. Released on every exit, including when the command's future is dropped.
+/// One panel at a time. It lives as long as the panel itself, not as long as the call that opened it (see add).
 struct SelectionGuard;
 
 impl SelectionGuard {
@@ -230,8 +230,20 @@ impl Projects {
             return Err(ErrorCode::NotAllowed.into());
         }
         let dir = self.data_dir()?;
-        let _selecting = SelectionGuard::acquire()?;
-        let Some(picked) = picker.0.pick(window).await else {
+        let selecting = SelectionGuard::acquire()?;
+        // rfd begins the sheet when the panel future is created and offers no way to dismiss it; dropping the
+        // future leaves the sheet on screen until the user closes it. The guard therefore moves into a task that
+        // owns the panel and ends only when AppKit's completion handler fires, so it outlives a dropped call.
+        // A call dropped meanwhile registers nothing.
+        let panel = picker.0.pick(window);
+        let picked = tauri::async_runtime::spawn(async move {
+            let picked = panel.await;
+            drop(selecting);
+            picked
+        })
+        .await
+        .map_err(|_| ErrorCode::RegistryUnavailable)?;
+        let Some(picked) = picked else {
             return Ok(AddOutcome::Cancelled);
         };
         blocking(move || registry::add(&dir, &picked)).await
