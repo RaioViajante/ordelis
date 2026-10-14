@@ -1,6 +1,6 @@
 # Local project registration (architecture)
 
-[Issue #45](https://github.com/RaioViajante/synapse/issues/45). **Design only; nothing here is implemented.** It proposes the first real local-project integration: the user explicitly picks a folder, Synapse remembers it, Projects lists it, and the user can forget it again. Registration is a bookmark. It grants no access to the folder's contents and authorizes nothing.
+[Issue #45](https://github.com/RaioViajante/synapse/issues/45) (design), [issue #47](https://github.com/RaioViajante/synapse/issues/47) (implementation PR 1). **The Rust backend (milestone PR 1) is implemented; the Projects UI (PR 2) is not**, so nothing in the app calls the commands yet. See [Implementation status](#implementation-status) for what is built, verified and still open; the rest of this document is the approved design. It proposes the first real local-project integration: the user explicitly picks a folder, Synapse remembers it, Projects lists it, and the user can forget it again. Registration is a bookmark. It grants no access to the folder's contents and authorizes nothing.
 
 It builds on the [IPC authorization](desktop-architecture.md#ipc-authorization) and follows the pattern of the [runtime bridge](desktop-runtime-bridge.md): a closed list of argument-light commands, fixed error messages, strict parsing and Rust-owned validation. Unlike the runtime bridge, it is meant to ship in release builds, so it must not depend on development-only trust.
 
@@ -426,6 +426,99 @@ Still open, none blocking implementation:
 - Whether Windows and Linux support is a goal before any content-access feature.
 - Whether development builds should use a separate identifier so they stop sharing the release registry.
 - TCC and network-volume behavior, to be measured natively in PR 1 and PR 2.
+
+## Implementation status
+
+| Part | State |
+| --- | --- |
+| Registry: validation, read and write protocols, `reset_projects`, identity, refusal policy, revalidation (`src-tauri/src/projects/`) | Implemented in #47 |
+| `rfd` folder panel, the four commands, manifest, capability and generated permission files | Implemented in #47 |
+| `config.test.ts` Rust side: every Cargo dependency table, `rfd`'s specification, six commands, registry source scans | Implemented in #47 |
+| `src/app/projects.ts`, the Projects UI, the confirmed reset, browser-preview state, criteria 20 (frontend part) and 24 | Pending (PR 2). No frontend module names a project command; `config.test.ts` fails if one does, so `reset_projects` cannot gain a caller before its confirmation exists |
+| Other targets | Answer `unsupported_platform`. Only macOS is built: neither this machine nor CI has another target installed, so that code path is not compiled anywhere |
+
+### Where the implementation refines the design
+
+None of these changes the security model.
+
+- **Unstorable canonical paths.** A canonical path containing a control character is refused with `path_unsupported` before anything is written, because the registry would otherwise reject its own file on the next load. The 1024-byte rule is enforced the same way but cannot be reached on macOS, where `PATH_MAX` is 1024 bytes including the terminator.
+- **State and injection.** The app data directory is resolved once, in Tauri's `setup`, by the path resolver and kept in managed state (`Projects`); the panel is a second managed state (`Picker<R>`), because `generate_handler!` cannot name a runtime type argument. The Rust tests manage a scratch directory and a fake picker instead, so no test touches the real directory. Failure injection is a `#[cfg(test)]` thread-local seam; in production `fault()` is `Ok(())`, which `config.test.ts` pins.
+- **Lock file.** Opened without `O_NONBLOCK`: on macOS an `O_RDWR` open of a FIFO returns at once (checked), and the `fstat` check then refuses it (tested). The directory sync opens `D` with `O_DIRECTORY | O_NOFOLLOW`.
+- **Panel lifetime.** rfd 0.17.2 begins the sheet when the panel future is created, cannot dismiss it, and does nothing when that future is dropped. The one-panel guard is therefore owned by a task that holds the panel future and ends only when AppKit's completion handler fires, not by the `add_project` call. A dropped call keeps the guard until its sheet closes and registers nothing (review of #48, finding 1). A call that is not dropped, for example when the page reloads, still registers what the user picks; its answer goes to a page that no longer exists, and the frontend relists on load.
+- **Pre-commit recheck seam.** A `#[cfg(test)]` hook between loading the registry and step 5's recheck lets a test change the folder in the real add path; it is compiled out of production and pinned by `config.test.ts`.
+- **Listing order** is the file's record order, which is registration order.
+
+### Verification record (PR 1)
+
+**Automated.** `cargo test` (default and `--release`): 100 tests, 61 of them new: 49 registry unit tests (`projects/registry/tests.rs`) and 12 tests in `lib.rs` (IPC and dependency pins). `pnpm test`: 170. `cargo check --all-targets` with and without `dev-runtime`, `pnpm lint` and `typecheck`: no warnings. `cargo clippy --all-targets` (1.99.0, run from an isolated toolchain because the shared one has no clippy): no warnings with or without `dev-runtime`. The crate is not rustfmt-formatted, including the files that predate this work, and was not reformatted. The tests cover criteria 1–17 and 19, the Rust part of 20, and 21. Notes:
+
+- Criterion 6 uses two real processes: the test binary re-invokes itself, once to hold `projects.lock` (the mutation fails after the 2 s budget) and once to add folders concurrently with eight threads. Eight more threads add and remove at once, and every ID stays unique and unreused.
+- A registry or lock file owned by another user is a hard link to a root-owned system file in the same volume (`/private/etc/hosts`). Every command refuses it at `fstat`, and the file is unchanged. Removing the owner check fails the test. Where the link cannot be made, the test reports `SKIPPED ...` on the uncaptured stderr, and it fails instead when `CI` is set. A data directory owned by another user is tested with `/usr`.
+- Step 5's recheck is tested through the real add path: the folder is replaced, turned into a symlink or removed between the check and the commit. Removing the production recheck fails that test, and no other.
+- **Boundary checks** (review of #48, finding 3, and its re-review). They check what the toolchains actually build and resolve, not source text alone:
+  - **Compiled Rust files:** `scripts/verify-native-boundary.mjs` compiles the library with `rustc --emit=dep-info` in the default, `dev-runtime`, test and release configurations. The files rustc read must equal `scripts/native-sources.json`, a reviewed list. Dep-info is written by the compiler after macro expansion, so it includes modules from any declaration form, `#[path]`, `cfg_attr(path = ...)`, configuration-specific modules and every `include!`/`include_str!`/`include_bytes!` input. The only other entries allowed are the hashed, extension-less files tauri-build generates in its own `OUT_DIR`. `config.test.ts` applies the registry content rules (no listing, contents, processes, network, Git, Python or gate; `std::fs` and `libc` whitelists; file operations only in `registry.rs`) to exactly the listed `src/projects` files.
+  - **Dependency provenance:** the same script resolves dependencies with `cargo metadata` for the macOS host. Every package other than the crate must come from crates.io, and the crate must be its own workspace root. Before resolving, it refuses `[patch]`/`[replace]` tables and any `.cargo/config` or `.cargo/config.toml` from the crate up to the repository root, because source replacement does not show in metadata. The direct dependency set itself stays pinned from `cargo metadata` by the Rust tests (kind, requirement, default features, features, target, rename, registry, path and source).
+  - **Frontend bundle:** `frontend-boundary.test.ts` runs a real production `vite build` (nothing written) and reads Rollup's module graph and output. Every module must be under `src/` (and not test code), in `node_modules`, or a named Vite helper. Only `runtimeStatus.ts` may import `@tauri-apps`. No module may be loaded with a query (`?url`, `?raw`, `?worker`, inline HTML scripts), no script may be emitted as a plain asset (workers, `new URL(..., import.meta.url)`), and no bundled `src/` module or output chunk may name a project command. `package.json` runtime dependencies are pinned.
+  - **Regression evidence:** `scripts/test-verify-native-boundary.sh` copies `src-tauri` to a temporary directory. It shows the copy passing, then each re-review bypass and its variants failing, then the restored copy passing again: N2 same-line attribute submodule, N3 `cfg_attr(path)` to another file, a `cfg_attr(path)` swap of an approved module, N4 same-line module in `lib.rs`, `include!` of an unlisted file, a release-only module, N5 `[patch.crates-io]` (reported both as an override table and as `libc` resolving to vendored code), a local `path =` dependency, a `.cargo/config.toml` source replacement and a parent workspace manifest. The frontend test builds disposable copies with N1 (a root-absolute `/scripts/...` import), relative, dynamic and `import.meta.glob` imports from outside `src/`, a worker, a `?url` script, an inline `index.html` script, a startup module naming `reset_projects`, another `@tauri-apps` importer, an imported test module and a command named in the adapter. The unmodified copy passes, and each change fails for its own reason. Both run in CI.
+  - **Limits.** These are tripwires for review, not a sandbox, and the capability ACL remains the authority over what can be called.
+    - A command name assembled at run time is not detectable in the bundle.
+    - The dep-info check covers the macOS host configurations only: code under `cfg` for other targets is not compiled or listed.
+    - User-level Cargo configuration (`$CARGO_HOME`, `CARGO_*` variables) belongs to the build machine and is not inspected.
+    - Packages from crates.io and npm are trusted at their locked versions.
+    - The build script and procedural macros run before any of this is checked.
+
+**Release build** (`pnpm tauri build --bundles app`). `verify-release-isolation.sh` passes. Compared with `main`'s release binary, the executable imports exactly six more symbols (`flock`, `geteuid`, `linkat`, `nanosleep`, `rename`, `unlink`) and links the same 14 system libraries; `rfd` adds no framework. The commands are present in the release binary and authorized like every other command. The development Python bridge is unchanged and still unavailable in release.
+
+**Release launch** (after review of #48). The release `.app` from the reviewed branch launched; the running executable had the SHA-256 the verifier inspected. The fork watcher saw 0 child processes until quit, and no data directory was created, because nothing calls the commands yet.
+
+**Native smoke test.** Run on 2026-10-13, macOS 27.0.1 (arm64), debug bundle from `509bd5e`. The commands were invoked from the Web Inspector console (`window.__TAURI_INTERNALS__.invoke`), and the window and panel were driven through the accessibility API. A kqueue `NOTE_FORK` watcher was attached to the app for both sessions ([procedure](desktop-visual-verification.md#reproducing-it)). The folder registered for testing was a throwaway directory in a temporary location; its tree hash (names, modes, sizes, modification times and contents) was the same before registration, while registered and after removal.
+
+| Check | Observed |
+| --- | --- |
+| Panel presentation | An `AXSheet` attached to the main window, showing the fixed message as its title line. Its controls: back, forward, "Where:", search, Cancel, Open. **No New Folder button** |
+| Cancel | `{"outcome":"cancelled"}`. The data directory listing and the throwaway tree hash were unchanged |
+| Add | `added`, `status` `available`. `path_display` was the full canonical path for the throwaway folder (outside home) and `~/Documents/Projects` for the folder registered in the incident below |
+| Second `add_project` while the panel is open | `selection_in_progress` ("A folder selection is already open."); one panel only |
+| Page reload under the open sheet (fixed build, `df0de9a`) | The sheet stayed, still one panel. Unloading aborted the in-flight IPC fetch and Tauri's JS fell back to postMessage ("IPC custom protocol failed, Tauri will now use the postMessage interface instead"), **sending `add_project` a second time**. That duplicate got `selection_in_progress`. The original call stayed alive in Rust and registered what the panel returned |
+| Quit and relaunch | `list_projects` in the new process returned the same record and ID |
+| Remove | `removed`; the next ID was not reused; the folder was unchanged |
+| Hand-corrupted `projects.json` | `list_projects` and `remove_project` returned `registry_corrupt` with the fixed message. `reset_projects` (with a hostile `{path:"/etc"}` payload) returned `reset` and kept the bytes as `projects.json.corrupt-<ms>` (same SHA-256). The next list was empty, and a second reset returned `not_needed` |
+| Created files | The data directory was mode `0700`; `projects.json`, `projects.lock` and the backup were `0600` |
+| Child processes | **0 forks** in both sessions (about 13 and 6 minutes) |
+| Core command from the webview | ⌥⌘I made the page call `webview.internal_toggle_devtools`, which the ACL rejected ("not allowed"). That is the existing core-permission boundary, observed natively |
+
+**Incident during the smoke test.** On first use, AppKit opened the panel in `~/Documents/Projects`: an OS-chosen location, since Synapse sets no starting directory. In that session the panel was confirmed with its default Open button four times without an intended press:
+
+- It registered that folder as `p1`. `p1` was removed, and the folder was later registered again as `p2`, a fresh registration after a removal, with the same `(dev, ino)`; duplicate detection was not bypassed, and no `add_project` ran twice there.
+- Then it registered a throwaway subfolder.
+- Once it returned `already_registered`.
+
+Only metadata was looked at (`canonicalize`, `lstat`), and both personal-folder records were removed at once. Afterwards the panel's remembered location (the app's own `NSNavLastRootDirectory` default) pointed at throwaway folders.
+
+**Investigation** (after review of #48, finding 5), with the fixed build, disposable folders only, and a listen-only input log that records event kind, a coarse key class (never the character) and the source process (0 for hardware):
+
+- Re-running the actions that preceded the incidents did not confirm the panel. Those were an AX `entire contents` read of the sheet, a recursive read of its controls, and a delayed open with no AX access at all. In each run the panel stayed open 15–17 s until the test pressed Cancel; each call returned `cancelled`, and nothing was written. No hardware input occurred during the session.
+- **One mechanism was reproduced:** keystrokes the automation meant for the Web Inspector console went to the open panel instead. Its synthetic Return activated Open, and the panel's current folder was registered 206 ms later. This happened in the reload run above, where the console was in a detached window and the sheet took key focus.
+- During the original incidents, no input was logged. The statement that three of the four confirmations had no synthetic keystroke from the automation near them was **reconstructed afterwards** from the automation's command history; no input event trace supports it. The one run in which the user was asked to stay hands-off kept the panel open for 20 s.
+
+**The cause of the original incidents remains unresolved.** Misdirected synthetic input is a demonstrated mechanism, AX reads alone are not, and physical input could not be excluded after the fact.
+
+**Lessons for PR 2:**
+
+- The panel can open in a real folder the user did not pick for Synapse, and one Return accepts it, so the UI's copy next to the button matters.
+- After a navigation, the frontend should treat `selection_in_progress` as "a panel is still open" rather than as a failure, and relist on load.
+- Native automation that types while a sheet is up must target the console window and check where key focus is.
+
+**Cleanup.** The data directory did not exist before either run. Its remaining files (`projects.lock` and the test's corrupt backup) and the directory itself were removed afterwards, as were the panel keys AppKit wrote into the app's defaults.
+
+**Not verified natively** (still open for PR 2 or later):
+
+- Release-build native behavior beyond launch (see below): the release build has no Web Inspector, so the commands cannot be invoked there until PR 2 adds the UI.
+- A dropped `add_project` future with a real sheet. Nothing reachable from the webview drops a command future; the lifecycle rests on the rfd source and the IPC test with a held fake panel.
+- Aliases (criterion 14) and refusals (criterion 15) through the real panel. Unit tests cover them on this machine's APFS volume, including the firmlink spelling.
+- `fs_usage` evidence that nothing under the folder is read (criterion 22): no root was available. This is covered by the source scans and by a unit test that registers a mode-000 folder containing a FIFO.
+- TCC, removable and network volumes.
+- The `not_allowed` path: the capability already confines the command to `main`, so it is covered by an IPC test only.
 
 ## Review record
 

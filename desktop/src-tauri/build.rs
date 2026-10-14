@@ -29,7 +29,14 @@ fn main() {
     // Keep this list equal to the invoke_handler in src/lib.rs and the permissions in capabilities/default.json.
     tauri_build::try_build(
         tauri_build::Attributes::new()
-            .app_manifest(tauri_build::AppManifest::new().commands(&["ipc_boundary_status", "get_runtime_status"])),
+            .app_manifest(tauri_build::AppManifest::new().commands(&[
+                "ipc_boundary_status",
+                "get_runtime_status",
+                "list_projects",
+                "add_project",
+                "remove_project",
+                "reset_projects",
+            ])),
     )
     .expect("failed to run tauri-build");
 }
