@@ -8,15 +8,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 PROBE_SCRIPT = ROOT / "scripts" / "run_capability_probes.sh"
 
-# The two credential-bearing shell snapshots stay byte-identical to main on this PR
-# so that no rendered diff ever displays their contents (`.gitattributes` marks them
-# `-diff`, but diff rendering takes attributes from the merge base, which does not
-# have them yet). They are deleted by the stacked follow-up PR whose merge base
-# includes `.gitattributes`. That follow-up empties this tuple; this test then
-# asserts that nothing under a probe home is tracked at all.
-PENDING_REMOVAL_PREFIXES = (
-    "docs/probes/2026-02-26/.probe_codex_home/shell_snapshots/",
-)
+# Removal PR: empty, so the probes below assert that nothing at all is tracked under
+# a probe home. The stacked base PR kept this tuple pointing at the two
+# credential-bearing shell snapshots so that its own rendered diff never displayed
+# their contents; this PR deletes them, and `.gitattributes` marks the paths `-diff`
+# with the rule present in this diff's merge base.
+PENDING_REMOVAL_PREFIXES: tuple[str, ...] = ()
 PROBE_HOME_ROOT = "docs/probes/2026-02-26/.probe_codex_home"
 
 # Synthetic paths only: they never existed and carry no real material.

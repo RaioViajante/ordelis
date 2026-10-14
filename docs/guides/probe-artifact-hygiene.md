@@ -18,15 +18,14 @@ this document, the issue tracker, or the pull request.
 
 ## What we changed
 
-1. **Removed 24 of the 26 tracked probe-local home artifacts from the current tree**
-   (2 session rollouts, 18 bundled skill files, 4 temporary files). Before deletion it
-   was verified that no runtime module, test, script, workflow or document references
-   them; curated probe evidence (result, parsed and summary files) was left untouched.
-   The two credential-bearing shell snapshots stay byte-identical to `main` in this
-   change and are deleted by a stacked follow-up PR based on this branch: rendered
-   diffs take attributes from their merge base, so only a diff whose merge base already
-   contains the `.gitattributes` `-diff` rule renders their deletion as binary. This
-   guarantees no rendered diff in either PR displays their contents.
+1. **Removed all 26 tracked probe-local home artifacts from the current tree**
+   (2 shell snapshots, 2 session rollouts, 18 bundled skill files, 4 temporary files).
+   Before deletion it was verified that no runtime module, test, script, workflow or
+   document references them; curated probe evidence (result, parsed and summary files)
+   was left untouched. The two credential-bearing shell snapshots are deleted here, in
+   a stacked PR whose merge base already contains the `.gitattributes` `-diff` rule, so
+   their deletion renders as "binary files differ" — no rendered diff in either PR of
+   this work displays their contents.
 2. **Narrow `.gitignore` rules** so the same categories cannot be staged again:
    - `.probe_*_home/` — probe-local `HOME`/`CODEX_HOME` directories at any depth
      (shell snapshots, session rollouts, provider auth state).
@@ -43,11 +42,10 @@ this document, the issue tracker, or the pull request.
    it does not strip credentials providers need for their C0 auth checks, and it never
    touches a home outside the artifacts root. No environment is ever logged in full.
 5. **Regression tests:** `tests/test_probe_artifact_hygiene.py` asserts that no
-   probe-home or shell-snapshot path is tracked outside the documented pending-removal
-   set, that only pending-removal files survive under the historical probe home, that
-   sensitive paths are ignored, that curated evidence remains committable and diffs as
-   binary, and that the probe script keeps its pruning and never points a provider at a
-   repository-local home.
+   probe-home or shell-snapshot path is tracked, that nothing survives under the
+   historical probe home, that sensitive paths are ignored, that curated evidence
+   remains committable and that sensitive paths are marked `-diff`, and that the probe
+   script keeps its pruning and never points a provider at a repository-local home.
 
 ## What this protects
 
