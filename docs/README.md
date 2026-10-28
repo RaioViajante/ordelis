@@ -11,6 +11,10 @@ Synapse is in early development. The desktop app is an interface preview over sa
 - [Visual verification](./implementation/desktop-visual-verification.md): how each screenshot was captured and what it does and does not prove.
 - Page notes: [Context](./implementation/desktop-context-experience.md), [Sessions](./implementation/desktop-sessions-experience.md), [UI design inventory](./implementation/desktop-ui-design-inventory.md).
 
+## Ordelis migration
+
+- [Ordelis migration decision record](./migration/ordelis.md): the Synapse to Ordelis rename, decisions, identifier matrix, risks and PR roadmap. Documentation only; nothing in it has been implemented.
+
 ## Safety foundations (library only, not connected to the app)
 
 - [Execution safety gate](./implementation/execution-safety-gate.md): currently always answers no.
