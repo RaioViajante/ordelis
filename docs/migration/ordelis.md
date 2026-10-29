@@ -25,7 +25,7 @@ As of 2026-10-29. The rest of this document keeps the decisions, findings and pl
 **Security reporting today.**
 - Private vulnerability reporting is enabled for the repository.
 - The canonical security URL is `https://github.com/RaioViajante/ordelis/security/policy`. On `main`, the issue-template link still uses the old repository name and works through a redirect. Draft PR #60 switches it to the canonical URL.
-- `SECURITY.md` (on `main` since H2) makes private reporting the primary route, promises no response time, and says the project is not production-ready. Its public issue-based fallback is replaced in draft PR #60, which points to the maintainer's GitHub profile instead; that change is not on `main` yet.
+- `SECURITY.md` (on `main` since H2) makes private reporting the primary route, promises no response time, and says the project is not production-ready. Its public issue-based fallback is replaced in draft PR #60 by the official security address, `security@ordelis.app`, as a private email fallback; that change is not on `main` yet.
 - `CODEOWNERS` routes review requests to `@RaioViajante`. It does not enforce reviews: no branch protection or required review is configured.
 
 **Repository metadata.** The description is "A local-first, open-source workspace for orchestrating AI coding agents." The ten topics were already set. The homepage field was already `https://ordelis.app` before the rename; nothing about the website is deployed or connected.
@@ -438,7 +438,7 @@ These are recorded, **not** assumed complete.
 | Confirm which foundations and components board is authoritative for the desktop app (the desktop export's or the web export's system board) | U1 | **Open** |
 | Updates and telemetry statement for the website privacy page | W-series | **Open.** The app currently sends nothing and its CSP allows only IPC. |
 | Decision on the sample project named `synapse` in the fixtures and the test that selects it | N1 | **Open** (see the identifier matrix) |
-| Maintainer contact or channel to name in `SECURITY.md` | H3 | **Proposed in draft PR #60, not merged.** `SECURITY.md` would point to the contact details on the maintainer's GitHub profile, with no vulnerability details in a first message. The maintainer confirms that choice or supplies a dedicated address. |
+| Maintainer contact or channel to name in `SECURITY.md` | H3 | **Decided: the official address `security@ordelis.app`, as a private email fallback. In draft PR #60, not merged.** Private vulnerability reporting stays the primary route. The address's deliverability is to be confirmed with a test message before the merge. |
 | Final product-name check before the first Windows installer (the WiX upgrade code follows `productName`) | P-series | **Open** |
 | **SEC1: security assessment of the probe artifacts in public history** (see the [section above](#security-exposure-probe-artifacts-in-public-git-history-sec1)). Not tied to publication. | Blocks any release or open-source publication (the gate is unchanged) | **Assessed on 2026-10-28; mitigated according to the maintainer's report, not independently verified.** Confidential closure documentation (contact date, confirmation status, residual risk) is pending. Historical Git data is unchanged. This record initiates no further outreach. |
 | Plan for a pre-publication audit if the repository is later made public again (history, issue text, Actions logs, private material committed while private). It builds on SEC1's findings and does not replace SEC1. | Open-source publication | **Open** |

@@ -14,7 +14,7 @@ Please report suspected vulnerabilities **privately**, using GitHub's private vu
 
 Do not open a public issue, pull request or discussion that describes a vulnerability.
 
-If you cannot use private vulnerability reporting, contact the maintainer through the contact details on their GitHub profile, [github.com/RaioViajante](https://github.com/RaioViajante), and ask for a private channel. Do not include any details of the vulnerability in that first message.
+If you cannot use private vulnerability reporting, you may send your report privately by email to [security@ordelis.app](mailto:security@ordelis.app). Email is not end-to-end encrypted, so private vulnerability reporting is preferred when you can use it.
 
 Please include, as far as you can, the affected component and commit, the steps to reproduce, and the impact. If a report involves a credential or other secret, say where it is but do not paste its value.
 

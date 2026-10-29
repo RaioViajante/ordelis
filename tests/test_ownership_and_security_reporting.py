@@ -2,9 +2,9 @@
 
 CODEOWNERS must route reviews to the Ordelis maintainer and cover every tracked file. The
 issue-template security link must name this repository's canonical identity and no upstream
-project. SECURITY.md must keep private vulnerability reporting as the primary route, never
-tell reporters to disclose in public or to put details in a first message, and stay honest
-about an early-stage project. The checks look at behavior, not exact wording. Each rule has
+project. SECURITY.md must keep private vulnerability reporting as the primary route, offer the
+official security address only as a private fallback in a correctly formed mailto link, never
+tell reporters to disclose in public, and stay honest about an early-stage project. The checks look at behavior, not exact wording. Each rule has
 a mutation test that applies one regression to the real file and expects it to be flagged.
 
 The CODEOWNERS matcher supports only the two pattern forms the file uses (`*` and
@@ -17,6 +17,7 @@ from __future__ import annotations
 import re
 import subprocess
 import unittest
+import urllib.parse
 from pathlib import Path
 
 
@@ -27,6 +28,9 @@ SECURITY = ROOT / "SECURITY.md"
 MAINTAINER = "@RaioViajante"
 CANONICAL_REPOSITORY = "RaioViajante/ordelis"
 SECURITY_POLICY_URL = f"https://github.com/{CANONICAL_REPOSITORY}/security/policy"
+SECURITY_EMAIL = "security@ordelis.app"
+EMAIL_ADDRESS = r"[\w.+-]+@[\w-]+(?:\.[\w-]+)*\.[A-Za-z]{2,}"
+WELL_FORMED_ADDRESS = r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}"
 FORMER_REPOSITORY_NAMES = ("synapse",)
 UPSTREAM_MARKERS = ("tt-a1i", "mco-org")
 
@@ -111,16 +115,17 @@ PROHIBITION = (
 CLAUSE_BREAK = rf";|\b(?:but|instead|otherwise|alternatively|however|then)\b|,\s*(?:and\s+)?(?:please\s+)?{REPORTING_VERB}\b"
 
 
-def ungoverned_public_channels(sentence: str) -> list[str]:
+def classify_public_channels(sentence: str) -> tuple[list[str], list[str]]:
+    """The public channels a sentence mentions, split into those no prohibition governs and those one does."""
     covered = []
     for match in re.finditer(PROHIBITION, sentence):
         clause_break = re.search(CLAUSE_BREAK, sentence[match.end():])
         covered.append((match.start(), match.end() + (clause_break.start() if clause_break else len(sentence))))
-    return [
-        channel.group(0)
-        for channel in re.finditer(PUBLIC_CHANNEL, sentence)
-        if not any(low <= channel.start() < high for low, high in covered)
-    ]
+    ungoverned, governed = [], []
+    for channel in re.finditer(PUBLIC_CHANNEL, sentence):
+        is_governed = any(low <= channel.start() < high for low, high in covered)
+        (governed if is_governed else ungoverned).append(channel.group(0))
+    return ungoverned, governed
 
 
 def claims_production_readiness(lowered: str) -> bool:
@@ -133,21 +138,50 @@ def claims_production_readiness(lowered: str) -> bool:
     return False
 
 
+def security_email_violations(text: str, sentences: list[str]) -> list[str]:
+    """The official address is the only one, is a usable mailto link, and is a private fallback."""
+    found = []
+    addresses = {address.rstrip(".").lower() for address in re.findall(EMAIL_ADDRESS, text)}
+    if addresses - {SECURITY_EMAIL}:
+        found.append("must not publish a contact address other than the official security address")
+    target = f"mailto:{SECURITY_EMAIL}"
+    links = re.findall(r"\[([^\]]+)\]\((mailto:[^)]*)\)", text)
+    usable = [
+        link for link in links
+        if link[0] == SECURITY_EMAIL and link[1] == target and re.fullmatch(WELL_FORMED_ADDRESS, link[1][len("mailto:"):])
+    ]
+    if not usable:
+        return found + [f"must offer {SECURITY_EMAIL} as a mailto link whose text and target both name it"]
+    # The primary route has to be stated in a different sentence, ahead of the address. The fallback sentence
+    # mentions private reporting too ("if you cannot use it"), so that mention alone proves nothing.
+    address_at = next(index for index, item in enumerate(sentences) if target in item)
+    primary_at = next((index for index, item in enumerate(sentences) if re.search(PRIVATE_REPORTING, item) and target not in item), None)
+    if primary_at is None or primary_at > address_at:
+        found.append("the email fallback must not come before private vulnerability reporting")
+    sentence = sentences[address_at]
+    if not (re.search(r"\b(?:if|when|unless|where)\b", sentence) and re.search(PRIVATE_REPORTING + r"|\bgithub\b", sentence)):
+        found.append("the email must be offered only as a fallback when private vulnerability reporting cannot be used")
+    if not (re.search(r"\b(?:send|email|submit|report)\b", sentence) and re.search(r"\bprivately\b|\bprivate\s+reports?\b|\bin\s+confidence\b", sentence)):
+        found.append("must explicitly allow private reports to be sent to the address")
+    return found
+
+
 def security_policy_violations(text: str) -> list[str]:
     found = []
     lowered = text.lower()
     private = re.search(PRIVATE_REPORTING, lowered)
     if not private:
         found.append("must make private vulnerability reporting the primary route")
-    for sentence in re.split(r"(?<=[.!?])\s+|\n+", lowered):
-        if ungoverned_public_channels(sentence):
+    sentences = re.split(r"(?<=[.!?])\s+|\n+", lowered)
+    prohibits_public_disclosure = False
+    for sentence in sentences:
+        ungoverned, governed = classify_public_channels(sentence)
+        prohibits_public_disclosure = prohibits_public_disclosure or bool(governed)
+        if ungoverned:
             found.append(f"must not tell reporters to use an issue, pull request or discussion: {sentence.strip()[:60]!r}")
-    fallback = re.search(r"\bprofile\b|contact the maintainer", lowered)
-    if fallback:
-        if private and fallback.start() < private.start():
-            found.append("the fallback must not come before private vulnerability reporting")
-        if not re.search(r"(?:do not|don't|never)\s+include[^.]{0,60}details|without\s+(?:any\s+)?details|no\s+details", lowered):
-            found.append("the fallback must say not to put vulnerability details in a first message")
+    if not prohibits_public_disclosure:
+        found.append("must tell reporters not to describe vulnerabilities in public issues, pull requests or discussions")
+    found += security_email_violations(text, sentences)
     if "sample data" not in lowered:
         found.append("must say the interface is a preview over sample data")
     if claims_production_readiness(lowered):
@@ -156,8 +190,6 @@ def security_policy_violations(text: str) -> list[str]:
         found.append("must state the supported-version policy")
     if re.search(r"\bwithin\s+\d+\s+(?:business\s+)?(?:hours?|days?|weeks?)\b|\bsla\b", lowered):
         found.append("must not promise a response time")
-    if re.search(r"[\w.+-]+@[\w-]+\.[\w.-]+", text):
-        found.append("must not publish a contact address that has not been established")
     if re.search(r"\bsec\d+\b", lowered):
         found.append("must not refer to internal incident identifiers")
     return found
@@ -199,6 +231,15 @@ class RepositoryConfigurationTests(unittest.TestCase):
 
     def test_security_policy_keeps_private_reporting_primary_and_honest(self) -> None:
         self.assertEqual(security_policy_violations(SECURITY.read_text(encoding="utf-8")), [])
+
+    def test_the_security_address_is_a_well_formed_mailto_link(self) -> None:
+        text = SECURITY.read_text(encoding="utf-8")
+        links = re.findall(r"\[([^\]]+)\]\((mailto:[^)]*)\)", text)
+        self.assertEqual(links, [(SECURITY_EMAIL, f"mailto:{SECURITY_EMAIL}")])
+        parsed = urllib.parse.urlparse(links[0][1])
+        self.assertEqual((parsed.scheme, parsed.path, parsed.query), ("mailto", SECURITY_EMAIL, ""))
+        self.assertRegex(parsed.path, WELL_FORMED_ADDRESS)
+        self.assertNotRegex(links[0][1], r"\s")
 
     def test_the_security_policy_has_no_public_reporting_path_through_issue_templates(self) -> None:
         # With blank issues disabled, any issue a reporter opens goes through a template, and the
@@ -331,7 +372,7 @@ class RepositoryConfigurationRegressionTests(unittest.TestCase):
             "Avoid public issues and discussions.",
             "Do not open an issue, or file a bug report, or start a discussion.",
             "If you find a security issue, report it privately.",
-            "If you cannot use private vulnerability reporting, contact the maintainer through their profile.",
+            "If you cannot use private vulnerability reporting, email security@ordelis.app privately.",
         ):
             with self.subTest(sentence=sentence):
                 self.assertEqual(security_policy_violations(self.policy + "\n" + sentence + "\n"), [])
@@ -340,14 +381,55 @@ class RepositoryConfigurationRegressionTests(unittest.TestCase):
         text = self.policy + "\nNever open an issue to describe a vulnerability.\n"
         self.assertEqual(security_policy_violations(text), [])
 
-    def test_a_fallback_that_allows_details_in_a_first_message_is_flagged(self) -> None:
-        text = mutate(self.policy, "Do not include any details of the vulnerability in that first message.",
-                      "Send the full report there.")
-        self._flagged(security_policy_violations(text), "first message")
+    # -- the official email fallback
+    def test_removing_the_security_address_is_flagged(self) -> None:
+        text = mutate(self.policy, "[security@ordelis.app](mailto:security@ordelis.app)", "the maintainer")
+        self._flagged(security_policy_violations(text), f"must offer {SECURITY_EMAIL} as a mailto link")
 
-    def test_a_fallback_ahead_of_private_reporting_is_flagged(self) -> None:
-        text = "Contact the maintainer through their profile for anything. Do not include details.\n\n" + self.policy
-        self._flagged(security_policy_violations(text), "must not come before")
+    def test_an_address_that_is_not_the_official_one_is_flagged(self) -> None:
+        for wrong in ("security@ordelis.com", "secuirty@ordelis.app", "security@example.org", "maintainer@ordelis.app"):
+            with self.subTest(address=wrong):
+                found = security_policy_violations(self.policy.replace(SECURITY_EMAIL, wrong))
+                self._flagged(found, "other than the official security address")
+                self._flagged(found, f"must offer {SECURITY_EMAIL} as a mailto link")
+
+    def test_a_second_address_next_to_the_official_one_is_flagged(self) -> None:
+        text = self.policy + "\nYou can also write to admin@ordelis.app.\n"
+        self._flagged(security_policy_violations(text), "other than the official security address")
+
+    def test_a_plain_text_address_is_not_a_usable_mailto_link(self) -> None:
+        text = mutate(self.policy, "[security@ordelis.app](mailto:security@ordelis.app)", "security@ordelis.app")
+        self._flagged(security_policy_violations(text), f"must offer {SECURITY_EMAIL} as a mailto link")
+
+    def test_a_malformed_or_mismatched_mailto_link_is_flagged(self) -> None:
+        good = "[security@ordelis.app](mailto:security@ordelis.app)"
+        for bad in ("[email us](mailto:security@ordelis.app)",
+                    "[security@ordelis.app](mailto:security@ordelis.app?subject=Report)",
+                    "[security@ordelis.app](mailto: security@ordelis.app)",
+                    "[security@ordelis.app](https://ordelis.app/security)",
+                    "[security@ordelis.app](mailto:Security@Ordelis.app)"):
+            with self.subTest(link=bad):
+                self._flagged(security_policy_violations(mutate(self.policy, good, bad)), f"must offer {SECURITY_EMAIL} as a mailto link")
+
+    def test_an_email_that_is_not_a_conditional_private_fallback_is_flagged(self) -> None:
+        sentence = ("If you cannot use private vulnerability reporting, you may send your report privately by email to "
+                    "[security@ordelis.app](mailto:security@ordelis.app).")
+        unconditional = "Send your report privately by email to [security@ordelis.app](mailto:security@ordelis.app)."
+        self._flagged(security_policy_violations(mutate(self.policy, sentence, unconditional)), "only as a fallback")
+        not_permitting = ("If you cannot use private vulnerability reporting, see [security@ordelis.app](mailto:security@ordelis.app).")
+        self._flagged(security_policy_violations(mutate(self.policy, sentence, not_permitting)), "explicitly allow private reports")
+
+    def test_removing_the_public_disclosure_prohibition_is_flagged(self) -> None:
+        text = mutate(self.policy, "Do not open a public issue, pull request or discussion that describes a vulnerability.", "")
+        self._flagged(security_policy_violations(text), "not to describe vulnerabilities in public")
+
+    def test_an_email_ahead_of_private_reporting_is_flagged(self) -> None:
+        # Move the real fallback sentence in front of the primary route. It mentions private reporting
+        # itself ("if you cannot use it"), which must not count as stating the primary route.
+        fallback = ("If you cannot use private vulnerability reporting, you may send your report privately by email to "
+                    "[security@ordelis.app](mailto:security@ordelis.app).")
+        moved = fallback + "\n\n" + mutate(self.policy, fallback, "")
+        self._flagged(security_policy_violations(moved), "must not come before")
 
     def test_policy_honesty_regressions_are_flagged(self) -> None:
         cases = (
@@ -355,7 +437,7 @@ class RepositoryConfigurationRegressionTests(unittest.TestCase):
             ("a preview over sample data", "a finished product", "sample data"),
             ("## Supported versions", "## Other notes", "supported-version policy"),
             ("No response or fix time is guaranteed.", "We respond within 48 hours.", "response time"),
-            ("No response or fix time is guaranteed.", "Email security@example.org for help.", "contact address"),
+            ("No response or fix time is guaranteed.", "Email security@example.org for help.", "other than the official security address"),
             ("No response or fix time is guaranteed.", "See SEC9 for details.", "incident identifiers"),
         )
         for old, new, needle in cases:
@@ -370,8 +452,8 @@ class RepositoryConfigurationRegressionTests(unittest.TestCase):
             "## How to report\n\n"
             "Report problems privately through GitHub's Private Vulnerability Reporting on the Security tab. "
             "Never describe a vulnerability in a public thread.\n\n"
-            "Without a GitHub account, ask the maintainer for a private channel through their profile page. "
-            "Send no details until one exists.\n\n"
+            "If GitHub's private vulnerability reporting is unavailable to you, you can send a report privately by email to "
+            "[security@ordelis.app](mailto:security@ordelis.app).\n\n"
             "## Which versions are supported\n\n"
             "Only the main branch.\n"
         )
