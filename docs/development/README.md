@@ -1,6 +1,6 @@
 # Contributing and development
 
-**Status:** guide. Commands are taken from the repository's CI workflows, `RELEASING.md`, the pull request template and the desktop README. There is no separate `CONTRIBUTING.md`; this is the entry point.
+**Status:** guide. Commands are taken from the repository's CI workflows, `RELEASING.md`, the pull request template and the desktop README. The short contributor entry point is [CONTRIBUTING.md](../../CONTRIBUTING.md); this guide holds the detail.
 **Scope:** how to get oriented in the repository, run the checks, and make a change that fits. It does not describe the product; see [Architecture](../architecture/overview.md) for that.
 **Related:** [Desktop README](../../desktop/README.md) · [Security policy](../../SECURITY.md) · [Execution safety gate](../implementation/execution-safety-gate.md) · [Migration record](../migration/ordelis.md)
 
@@ -70,7 +70,7 @@ The repository's [`CLAUDE.md`](../../CLAUDE.md) (identical to `AGENTS.md`, and w
 
 The workflow in practice:
 
-1. Open an issue that states the goal and the acceptance criteria.
+1. For anything larger or less obvious than a small fix, open an issue that states the goal and the acceptance criteria first; this is encouraged, not required.
 2. Work on a branch named for the kind of change and the issue, for example `docs/59-ordelis-readme-and-docs`.
 3. Open a pull request using the [template](../../.github/pull_request_template.md), including the validation you ran and a rollback note.
 4. Expect an independent review before merge. Do not force-push shared branches or rewrite history.

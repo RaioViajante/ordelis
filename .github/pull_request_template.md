@@ -1,29 +1,43 @@
+## Related issue
+
+Closes # (if there is one)
+
 ## Summary
 
-- What changed?
-- Why is this change needed?
+- What changed, and why?
 
 ## Scope
 
-- [ ] Runtime
-- [ ] Adapters
-- [ ] Parsing/Normalize
-- [ ] CI/Workflow
-- [ ] Docs
+- [ ] Desktop app
+- [ ] Runtime / agent integrations
+- [ ] Documentation
+- [ ] Build / CI
+- [ ] Tests only
 
-## Validation
+## Testing and evidence
 
-- [ ] `python3 -m unittest discover -s tests -p 'test_*.py'`
-- [ ] `./scripts/run_runtime_gate_tests.sh`
-- [ ] (If applicable) `./scripts/run_step5_parallel_benchmark.sh`
+- What you ran and the result (CI covers the rest; you do not need to run every platform's build):
+- If a test was already failing before this change, say so:
 
-## Artifacts
+## Security implications
 
-- Gate report path:
-- Benchmark report path:
-- Run artifact path:
+- [ ] None
+- [ ] This touches execution, the safety gate, the desktop's native commands or permissions, file, network or credential access, or publishing. Explained here:
 
-## Risk and Rollback
+## Documentation
 
-- Risk level: Low / Medium / High
-- Rollback plan:
+- [ ] Updated, or not needed because:
+
+## Screenshots
+
+For user-interface changes. Sample data must stay labelled as sample data. Remove anything private.
+
+## Risk and rollback
+
+- Risk: Low / Medium / High
+- Rollback:
+
+## Checklist
+
+- [ ] The change is focused: one concern, and no unrelated reformatting.
+- [ ] No credentials, tokens, raw agent output or personal paths are included.

@@ -1,0 +1,35 @@
+name: Question
+description: Ask for help that the documentation does not give.
+title: "[Question] "
+labels:
+  - question
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please check the [documentation](https://github.com/RaioViajante/ordelis/blob/main/docs/README.md) and the existing issues first. Ordelis is in early development and maintained on a best-effort basis; see [SUPPORT.md](https://github.com/RaioViajante/ordelis/blob/main/SUPPORT.md).
+
+        **Do not report security vulnerabilities here.** Use the private route in the [security policy](https://github.com/RaioViajante/ordelis/security/policy).
+
+        **Do not paste** credentials, tokens, raw agent transcripts, provider output, personal file paths or other sensitive data.
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - Desktop app
+        - Runtime / agent integrations (Python `runtime/`, inherited `mco` command)
+        - Documentation
+        - Build / CI
+        - Other / not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: question
+    attributes:
+      label: Your question
+      description: What are you trying to do, and what did you already try or read?
+    validations:
+      required: true

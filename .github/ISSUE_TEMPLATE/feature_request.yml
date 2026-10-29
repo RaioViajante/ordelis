@@ -1,51 +1,59 @@
 name: Feature request
-description: Propose a feature or enhancement.
+description: Propose a feature or an improvement.
 title: "[Feature] "
 labels:
   - enhancement
 body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the idea. Many capabilities are already planned; check the [features](https://github.com/RaioViajante/ordelis/blob/main/docs/product/features.md) and the [roadmap](https://github.com/RaioViajante/ordelis/blob/main/docs/product/roadmap.md) first. Ordelis is in early development and maintained on a best-effort basis.
+
+        **Do not report security vulnerabilities here.** Use the private route in the [security policy](https://github.com/RaioViajante/ordelis/security/policy).
+
+        **Do not paste** credentials, tokens, raw agent transcripts, provider output, personal file paths or other sensitive data.
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - Desktop app
+        - Runtime / agent integrations (Python `runtime/`, inherited `mco` command)
+        - Documentation
+        - Build / CI
+        - Website (planned)
+        - Other / not sure
+    validations:
+      required: true
+
   - type: textarea
     id: problem
     attributes:
-      label: Problem Statement
-      description: What problem are you trying to solve?
+      label: Problem
+      description: What are you trying to do, and what gets in the way today?
     validations:
       required: true
 
   - type: textarea
     id: proposal
     attributes:
-      label: Proposed Solution
-      description: Describe the expected behavior and UX/API changes.
+      label: Proposed solution
+      description: What should happen instead? How would you know it is done?
     validations:
       required: true
 
   - type: textarea
     id: alternatives
     attributes:
-      label: Alternatives Considered
-      description: What alternatives were evaluated?
+      label: Alternatives considered (optional)
     validations:
       required: false
 
   - type: textarea
-    id: acceptance
+    id: safety
     attributes:
-      label: Acceptance Criteria
-      description: Define measurable completion criteria.
-      placeholder: |
-        - [ ] ...
-        - [ ] ...
+      label: Safety considerations (optional)
+      description: Would this involve running agents, reading or writing files, network access, credentials, or the desktop's native boundary? Say how you would keep it safe.
     validations:
-      required: true
-
-  - type: checkboxes
-    id: impact
-    attributes:
-      label: Impact Area
-      options:
-        - label: Runtime / state machine
-        - label: Adapter behavior
-        - label: Parsing / normalize
-        - label: CI / gate / benchmark
-        - label: Docs / release
+      required: false
