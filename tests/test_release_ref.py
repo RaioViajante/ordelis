@@ -281,7 +281,7 @@ class PublishWorkflowTests(unittest.TestCase):
 
 class ReleaseGuideTests(unittest.TestCase):
     def test_post_publish_failure_uses_same_workflow_run_retry(self) -> None:
-        guide = (ROOT / "RELEASING.md").read_text(encoding="utf-8")
+        guide = (ROOT / "docs" / "archive" / "mco-v0.12.1" / "RELEASING.md").read_text(encoding="utf-8")
         normalized_guide = " ".join(guide.split())
 
         self.assertIn("Re-run failed jobs on that same workflow run", normalized_guide)

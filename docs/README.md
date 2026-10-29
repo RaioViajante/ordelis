@@ -28,6 +28,7 @@ Documents are grouped below by what they answer. Product and architecture docume
 - [Contributing and development](./development/README.md): layout, checks, conventions and safety restrictions.
 - [Support](../SUPPORT.md): where to get help and what to expect.
 - [Code of Conduct](../CODE_OF_CONDUCT.md): expected behavior, and how to report a concern privately.
+- [Release status](../RELEASING.md): Ordelis has no approved release or published installation package, and what gates one.
 - [Desktop commands](../desktop/README.md#commands).
 - [Security policy](../SECURITY.md): how to report a vulnerability privately.
 
@@ -57,4 +58,4 @@ The MCO command-line runtime and its documentation remain in the repository.
 
 - [Workflow guide](./guides/workflows.md), [CLI reference](./reference/cli.md), [configuration](./reference/configuration.md) and [providers](./reference/providers.md).
 - [Contracts](./contracts/): CLI JSON, errors, install and invocation runtime.
-- [Release notes](./releases/) and [archive](./archive/README.md).
+- [Release notes](./releases/) and [archive](./archive/README.md), which includes the [original MCO Chinese README and npm release guide](./archive/mco-v0.12.1/README.md). They describe MCO, not Ordelis.

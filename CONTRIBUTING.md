@@ -64,7 +64,7 @@ Do not open a public issue, pull request or discussion for a vulnerability. Repo
 
 ## MCO provenance and compatibility
 
-Ordelis began from MCO and keeps its history and [copyright notice](LICENSE). Much of the root directory is still MCO. Its names (the `mco` command, the `runtime` Python package, the npm package name `@tt-a1i/mco` and the `.mco/` state directory) are intentionally unchanged, so please do not rename them as part of unrelated work. **Nothing is published from this repository.** Inherited guides that show `npx @tt-a1i/mco` refer to the upstream project. The [provenance record](docs/migration/ordelis.md#provenance-and-attribution) and the [identifier matrix](docs/migration/ordelis.md#identifier-migration-matrix) explain what is preserved and why. A problem that exists only in upstream MCO may belong in that project instead.
+Ordelis began from MCO and keeps its history and [copyright notice](LICENSE). Much of the root directory is still MCO. Its names (the `mco` command, the `runtime` Python package, the npm package name `@tt-a1i/mco` and the `.mco/` state directory) are intentionally unchanged, so please do not rename them as part of unrelated work. **Nothing is published from this repository** (see [RELEASING.md](RELEASING.md)). Inherited guides that show `npx @tt-a1i/mco` refer to the upstream project. The [provenance record](docs/migration/ordelis.md#provenance-and-attribution) and the [identifier matrix](docs/migration/ordelis.md#identifier-migration-matrix) explain what is preserved and why. A problem that exists only in upstream MCO may belong in that project instead.
 
 ## Coding agents
 
