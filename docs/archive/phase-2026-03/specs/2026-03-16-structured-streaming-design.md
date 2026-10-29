@@ -1,6 +1,6 @@
 # Structured Streaming — Design Spec
 
-> **Status: SUPERSEDED.** This historical findings-driven event schema is not the current streaming contract. Use the [invocation runtime and artifact contract (`v1`)](../../contracts/invocation-runtime-v1.md) and the installed CLI help.
+> **Status: SUPERSEDED.** This historical findings-driven event schema is not the current streaming contract. Use the [invocation runtime and artifact contract (`v1`)](../../../contracts/invocation-runtime-v1.md) and the installed CLI help.
 
 ## Overview
 

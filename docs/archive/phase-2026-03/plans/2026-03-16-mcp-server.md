@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3.10+, mcp>=1.0 (optional dependency), asyncio, existing unittest framework.
 
-**Spec:** `docs/superpowers/specs/2026-03-16-mcp-server-design.md`
+**Spec:** `docs/archive/phase-2026-03/specs/2026-03-16-mcp-server-design.md`
 
 ---
 
