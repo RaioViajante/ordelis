@@ -3,6 +3,7 @@ name: Gate
 on:
   pull_request:
   push:
+    branches: [main]
   workflow_dispatch:
     inputs:
       run_capability_probes:
@@ -11,10 +12,20 @@ on:
         default: false
         type: boolean
 
+permissions:
+  contents: read
+
+# A new commit on a pull request cancels that pull request's earlier run. Pushes to main and manual
+# runs each get their own group, so they are never cancelled.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   runtime-gate:
     name: Runtime G/H gate
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -79,6 +90,7 @@ jobs:
     runs-on:
       - self-hosted
       - macOS
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -94,6 +106,7 @@ jobs:
     needs: capability-probes
     if: ${{ needs.capability-probes.result == 'success' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -122,6 +135,7 @@ jobs:
   packaging-smoke-macos:
     name: Packaging smoke (macOS)
     runs-on: macos-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -145,6 +159,7 @@ jobs:
   installer-smoke-windows:
     name: Installer smoke (Windows)
     runs-on: windows-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@v4
