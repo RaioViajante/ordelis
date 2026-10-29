@@ -1,6 +1,6 @@
 # Contributing and development
 
-**Status:** guide. Commands are taken from the repository's CI workflows, `RELEASING.md`, the pull request template and the desktop README. There is no separate `CONTRIBUTING.md`; this is the entry point.
+**Status:** guide. Commands are taken from the repository's CI workflows, `RELEASING.md`, the pull request template and the desktop README. The short contributor entry point is [CONTRIBUTING.md](../../CONTRIBUTING.md); this guide holds the detail.
 **Scope:** how to get oriented in the repository, run the checks, and make a change that fits. It does not describe the product; see [Architecture](../architecture/overview.md) for that.
 **Related:** [Desktop README](../../desktop/README.md) · [Security policy](../../SECURITY.md) · [Execution safety gate](../implementation/execution-safety-gate.md) · [Migration record](../migration/ordelis.md)
 

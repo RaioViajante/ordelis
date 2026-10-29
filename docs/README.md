@@ -24,7 +24,9 @@ Documents are grouped below by what they answer. Product and architecture docume
 
 ## Development
 
+- [Contributing](../CONTRIBUTING.md): how to find work, propose a change and open a pull request.
 - [Contributing and development](./development/README.md): layout, checks, conventions and safety restrictions.
+- [Support](../SUPPORT.md): where to get help and what to expect.
 - [Desktop commands](../desktop/README.md#commands).
 - [Security policy](../SECURITY.md): how to report a vulnerability privately.
 

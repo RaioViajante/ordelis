@@ -77,7 +77,7 @@ pnpm lint && pnpm typecheck && pnpm test
 cargo test --locked --manifest-path src-tauri/Cargo.toml
 ```
 
-These assume a checkout and Python 3.10+, Node 22+, pnpm and a stable Rust toolchain; there is no published package. More in [development](docs/development/README.md) and the [desktop commands](desktop/README.md#commands).
+These assume a checkout and Python 3.10+, Node 22+, pnpm and a stable Rust toolchain; there is no published package. More in [development](docs/development/README.md) and the [desktop commands](desktop/README.md#commands). To contribute, see [CONTRIBUTING.md](CONTRIBUTING.md); for help, [SUPPORT.md](SUPPORT.md).
 
 #### security
 
