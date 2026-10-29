@@ -21,6 +21,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 ### Security
 
 - Stopped tracking capability-probe local-home artifacts inherited from the MCO history: their shell snapshots and session transcripts could embed machine environment data, including an apparent credential whose revocation is still pending. Removed all 26 artifacts across two stacked PRs, with the two credential-bearing shell snapshots deleted in the stacked removal PR; added narrow ignore rules, repository-local provider-home rejection, signal-safe process termination, fail-closed cleanup, cross-runner trusted staging, a success-authorized status-only CI upload contract, regression tests and a hygiene guide. This changes only the current tree; Git history still contains the credential and credential revocation remains an external, unconfirmed action (#49).
+- Disabled npm publication from this repository. The inherited publish workflow now fails closed through an unconditional guard job that its gate and publish jobs depend on, the root package is marked `private`, and a test fails if any workflow can publish to npm. The inherited package name and CLI are unchanged; Ordelis release distribution will use a separate, separately reviewed workflow.
 
 ## [0.12.1] - 2026-10-07
 

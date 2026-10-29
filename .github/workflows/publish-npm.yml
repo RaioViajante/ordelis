@@ -1,12 +1,39 @@
 name: Publish npm
 
+# DISABLED IN THIS REPOSITORY. Inherited from MCO; kept for provenance.
+#
+# This workflow publishes the root package, which is MCO's package under the
+# upstream maintainer's npm scope. This repository (Ordelis) must never publish
+# it. The publication-guard job below always fails and both other jobs depend on
+# it, so a published Release cannot reach the publish job. No secret, variable,
+# repository name or event changes that. Do not add always(), failure() or an
+# if: condition to the dependent jobs. The package itself is also marked
+# private, and tests/test_publication_guard.py fails if any workflow can publish.
+#
+# Ordelis release distribution will use its own, separately reviewed workflow.
+# See RELEASING.md.
+
 on:
   release:
     types: [published]
 
+permissions:
+  contents: read
+
 jobs:
+  publication-guard:
+    name: Publication guard (publishing is disabled in this repository)
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Refuse to publish
+        run: |
+          echo "::error::npm publication from this repository is disabled. This workflow is inherited from MCO and would publish MCO's package under the upstream npm scope. Ordelis releases are distributed through a separate, reviewed process. See RELEASING.md."
+          exit 1
+
   gate:
     name: Pre-publish gate
+    needs: publication-guard
     runs-on: ubuntu-latest
     steps:
       - name: Checkout

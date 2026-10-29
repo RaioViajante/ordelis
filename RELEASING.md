@@ -1,5 +1,15 @@
 # Releasing MCO
 
+> **Not applicable to this repository.** This guide is inherited from MCO and describes
+> how the upstream project publishes `@tt-a1i/mco` to npm. This repository (Ordelis)
+> does not publish that package. `.github/workflows/publish-npm.yml` is disabled by a
+> guard job that always fails, the root `package.json` is marked `private`, and
+> `tests/test_publication_guard.py` fails if any workflow can publish to npm. The package
+> name and CLI stay unchanged for compatibility with the inherited runtime and its
+> documentation. Ordelis release distribution (desktop installers) will use a separate,
+> separately reviewed workflow. The text below is kept as historical reference for the
+> inherited process.
+
 MCO is published through npm only. Do not publish to PyPI. The normal path is a
 GitHub Release from the matching version tag; the publish workflow gates and
 publishes that exact tag. The manual path remains available when GitHub Actions
