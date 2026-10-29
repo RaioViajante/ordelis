@@ -22,7 +22,7 @@ Where a phase has no issue yet, none is linked. Issues are created when a phase 
 
 ### 2. Ordelis branding and repository migration
 
-**In progress.** The repository has been renamed to `RaioViajante/ordelis`, and the decision record, release hardening and ownership corrections are merged. Remaining work follows the [migration PR roadmap](../migration/ordelis.md#pr-roadmap): post-rename security documentation ([#58](https://github.com/RaioViajante/ordelis/issues/58)), user-facing renaming, atomic renaming of internal identifiers, and the bundle identifier with its project-registry import. Inherited MCO names stay unless a separately reviewed change says otherwise.
+**In progress.** The repository has been renamed to `RaioViajante/ordelis`. The decision record, release hardening, ownership corrections and the post-rename security documentation ([#58](https://github.com/RaioViajante/ordelis/issues/58), implemented by [PR #60](https://github.com/RaioViajante/ordelis/pull/60)) are merged. The migration record's [current status](../migration/ordelis.md#current-status) table is the authority on each step. Remaining work follows the [migration PR roadmap](../migration/ordelis.md#pr-roadmap): user-facing renaming (N1), atomic renaming of internal identifiers (I1), and the bundle identifier with its project-registry import (I2). The repository's visibility is unchanged and still public. Inherited MCO names stay unless a separately reviewed change says otherwise.
 
 ### 3. Desktop UI redesign
 

@@ -39,7 +39,7 @@ Documents are grouped below by what they answer. Product and architecture docume
 
 ## Ordelis migration
 
-- [Ordelis migration decision record](./migration/ordelis.md): the Synapse to Ordelis rename, decisions, identifier matrix, risks and PR roadmap. A decision record, not a description of current state.
+- [Ordelis migration decision record](./migration/ordelis.md): the Synapse to Ordelis rename, decisions, identifier matrix, risks and PR roadmap. Most of it is a decision record written at the time of each decision; its [current status](./migration/ordelis.md#current-status) table is the authoritative statement of what is done.
 
 ## Safety foundations (library only, not connected to the app)
 

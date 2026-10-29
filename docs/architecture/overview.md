@@ -68,7 +68,7 @@ This is the boundary proposed in the [desktop architecture](../implementation/de
 | Local project registration | [Desktop local projects](../implementation/desktop-local-projects.md) | Backend implemented |
 | Runtime status bridge | [Desktop runtime bridge](../implementation/desktop-runtime-bridge.md) | Implemented, development-only |
 | Execution Safety Gate | [Execution safety gate](../implementation/execution-safety-gate.md) | Implemented, always denies |
-| Rename and provenance | [Migration record](../migration/ordelis.md) | Decision record |
+| Rename and provenance | [Migration record](../migration/ordelis.md) | Decision record, with a current-status table |
 | Inherited MCO interfaces | [Contracts](../contracts/) and [reference](../reference/cli.md) | Inherited |
 
 When a topic has an existing design record, the new document links to it and adds only what is missing, rather than restating it.
