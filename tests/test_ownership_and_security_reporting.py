@@ -91,10 +91,46 @@ def security_link_violations(text: str) -> list[str]:
 
 
 PRIVATE_REPORTING = r"private\s+vulnerability\s+reporting"
-REPORT_VERBS = r"\b(?:open|file|create|submit|raise|post|use)\b[^.\n]*\b(?:issues?|pull requests?|discussions?|bug[- ]reports?|issue templates?)\b"
-# A negation only counts when it governs the instruction verb ("do not open ..."). A stray "not"
-# elsewhere in the sentence ("if that is not available, open an issue") must not excuse it.
-NEGATED_INSTRUCTION = r"\b(?:do not|don't|never|must not|should not|cannot|can't)\s+(?:\w+\s+){0,3}?(?:open|file|create|submit|raise|post|use)\b"
+
+# Public places where a vulnerability must not be described. "issue" only counts when it names the
+# tracker or a GitHub issue ("a security issue" does not).
+PUBLIC_CHANNEL = (
+    r"\b(?:issue\s+trackers?|(?:an?|public|new|github)\s+issues?|issue\s+templates?|pull\s+requests?"
+    r"|discussions?|bug[- ]reports?|public\s+(?:threads?|forums?|posts?))\b"
+)
+REPORTING_VERB = r"(?:open|file|create|submit|raise|post|use|describe|disclose|report|put|include|share|publish|mention|send|write|add|discuss|comment|tell)"
+# A mention of a public channel is a violation unless a prohibition governs it. A prohibition is a
+# negator followed directly by the instruction ("do not open ..."), allowing only harmless fillers.
+# So "if you cannot use X, open an issue" (the negation is about X), "don't worry, just open ..." and
+# "do not hesitate to open ..." (an encouragement) are not prohibitions. It covers the rest of the
+# clause and stops at a clause break, so "do not open an issue; instead file a bug report" is caught.
+PROHIBITION = (
+    rf"\b(?:do not|don't|never|must not|should not|refrain from)\s+(?:(?:publicly|openly|ever|just|simply|also|even|please)\s+){{0,2}}{REPORTING_VERB}\b"
+    r"|\bavoid\b"
+)
+CLAUSE_BREAK = rf";|\b(?:but|instead|otherwise|alternatively|however|then)\b|,\s*(?:and\s+)?(?:please\s+)?{REPORTING_VERB}\b"
+
+
+def ungoverned_public_channels(sentence: str) -> list[str]:
+    covered = []
+    for match in re.finditer(PROHIBITION, sentence):
+        clause_break = re.search(CLAUSE_BREAK, sentence[match.end():])
+        covered.append((match.start(), match.end() + (clause_break.start() if clause_break else len(sentence))))
+    return [
+        channel.group(0)
+        for channel in re.finditer(PUBLIC_CHANNEL, sentence)
+        if not any(low <= channel.start() < high for low, high in covered)
+    ]
+
+
+def claims_production_readiness(lowered: str) -> bool:
+    """True if "production-ready" is asserted, i.e. no negation shortly before it in the same clause."""
+    for match in re.finditer(r"production[- ]ready", lowered):
+        # The negation has to be in the same clause: "do not worry: it is production-ready" is a claim.
+        clause_before = re.split(r"[.!?\n:;,]", lowered[max(0, match.start() - 80):match.start()])[-1]
+        if not re.search(r"\b(?:not|isn't|aren't|never|no|nothing)\b(?:\W+\w+){0,4}\W*$", clause_before):
+            return True
+    return False
 
 
 def security_policy_violations(text: str) -> list[str]:
@@ -104,7 +140,7 @@ def security_policy_violations(text: str) -> list[str]:
     if not private:
         found.append("must make private vulnerability reporting the primary route")
     for sentence in re.split(r"(?<=[.!?])\s+|\n+", lowered):
-        if re.search(REPORT_VERBS, sentence) and not re.search(NEGATED_INSTRUCTION, sentence):
+        if ungoverned_public_channels(sentence):
             found.append(f"must not tell reporters to use an issue, pull request or discussion: {sentence.strip()[:60]!r}")
     fallback = re.search(r"\bprofile\b|contact the maintainer", lowered)
     if fallback:
@@ -114,7 +150,7 @@ def security_policy_violations(text: str) -> list[str]:
             found.append("the fallback must say not to put vulnerability details in a first message")
     if "sample data" not in lowered:
         found.append("must say the interface is a preview over sample data")
-    if re.search(r"(?<!not )(?<!not yet )production[- ]ready", lowered):
+    if claims_production_readiness(lowered):
         found.append("must not claim the project is production-ready")
     if not re.search(r"^#+[^\n]*\bsupport", lowered, re.MULTILINE):
         found.append("must state the supported-version policy")
@@ -261,6 +297,45 @@ class RepositoryConfigurationRegressionTests(unittest.TestCase):
             with self.subTest(sentence=sentence):
                 self._flagged(security_policy_violations(self.policy + "\n" + sentence + "\n"), "must not tell reporters")
 
+    def test_negation_bypasses_found_in_review_are_flagged(self) -> None:
+        # Each of these was shown to evade an earlier version of the check.
+        for sentence in (
+            "If you cannot use private vulnerability reporting, open an issue with the details.",
+            "If you can't use the Security tab, file a bug report.",
+            "Do not hesitate to open a public issue describing it.",
+            "Alternatively, tell us in the issue tracker.",
+        ):
+            with self.subTest(sentence=sentence):
+                self._flagged(security_policy_violations(self.policy + "\n" + sentence + "\n"), "must not tell reporters")
+
+    def test_variants_of_the_same_bypasses_are_flagged(self) -> None:
+        for sentence in (
+            "Never hesitate to open an issue about it.",
+            "Don't worry, just open an issue.",
+            "Do not open a public issue; instead file a bug report.",
+            "Do not open an issue, file a bug report instead.",
+            "If private reporting is unavailable, post it in the discussions.",
+            "You may also mention it in a pull request.",
+            "When in doubt, use the issue tracker.",
+            "Feel free to describe it in a public issue.",
+        ):
+            with self.subTest(sentence=sentence):
+                self._flagged(security_policy_violations(self.policy + "\n" + sentence + "\n"), "must not tell reporters")
+
+    def test_legitimate_prohibitions_and_unrelated_uses_of_the_word_issue_pass(self) -> None:
+        for sentence in (
+            "Do not open a public issue.",
+            "Please do not use the issue tracker or a bug report for vulnerabilities.",
+            "Never post details in a pull request, a discussion or an issue.",
+            "Do not publicly open an issue or describe the problem in a discussion.",
+            "Avoid public issues and discussions.",
+            "Do not open an issue, or file a bug report, or start a discussion.",
+            "If you find a security issue, report it privately.",
+            "If you cannot use private vulnerability reporting, contact the maintainer through their profile.",
+        ):
+            with self.subTest(sentence=sentence):
+                self.assertEqual(security_policy_violations(self.policy + "\n" + sentence + "\n"), [])
+
     def test_a_negated_instruction_is_not_a_violation(self) -> None:
         text = self.policy + "\nNever open an issue to describe a vulnerability.\n"
         self.assertEqual(security_policy_violations(text), [])
@@ -301,6 +376,21 @@ class RepositoryConfigurationRegressionTests(unittest.TestCase):
             "Only the main branch.\n"
         )
         self.assertEqual(security_policy_violations(reworded), [])
+
+    def test_production_readiness_negations_pass_and_claims_are_flagged(self) -> None:
+        for sentence in ("Ordelis is not currently production-ready.", "It isn't production-ready.",
+                         "The app is not yet fully production-ready.", "Nothing here is production ready yet, which is not a promise."):
+            with self.subTest(passes=sentence):
+                self.assertEqual(security_policy_violations(self.policy + "\n" + sentence + "\n"), [])
+        for sentence in ("Ordelis is production-ready.", "The desktop app is nearly production ready.",
+                         "Do not worry: it is production-ready."):
+            with self.subTest(flagged=sentence):
+                self._flagged(security_policy_violations(self.policy + "\n" + sentence + "\n"), "production-ready")
+
+    def test_the_migration_record_does_not_describe_the_security_item_as_unassessed(self) -> None:
+        record = (ROOT / "docs" / "migration" / "ordelis.md").read_text(encoding="utf-8")
+        for stale in (r"open and unassessed", r"not assessed", r"high until assessed"):
+            self.assertNotRegex(record.lower(), stale)
 
     def test_a_not_yet_production_ready_statement_is_not_a_violation(self) -> None:
         text = self.policy + "\nOrdelis is not yet production-ready.\n"
