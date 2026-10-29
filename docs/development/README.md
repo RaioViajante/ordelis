@@ -70,7 +70,7 @@ The repository's [`CLAUDE.md`](../../CLAUDE.md) (identical to `AGENTS.md`, and w
 
 The workflow in practice:
 
-1. Open an issue that states the goal and the acceptance criteria.
+1. For anything larger or less obvious than a small fix, open an issue that states the goal and the acceptance criteria first; this is encouraged, not required.
 2. Work on a branch named for the kind of change and the issue, for example `docs/59-ordelis-readme-and-docs`.
 3. Open a pull request using the [template](../../.github/pull_request_template.md), including the validation you ran and a rollback note.
 4. Expect an independent review before merge. Do not force-push shared branches or rewrite history.

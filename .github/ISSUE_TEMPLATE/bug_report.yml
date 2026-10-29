@@ -19,7 +19,7 @@ body:
       label: Component
       options:
         - Desktop app
-        - Runtime / agent integrations (the `mco` command and `runtime/`)
+        - Runtime / agent integrations (Python `runtime/`, inherited `mco` command)
         - Documentation
         - Build / CI
         - Other / not sure
@@ -49,13 +49,13 @@ body:
   - type: textarea
     id: environment
     attributes:
-      label: Environment
-      description: Operating system and the commit or branch you used. Add tool versions (Python, Node, Rust) only if they could matter.
+      label: Environment (optional)
+      description: Operating system and the commit or branch you used. Add tool versions (Python, Node, Rust) if they could matter.
       placeholder: |
         - OS:
         - Commit or branch:
     validations:
-      required: true
+      required: false
 
   - type: textarea
     id: evidence
@@ -64,13 +64,3 @@ body:
       description: Short, redacted excerpts only.
     validations:
       required: false
-
-  - type: checkboxes
-    id: checks
-    attributes:
-      label: Before submitting
-      options:
-        - label: I searched the existing issues.
-          required: true
-        - label: This is not a security vulnerability, and I removed credentials, tokens, transcripts and personal paths.
-          required: true

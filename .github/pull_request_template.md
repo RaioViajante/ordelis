@@ -1,6 +1,6 @@
 ## Related issue
 
-Closes #
+Closes # (if there is one)
 
 ## Summary
 
@@ -40,5 +40,4 @@ For user-interface changes. Sample data must stay labelled as sample data. Remov
 ## Checklist
 
 - [ ] The change is focused: one concern, and no unrelated reformatting.
-- [ ] I read [CONTRIBUTING.md](https://github.com/RaioViajante/ordelis/blob/main/CONTRIBUTING.md).
 - [ ] No credentials, tokens, raw agent output or personal paths are included.

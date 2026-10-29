@@ -19,7 +19,7 @@ body:
       label: Component
       options:
         - Desktop app
-        - Runtime / agent integrations (the `mco` command and `runtime/`)
+        - Runtime / agent integrations (Python `runtime/`, inherited `mco` command)
         - Documentation
         - Build / CI
         - Website (planned)
@@ -57,13 +57,3 @@ body:
       description: Would this involve running agents, reading or writing files, network access, credentials, or the desktop's native boundary? Say how you would keep it safe.
     validations:
       required: false
-
-  - type: checkboxes
-    id: checks
-    attributes:
-      label: Before submitting
-      options:
-        - label: I searched the existing issues and the roadmap.
-          required: true
-        - label: This is not a security vulnerability, and I removed credentials, tokens, transcripts and personal paths.
-          required: true
