@@ -1,6 +1,7 @@
 {
   "name": "@tt-a1i/mco",
   "version": "0.12.1",
+  "private": true,
   "description": "Node wrapper for the mco CLI (Python runtime required).",
   "license": "MIT",
   "bin": {
