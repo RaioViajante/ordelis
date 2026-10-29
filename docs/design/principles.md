@@ -94,6 +94,6 @@ Design exports are private working references. They are not production code and 
 ## Platform neutrality
 
 - No macOS-only wording or iconography in shared copy. Prefer neutral phrasing over "this Mac".
-- Shortcuts are mapped per platform: `⌘` on macOS, Ctrl elsewhere.
+- Shortcuts are meant to be labelled per platform: `⌘` on macOS, Ctrl elsewhere. The current prototype accepts either key everywhere and shows both labels, because it does not detect the operating system.
 - Window controls, menus and dialogs use the native ones.
 - Behavior that differs by platform is documented, and nothing is drawn to suggest support that has not been verified. See [Cross-platform](../architecture/cross-platform.md).

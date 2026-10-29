@@ -52,7 +52,7 @@ It is meant to let a developer **describe a task, coordinate multiple coding age
 
 ## Current position
 
-The vision is far ahead of the implementation. The repository today contains a desktop interface prototype over sample data, several tested safety and context foundations, and the inherited MCO command-line runtime. Running agents from the desktop is not implemented, and the safety design that must precede it is still being built. The [roadmap](roadmap.md) orders the remaining work without dates.
+The vision is far ahead of the implementation. The repository today contains a desktop interface prototype that is mostly sample data, several tested safety and context foundations, and the inherited MCO command-line runtime. Running agents from the desktop is not implemented, and the safety design that must precede it is still being built. The [roadmap](roadmap.md) orders the remaining work without dates.
 
 ## Open questions
 

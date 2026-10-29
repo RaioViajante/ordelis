@@ -13,7 +13,7 @@
  ┌─────────────────────────── desktop/ ────────────────────────────┐
  │  Interface (React, TypeScript, in a webview)                     │
  │    Home · Projects · Sessions · Context · Agents · Settings      │
- │    sample data only; no network, files or processes              │
+ │    mostly sample data; no network, files or processes            │
  │             │  a closed list of six reviewed native commands     │
  │             ▼                                                    │
  │  Native layer (Rust, Tauri 2)                                    │
@@ -35,7 +35,7 @@ The desktop application and the Python runtime are **not integrated**. The one l
 
 | Part | Where | What it is |
 | --- | --- | --- |
-| Interface | `desktop/src/` | A React and TypeScript prototype over invented sample data. |
+| Interface | `desktop/src/` | A React and TypeScript prototype. Most pages show invented sample data. Agents runs no check, and Settings → Runtime shows the development-only identity query. |
 | Native layer | `desktop/src-tauri/` | Rust code with an explicit permission manifest. It exposes six commands to the interface, one of them development-only. |
 | Python runtime | `runtime/` | The inherited MCO runtime, plus context, planning and safety components added since. |
 | Specifications | `docs/` | Contracts, guides, design records and, now, the product and architecture documents. |

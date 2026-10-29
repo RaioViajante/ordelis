@@ -1,7 +1,7 @@
 # Roadmap
 
 **Status:** planning document. The phases are categories of work, not releases. There are no delivery dates and no committed version numbers, and the order can change.
-**Scope:** how the remaining work is grouped and what it depends on. It is derived from the repository's merged pull requests, open issues, and the [migration decision record](../migration/ordelis.md#pr-roadmap), which remains the authority on the rename and branding sequence.
+**Scope:** how the remaining work is grouped and what it depends on. It is derived from the repository's merged pull requests, the issue tracker, and the [migration decision record](../migration/ordelis.md#pr-roadmap), which remains the authority on the rename and branding sequence.
 **Related:** [Features](features.md) · [Vision](vision.md) · [Milestone plan from the original audit](../implementation/synapse-mvp-plan.md#implementation-phases-and-exit-gates)
 
 Where a phase has no issue yet, none is linked. Issues are created when a phase is about to start.
@@ -17,7 +17,7 @@ Where a phase has no issue yet, none is linked. Issues are created when a phase 
 - The authorization ledger and the Execution Safety Gate: [#17](https://github.com/RaioViajante/ordelis/issues/17), [#19](https://github.com/RaioViajante/ordelis/issues/19).
 - The desktop UI foundation and its Home, Projects, Context and Sessions prototypes: [#24](https://github.com/RaioViajante/ordelis/issues/24), [#26](https://github.com/RaioViajante/ordelis/issues/26), [#28](https://github.com/RaioViajante/ordelis/issues/28), [#30](https://github.com/RaioViajante/ordelis/issues/30).
 - The native IPC boundary and the development-only runtime bridge: [#32](https://github.com/RaioViajante/ordelis/issues/32), [#36](https://github.com/RaioViajante/ordelis/issues/36), [#40](https://github.com/RaioViajante/ordelis/issues/40), [#42](https://github.com/RaioViajante/ordelis/issues/42).
-- Local project registration, backend only: [#45](https://github.com/RaioViajante/ordelis/issues/45) (design), [#47](https://github.com/RaioViajante/ordelis/issues/47) (open; its interface half is not built).
+- Local project registration, backend only: the design ([#45](https://github.com/RaioViajante/ordelis/issues/45)) and the Rust registry with its four authorized commands ([#47](https://github.com/RaioViajante/ordelis/issues/47), implemented by [PR #48](https://github.com/RaioViajante/ordelis/pull/48)). The issue was kept open for review after that PR merged, so its state does not describe the implementation. The Projects interface that would call the backend is separate work with no issue of its own yet, and nothing in the desktop calls the commands.
 - Repository hygiene: [#49](https://github.com/RaioViajante/ordelis/issues/49) (probe artifacts), [#53](https://github.com/RaioViajante/ordelis/issues/53) (npm publication blocked), [#55](https://github.com/RaioViajante/ordelis/issues/55) (ownership and security reporting).
 
 ### 2. Ordelis branding and repository migration
@@ -50,11 +50,11 @@ Where a phase has no issue yet, none is linked. Issues are created when a phase 
 
 ### 9. Context and session continuity
 
-**Partly foundation.** Vault preview and a non-dispatching plan exist, as do inherited sessions. Context packages, provenance in the interface, session handoffs and recovery are planned. Related open issues: [#23](https://github.com/RaioViajante/ordelis/issues/23) (session readiness race) and [#39](https://github.com/RaioViajante/ordelis/issues/39) (runtime import hygiene). See [Context](../architecture/context.md) and [Sessions](../architecture/sessions.md).
+**Partly foundation.** Vault preview and a non-dispatching plan exist, as do inherited sessions. Context packages, provenance in the interface, session handoffs and recovery are planned. Related issues: [#23](https://github.com/RaioViajante/ordelis/issues/23) (session readiness race) and [#39](https://github.com/RaioViajante/ordelis/issues/39) (runtime import hygiene). See [Context](../architecture/context.md) and [Sessions](../architecture/sessions.md).
 
 ### 10. Cross-platform verification and distribution
 
-**Not started.** The first step is to build and test the desktop on Windows and Linux and replace the migration record's source-based expectations with results. Then project registration for those systems (which needs its own reviewed design), packaging, signing and release metadata. Related open issues: [#38](https://github.com/RaioViajante/ordelis/issues/38) (release packaging assurance) and [#56](https://github.com/RaioViajante/ordelis/issues/56) (release hardening). See [Cross-platform](../architecture/cross-platform.md).
+**Not started.** The first step is to build and test the desktop on Windows and Linux and replace the migration record's source-based expectations with results. Then project registration for those systems (which needs its own reviewed design), packaging, signing and release metadata. Related issues: [#38](https://github.com/RaioViajante/ordelis/issues/38) (release packaging assurance) and [#56](https://github.com/RaioViajante/ordelis/issues/56) (release hardening). See [Cross-platform](../architecture/cross-platform.md).
 
 ## What gates a first release
 
@@ -68,14 +68,9 @@ A first release, or any statement that Ordelis is ready, is blocked by more than
 
 The `ordelis.app` domain is planned for a website that has not been deployed, and no page links to it as a live site.
 
-## Open issues
+## Finding current issues
 
-| Issue | Topic |
-| --- | --- |
-| [#23](https://github.com/RaioViajante/ordelis/issues/23) | Session start and resume readiness race |
-| [#38](https://github.com/RaioViajante/ordelis/issues/38) | Release packaging and distribution assurance |
-| [#39](https://github.com/RaioViajante/ordelis/issues/39) | Runtime import hygiene and stronger environment tripwires |
-| [#44](https://github.com/RaioViajante/ordelis/issues/44) | Flaky concurrent ledger consumers |
-| [#47](https://github.com/RaioViajante/ordelis/issues/47) | Local project registration, interface half |
-| [#56](https://github.com/RaioViajante/ordelis/issues/56) | Release hardening follow-ups |
-| [#58](https://github.com/RaioViajante/ordelis/issues/58) | Post-rename security documentation |
+Issues are cited above as context for a phase. This document does not state whether any of them is open or closed, because that changes faster than the document does, and an issue's state is not evidence of implementation state. For the current list, query GitHub directly:
+
+- [Open issues](https://github.com/RaioViajante/ordelis/issues?q=is%3Aissue+is%3Aopen) in the web interface.
+- `gh issue list --repo RaioViajante/ordelis --state open` from a terminal.

@@ -1,6 +1,6 @@
 # Context management
 
-**Status:** partly working. A read-only vault preview exists on the command line and a context prototype exists in the desktop over sample data. Context packages, file scoping and the rest are planned. The intended behavior is a proposal for review.
+**Status:** partly working. A read-only vault preview, added since the MCO fork, exists on the command line; it is not connected to the desktop, where a context prototype shows sample data. Context packages, file scoping and the rest are planned. The intended behavior is a proposal for review.
 **Scope:** how the user decides what an agent may see, how that is made visible, and how local-first handling is kept. Optional Obsidian integration is covered here.
 **Related:** [Features F](../product/features.md#f-context-management) · [Vault context preview](../guides/vault-context-preview.md) · [Private execution plan](../guides/private-execution-plan.md) · [Desktop context experience](../implementation/desktop-context-experience.md) · [Sessions](sessions.md)
 
@@ -45,8 +45,9 @@ Search and browse sources; select items; see budgets and truncation; see provena
 
 ## Current implementation
 
-- *Working, inherited CLI.* [`mco context preview`](../guides/vault-context-preview.md) takes an explicit external vault directory and JSON index, selects project and topic notes, optionally headings, and prints bounded UTF-8 excerpts with source paths and truncation flags, plus a proposed agent and a no-dispatch policy. It modifies nothing and starts no agent. Its tests cover traversal, symlinks, exclusion, determinism and the absence of writes.
-- *Foundation.* [`mco context plan`](../guides/private-execution-plan.md) adds a versioned external configuration and one non-dispatching plan. A mock-only bridge passes selected excerpts to a fake agent in tests, in a delimited, provenance-bearing block.
+- *Working, command line, added since the fork.* [`mco context preview`](../guides/vault-context-preview.md) takes an explicit external vault directory and JSON index, selects project and topic notes, optionally headings, and prints bounded UTF-8 excerpts with source paths and truncation flags, plus a proposed agent and a no-dispatch policy. It modifies nothing and starts no agent. Its tests cover traversal, symlinks, exclusion, determinism and the absence of writes.
+- *Working, command line, added since the fork.* [`mco context plan`](../guides/private-execution-plan.md) adds a versioned external configuration and one non-dispatching plan.
+- *Foundation.* A mock-only bridge that passes selected excerpts to a fake agent in tests, in a delimited, provenance-bearing block. It has no command-line entry point.
 - *Prototype.* The Context page: searchable sample notes, provenance and a selection shared with Home. It reads no real file or vault. See [Context experience](../implementation/desktop-context-experience.md).
 - *Planned.* Real file and vault selection in the desktop, context packages, scoped file access, session history as context, reuse.
 

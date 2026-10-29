@@ -65,7 +65,8 @@ The adapter boundary is what keeps orchestration independent of any one agent. A
 ## Current implementation
 
 - *Working, inherited CLI.* Adapters for Claude Code, Codex CLI, OpenCode and other agents, a configurable custom-agent path including an ACP transport, `mco doctor` for installation and authentication readiness, and `mco agent list`, `check` and `models`. The permission modes `read_only`, `write` and `yolo` are mapped to each provider's own controls, and strict mode rejects a policy the adapter cannot express. See [provider permissions](../contracts/provider-permissions-v0.1.x.md).
-- *Foundation.* A closed evidence schema and evaluator that keep unverified requirements blocking ([guide](../guides/runtime-validation-foundations.md)); explicit Codex version and help inspection ([guide](../guides/codex-cli-capability-inspection.md)); a probe runner exercised only with fake executables.
+- *Working, command line, added since the fork.* `mco context inspect-codex`, an explicit Codex version and help inspection ([guide](../guides/codex-cli-capability-inspection.md)).
+- *Foundation.* A closed evidence schema and evaluator that keep unverified requirements blocking ([guide](../guides/runtime-validation-foundations.md)), and a probe runner exercised only with fake executables.
 - *Gaps recorded in the audit.* The Claude and OpenCode adapters currently ignore an invocation's model; the model catalog probes only some providers; there is no common reasoning-level control; there is no Kimi adapter.
 - *Prototype.* The Agents page, which shows every fact as unknown and says nothing was checked.
 

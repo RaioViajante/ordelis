@@ -10,12 +10,21 @@ Every capability in these documents carries one of four labels. They are deliber
 
 | Label | Meaning |
 | --- | --- |
-| **Working** | Implemented, covered by tests, and usable today. |
-| **Prototype** | An interface over invented sample data. It changes nothing and starts nothing. |
-| **Foundation** | Tested library or runtime code that is not connected to the desktop application. |
+| **Working** | Implemented, covered by tests, and usable today. The text says where: on the command line, or in the desktop application. |
+| **Prototype** | A desktop screen with no live backing. It changes nothing and starts nothing. Most prototype screens show invented sample data. |
+| **Foundation** | Tested library code with no user-facing entry point, on the command line or in the desktop. |
 | **Planned** | Not implemented. Described to show intent, not to promise a delivery. |
 
-A capability can have different labels in different places. For example, running a prompt through several agents is **Working** in the inherited command-line runtime and **Planned** in the desktop application.
+A capability can have different labels in different places. For example, running a prompt through several agents is **Working** on the command line and **Planned** in the desktop application.
+
+### Provenance
+
+Each capability that exists is also tagged with where it came from:
+
+- **Inherited** from MCO `v0.12.1`, the project Ordelis began from: the agent adapters, `mco run`, `mco review`, `mco session`, `mco doctor` and `mco agent`.
+- **Added since the fork**: the desktop application, the `mco context` commands (vault preview, planning and Codex inspection), and the safety components. `runtime/vault_context.py`, `runtime/synapse_plan.py` and `runtime/codex_capabilities.py` did not exist at the fork base. The `context` subcommand was added to the inherited `mco` program.
+
+Provenance is independent of connection: **no command-line capability, inherited or added, is connected to the desktop application.** The one link between them is a development-only runtime identity query.
 
 ## Product terms
 

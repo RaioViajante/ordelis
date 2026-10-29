@@ -14,7 +14,7 @@
 
 **Targets.** macOS, Windows and Linux.
 
-**Platform-native behavior.** Window controls, menus, keyboard shortcuts, file dialogs, paths and permissions follow each platform's conventions. Copy that assumes one system, such as "this Mac" or `⌘`, is replaced by neutral wording or platform mappings. The interface already switches `⌘` for Ctrl on other systems.
+**Platform-native behavior.** Window controls, menus, keyboard shortcuts, file dialogs, paths and permissions follow each platform's conventions. Copy that assumes one system, such as "this Mac" or `⌘`, is replaced by neutral wording or platform mappings. Today the interface does not detect the operating system: its page shortcuts accept either `⌘` or Ctrl on every system, and Settings lists both labels (`⌘1 · Ctrl+1`). Labels that match the platform are planned.
 
 **Portable configuration.** User-facing settings and project definitions are meant to be portable across machines where paths allow. Anything tied to a platform's security model, such as private state directories and file permissions, is not.
 
@@ -30,15 +30,32 @@
 
 ## What has been verified
 
-| | macOS | Windows | Linux |
-| --- | --- | --- | --- |
-| Desktop app builds and tests pass in CI | Yes | No | No |
-| Desktop app launched and inspected | Yes | No | No |
-| Release-bundle isolation verified | Yes (macOS bundles only) | Not applicable yet | Not applicable yet |
-| Desktop installer or disk image published | No | No | No |
-| Python runtime test suite | Yes (CI and local) | Narrow smoke test of the CLI wrapper only | Runtime gate runs in CI; coverage not audited |
+Evidence is kept in two groups, because they do not mean the same thing. **CI evidence** is what the repository's own workflows ran, on the runner named. **Local verification** was run by hand on one developer machine and is not repeatable by a reader from the repository alone.
 
-"Built" and "tested" mean the repository's own CI jobs. See the [evidence ledger](../migration/ordelis.md#evidence-ledger) for what each job covers. Source-based expectations about Windows and Linux in that record are expectations, not results.
+### CI evidence
+
+| Runner | Workflow job | What it runs |
+| --- | --- | --- |
+| macOS (`macos-latest`) | `Desktop` ([`desktop.yml`](../../.github/workflows/desktop.yml)) | Frontend lint, type check, tests and build; the native Rust tests (default, development-runtime and release profiles); the targeted Python test `tests.test_runtime_status_bridge`; debug and release `.app` builds; native-boundary and release-isolation verification. |
+| macOS (`macos-latest`) | `Packaging smoke (macOS)` ([`gate.yml`](../../.github/workflows/gate.yml)) | `npm test`, skill-format and version-alignment checks, and an npm packaging and install smoke test of the inherited CLI wrapper. It does not run the Python test suite. |
+| Ubuntu (`ubuntu-latest`) | `Runtime G/H gate` | The **complete Python `unittest` suite** (on Python 3.11), the Node tests, skill and version checks, and the npm packaging smoke test. This is the only CI job that runs the full Python suite. |
+| Windows (`windows-latest`) | `Installer smoke (Windows)` | `npm test`, the targeted Python tests `tests.test_platform_helpers` and `tests.test_acp_transport`, skill and version checks, and an npm pack, install and `mco` smoke run (`--help`, `--version`, `skills read`, `install --dry-run`). |
+
+What this does and does not show:
+
+- The desktop application is built and tested in CI on **macOS only**. No Windows or Linux desktop job exists.
+- The Windows job exercises the CLI wrapper's packaging and two targeted Python modules. It does not run the session daemon, the authorization ledger, vault context or probe modules, and it says nothing about the desktop application.
+- The Ubuntu job runs the full Python suite for the inherited runtime, but it does not build or test the desktop application.
+- CI builds the macOS `.app` bundle only. No disk image or installer is built or published, and no job signs or notarizes anything.
+
+### Local verification
+
+| Machine | What was run | Not CI |
+| --- | --- | --- |
+| macOS developer machine | The complete Python suite (Python 3.14.8; 852 tests, 4 skipped), the desktop frontend checks and the native Rust tests, and launching the application for visual verification | Yes |
+| Windows, Linux | Nothing | |
+
+Local runs are recorded to show that the work was exercised, not as platform support. A platform is described as supported only when the build, packaging and security checks pass in CI and by hand on that platform.
 
 ## Known platform differences
 

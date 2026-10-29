@@ -51,16 +51,19 @@ Ordelis is in early development. There are no releases, no installers and no dow
 **Working**
 
 - A desktop shell (Tauri 2, React, TypeScript) with navigation, and a native permission boundary that exposes a closed list of commands to the interface. It is built and tested in CI on macOS.
-- The inherited [MCO](https://github.com/mco-org/mco) command-line runtime, which can dispatch a prompt to agent CLIs installed on your machine, run reviews, and manage persistent sessions from a terminal. It is not connected to the desktop app and is not governed by Ordelis's own safety design. See the [CLI reference](docs/reference/cli.md).
+- The command-line runtime inherited from [MCO](https://github.com/mco-org/mco), which can dispatch a prompt to agent CLIs installed on your machine, run reviews, and manage persistent sessions from a terminal. It is not governed by Ordelis's own safety design. See the [CLI reference](docs/reference/cli.md).
+- Command-line commands added since the fork: a read-only preview of selected Obsidian vault context, a non-dispatching plan, and a Codex version and help inspection (`mco context preview`, `plan` and `inspect-codex`). They start no agent.
+- Neither set of commands is connected to the desktop app.
 
-**Prototype, over sample data**
+**Prototype**
 
-- Home with a task composer, Projects, Context, Sessions, Agents and Settings. Every project, task, note and session shown is invented, and actions such as "Preview task" change nothing and start nothing.
+- Home with a task composer, Projects, Context and Sessions show invented sample data, and actions such as "Preview task" change nothing and start nothing.
+- Agents lists agent CLIs but runs no check, so every capability reads "unknown".
+- Settings has a Runtime tab that asks the Python runtime to identify itself. That works only in development builds; release builds cannot start Python.
 
 **Foundations, tested but not connected to the app**
 
 - A local project registry in Rust (macOS only; no interface calls it yet).
-- A read-only preview of selected Obsidian vault context, and a non-dispatching plan, both on the command line.
 - An Execution Safety Gate that currently always answers *no*, and a private authorization ledger for controlled probes, exercised only with fake executables. These create no sandbox.
 
 **Planned**

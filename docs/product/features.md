@@ -10,12 +10,12 @@ Nothing here is a release commitment, a delivery date or a version number.
 
 | Group | State today | Specification |
 | --- | --- | --- |
-| [A. Workspace and projects](#a-workspace-and-projects) | **Prototype** pages over sample data; **Foundation** project registry (macOS) | [Overview](../architecture/overview.md) |
+| [A. Workspace and projects](#a-workspace-and-projects) | **Prototype** pages (mostly sample data); **Foundation** project registry (macOS) | [Overview](../architecture/overview.md) |
 | [B. Agent integrations](#b-agent-integrations) | **Working** in the inherited CLI; nothing in the desktop | [Agents](../architecture/agents.md) |
-| [C. Planning and task delegation](#c-planning-and-task-delegation) | **Prototype** task preview; **Foundation** non-dispatching plan | [Orchestration](../architecture/orchestration.md) |
+| [C. Planning and task delegation](#c-planning-and-task-delegation) | **Prototype** task preview; **Working** non-dispatching plan on the command line (added since the fork) | [Orchestration](../architecture/orchestration.md) |
 | [D. Orchestration and execution](#d-orchestration-and-execution) | **Working** in the inherited CLI; **Foundation** safety gate; nothing in the desktop | [Execution](../architecture/execution.md) |
 | [E. Git and worktree isolation](#e-git-and-worktree-isolation) | **Planned** | [Worktrees](../architecture/worktrees.md) |
-| [F. Context management](#f-context-management) | **Working** vault preview in the CLI; **Prototype** Context page | [Context](../architecture/context.md) |
+| [F. Context management](#f-context-management) | **Working** vault preview on the command line (added since the fork); **Prototype** Context page | [Context](../architecture/context.md) |
 | [G. Sessions and continuity](#g-sessions-and-continuity) | **Working** in the inherited CLI; **Prototype** Sessions page | [Sessions](../architecture/sessions.md) |
 | [H. Integrated terminal](#h-integrated-terminal) | **Planned** | [Execution](../architecture/execution.md#terminal-views) |
 | [I. Review and verification](#i-review-and-verification) | **Working** raw multi-agent review in the CLI; rest **Planned** | [Review](../architecture/review.md) |
@@ -23,7 +23,7 @@ Nothing here is a release commitment, a delivery date or a version number.
 | [K. Cross-platform distribution](#k-cross-platform-distribution) | macOS desktop build only; no releases | [Cross-platform](../architecture/cross-platform.md) |
 | [L. Open-source ecosystem](#l-open-source-ecosystem) | Repository, license, security policy **Working**; the rest **Planned** | [Development](../development/README.md) |
 
-"Inherited CLI" means the MCO command-line runtime that remains in this repository. It runs from a terminal, is not connected to the desktop application, and is not governed by Ordelis's own safety design.
+"Inherited CLI" means the MCO command-line runtime that remains in this repository: `mco run`, `review`, `session`, `doctor` and `agent`. Commands marked "added since the fork" are the `mco context` commands, whose code (`runtime/vault_context.py`, `runtime/synapse_plan.py`, `runtime/codex_capabilities.py`) did not exist at the fork base. Both kinds run from a terminal and **neither is connected to the desktop application**. Inherited commands are also not governed by Ordelis's own safety design. See [provenance in Terminology](terminology.md#provenance).
 
 ## A. Workspace and projects
 
@@ -39,9 +39,15 @@ Nothing here is a release commitment, a delivery date or a version number.
 
 **Today**
 
-- *Prototype.* Home (with a task composer), Projects, Sessions, Context, Agents and Settings, all over invented sample data and marked as such. Pages switch with `⌘`/Ctrl plus 1 to 6. The Context page searches sample notes. The interface is dark only.
+- *Prototype.* Home (with a task composer), Projects, Sessions and Context show invented sample data and say so. The Agents page lists agent CLIs but runs no check, so every capability reads "unknown". In Settings, the Runtime tab shows the runtime's answer to one fixed identity query in development builds, and an "unavailable" state in release builds. Pages switch with `⌘` or Ctrl plus 1 to 6: the interface accepts either key on every system and shows both labels, and does not detect the operating system. The Context page searches sample notes. The interface is dark only.
 - *Foundation.* A Rust registry that lets the user pick a folder through a native panel and remembers it, with list, add, remove and reset commands. macOS only, and no interface calls it yet. See [local project registration](../implementation/desktop-local-projects.md).
 - *Planned.* Git awareness, real task history, project configuration, light theme, and Windows and Linux conventions.
+
+**Constraints, security and open questions**
+
+- *Constraints.* Everything stays local. A project enters the workspace only when the user picks its folder; Ordelis does not scan the disk for projects. Registration exists only on macOS so far.
+- *Security.* Registering a project is a bookmark. It grants no access to the folder's contents and authorizes nothing, and no path is ever taken from the interface. Repository names, branch names and commit messages are untrusted text and are rendered as text. Reading repository state must not run repository code, and Git hooks and configuration are the risk to design around (see [Worktrees](../architecture/worktrees.md#security-implications)).
+- *Open questions.* Where project-specific configuration lives and how it stays out of the repository; whether several repositories form one project or several; how registration is designed for Windows and Linux, where the macOS protections do not translate directly ([Cross-platform](../architecture/cross-platform.md)).
 
 ## B. Agent integrations
 
@@ -59,7 +65,7 @@ Providers do not expose the same capabilities. Ordelis does not assume they do.
 **Today**
 
 - *Working, inherited CLI.* Built-in adapters, including Claude Code, Codex CLI and OpenCode, and a way to configure additional agents. `mco doctor` checks installation and authentication readiness, and `mco agent list`, `check` and `models` inspect agents. See the [provider reference](../reference/providers.md), whose adapter count is out of date; the [MVP plan](../implementation/synapse-mvp-plan.md#inherited-capability-audit) treats the source registry as authoritative.
-- *Foundation.* An explicit Codex inspection that records version and advertised options without running a task: [guide](../guides/codex-cli-capability-inspection.md).
+- *Working, command line, added since the fork.* `mco context inspect-codex` runs only `--version` and help commands against Codex and records the version and advertised options, with no task and no model call: [guide](../guides/codex-cli-capability-inspection.md).
 - *Not present.* A Kimi adapter. Two options are documented and neither is validated: the [Kimi decision gate](../implementation/synapse-mvp-plan.md#kimi-integration-decision-gate).
 - *Prototype.* The Agents page states that nothing was checked and shows every fact as unknown.
 
@@ -77,7 +83,7 @@ Providers do not expose the same capabilities. Ordelis does not assume they do.
 **Today**
 
 - *Prototype.* The task composer and a task preview page. "Preview task" changes nothing.
-- *Foundation.* `mco context plan` produces one deterministic, private, non-dispatching plan from a task, selected context and policy, and reports unknown settings as unknown. It is not stage decomposition. See the [guide](../guides/private-execution-plan.md).
+- *Working, command line, added since the fork.* `mco context plan` produces one deterministic, private, non-dispatching plan from a task, selected context and policy, and reports unknown settings as unknown. It is not stage decomposition. See the [guide](../guides/private-execution-plan.md).
 - *Planned.* Everything else in this group.
 
 ## D. Orchestration and execution
@@ -128,7 +134,7 @@ No agent merges into the main branch without the user's authorization.
 
 **Today**
 
-- *Working, inherited CLI.* `mco context preview` reads an explicitly given external vault and JSON index and prints bounded excerpts with source paths and truncation flags. It never modifies the vault and starts no agent. See the [guide](../guides/vault-context-preview.md).
+- *Working, command line, added since the fork.* `mco context preview` reads an explicitly given external vault and JSON index and prints bounded excerpts with source paths and truncation flags. It never modifies the vault and starts no agent. See the [guide](../guides/vault-context-preview.md).
 - *Foundation.* A mock-only bridge that hands selected excerpts to a fake agent in tests.
 - *Prototype.* The Context page: searchable sample notes, provenance and a shared selection.
 - *Planned.* Context packages, file scoping, session history as context.
@@ -145,7 +151,7 @@ No agent merges into the main branch without the user's authorization.
 
 **Today**
 
-- *Working, inherited CLI.* `mco session` starts, lists, sends to, stops, resumes and shows the history of persistent agent sessions. By default it stores them inside the repository, which is unsuitable for private state, and it uses a Unix-domain socket whose behavior on Windows is unverified. An open issue, [#23](https://github.com/RaioViajante/ordelis/issues/23), concerns a readiness race when a session starts or resumes.
+- *Working, inherited CLI.* `mco session` starts, lists, sends to, stops, resumes and shows the history of persistent agent sessions. By default it stores them inside the repository, which is unsuitable for private state, and it uses a Unix-domain socket whose behavior on Windows is unverified. Issue [#23](https://github.com/RaioViajante/ordelis/issues/23) concerns a readiness race when a session starts or resumes.
 - *Prototype.* The Sessions page and a session detail view over sample data.
 - *Planned.* Task-to-session relations, handoffs, and cross-provider continuity. Existing sessions are provider sessions, not a shared memory.
 
@@ -228,3 +234,9 @@ Intended platforms are not tested platforms. See [Cross-platform](../architectur
 - *Planned.* Ordelis release notes, once releases exist.
 
 Not planned: a plugin marketplace, cloud synchronization, or other product features that have not been approved.
+
+**Constraints, security and open questions**
+
+- *Constraints.* The project has one maintainer today, so independent review is a process the maintainer arranges rather than something the repository enforces; branch protection and required code-owner review have not been verified as available. The MIT license and the upstream MCO attribution must be preserved ([provenance](../migration/ordelis.md#provenance-and-attribution)). No release exists, and the [roadmap](roadmap.md#what-gates-a-first-release) lists what gates the first one.
+- *Security.* Vulnerabilities are reported privately, never in public issues ([security policy](../../SECURITY.md)). Contributions must not carry credentials, provider homes, transcripts or private design exports ([hygiene guide](../guides/probe-artifact-hygiene.md)). A provider integration runs with the user's authority, so a third-party adapter is code that needs review, and no extension mechanism may bypass the safety gate or the permission boundary.
+- *Open questions.* What a stable adapter contract looks like and how outside adapters would be vetted; whether a dedicated `CONTRIBUTING.md` is wanted beside the [development guide](../development/README.md); the format of release notes once releases exist.

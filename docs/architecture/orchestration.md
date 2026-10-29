@@ -58,7 +58,7 @@ Orchestration decides *what* and *when*. It does not run processes, and it does 
 
 ## Current implementation
 
-- *Foundation.* [`mco context plan`](../guides/private-execution-plan.md) builds one deterministic, non-dispatching plan from a task, selected context and policy. It marks settings it cannot verify as unknown and blocks on required unknowns. It has one step, not stages.
+- *Working, command line, added since the fork.* [`mco context plan`](../guides/private-execution-plan.md) builds one deterministic, non-dispatching plan from a task, selected context and policy. It marks settings it cannot verify as unknown and blocks on required unknowns. It has one step, not stages.
 - *Working, inherited CLI.* Coordination by explicit user choice: `--chain` runs agents in sequence passing complete earlier answers through files; `--divide` splits scope between agents; `--debate` and `--synthesize` add read-only stages. These arrange prompts and scope. They do not plan, and they have no approval step. See the [workflow guide](../guides/workflows.md).
 - *Prototype.* A task composer and a task preview in the desktop, over sample data.
 - *Not present.* Plan generation, decomposition, dependency handling, replanning, approval.
