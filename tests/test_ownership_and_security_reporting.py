@@ -102,8 +102,8 @@ def security_policy_violations(text: str) -> list[str]:
         found.append("must not promise a response time")
     if re.search(r"[\w.+-]+@[\w-]+\.[\w.-]+", text):
         found.append("must not publish a contact address that has not been established")
-    if "sec1" in lowered:
-        found.append("must not refer to internal incident tracking")
+    if re.search(r"\bsec\d+\b", lowered):
+        found.append("must not refer to internal incident identifiers")
     return found
 
 
@@ -216,7 +216,7 @@ class RepositoryConfigurationRegressionTests(unittest.TestCase):
             ("## Supported versions", "## Versions", "supported-version policy"),
             ("No response or fix time is guaranteed.", "We respond within 48 hours.", "response time"),
             ("No response or fix time is guaranteed.", "Email security@example.org for help.", "contact address"),
-            ("No response or fix time is guaranteed.", "See SEC1 for details.", "incident tracking"),
+            ("No response or fix time is guaranteed.", "See SEC9 for details.", "incident identifiers"),
         )
         for old, new, needle in cases:
             with self.subTest(needle=needle):
