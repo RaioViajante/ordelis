@@ -1,6 +1,6 @@
 # Contributing to Ordelis
 
-Thank you for your interest in Ordelis. Bug reports, documentation fixes, ideas and code are all welcome. This page covers the essentials; the [development guide](docs/development/README.md) has the detail.
+Thank you for your interest in Ordelis. Bug reports, documentation fixes, ideas and code are all welcome. This page covers the essentials; the [development guide](docs/development/README.md) has the detail. Everyone taking part is expected to follow the [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## What the project is today
 
@@ -27,7 +27,7 @@ Ordelis is maintained on a best-effort basis, so replies may take time.
 The [development guide](docs/development/README.md) covers the repository layout and every check: the Python runtime (Python 3.10+), the Node wrapper, the desktop frontend (Node 22+, pnpm) and the desktop native code (stable Rust). The [desktop commands](desktop/README.md#commands) are in its README.
 
 - Run the checks for the parts you changed. A documentation-only change needs no build, but its links should resolve.
-- You do not need to run every platform's build. CI runs the Python checks on every pull request and the desktop checks when desktop files change. The desktop has so far been built and run only on macOS.
+- You do not need to run every platform's build. CI runs the Python checks on every pull request and the desktop checks when desktop or runtime files change. The desktop has so far been built and run only on macOS.
 - For a bug fix, add a test that fails before the fix and passes after it. If a test was already failing before your change, say so in the pull request.
 
 ## Pull requests
@@ -60,7 +60,7 @@ Some rules are enforced by tests and are not style preferences. The full list is
 
 ## Report a security vulnerability
 
-Do not open a public issue, pull request or discussion for a vulnerability. Report it privately as described in [SECURITY.md](SECURITY.md).
+Do not open a public issue, pull request or discussion for a vulnerability. Report it privately as described in [SECURITY.md](SECURITY.md). Conduct concerns are reported separately, to the private address in the [Code of Conduct](CODE_OF_CONDUCT.md), not through the security process.
 
 ## MCO provenance and compatibility
 

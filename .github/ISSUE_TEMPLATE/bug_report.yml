@@ -37,14 +37,14 @@ body:
   - type: textarea
     id: reproduction
     attributes:
-      label: Steps to reproduce
-      description: Exact commands or actions, in order. Say if it happens every time.
+      label: Steps to reproduce (optional)
+      description: If you can, the exact commands or actions, in order, and whether it happens every time.
       placeholder: |
         1.
         2.
         3.
     validations:
-      required: true
+      required: false
 
   - type: textarea
     id: environment

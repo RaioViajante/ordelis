@@ -10,6 +10,10 @@ Start with the [documentation index](docs/README.md). For building the project a
 
 If you think you found a vulnerability, **do not open an issue of any kind**. Follow [SECURITY.md](SECURITY.md) to report it privately. This includes anything involving credentials, the execution safety gate or the desktop's native boundary.
 
+## Conduct concerns
+
+To report behavior that goes against the [Code of Conduct](CODE_OF_CONDUCT.md), follow it to report privately. Do not use a public issue, and do not use the security process, which is only for vulnerabilities.
+
 ## Using GitHub issues
 
 GitHub issues are the place for everything else. Search the [existing issues](https://github.com/RaioViajante/ordelis/issues) first.
