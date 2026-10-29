@@ -1,3 +1,8 @@
+> **Inherited upstream documentation: this describes MCO, not Ordelis.**
+> This is the Chinese README of the upstream [MCO](https://github.com/mco-org/mco) project, archived for provenance and attribution. It is unchanged apart from this notice and the link corrections listed in the [archive index](./README.md). Ordelis is a separate early-development project derived from MCO. It has no release, no installer and no Chinese translation yet, and `npx @tt-a1i/mco` installs upstream's package, **not Ordelis**. For Ordelis, see the [repository README](../../../README.md).
+>
+> 本文是上游 MCO 项目的中文 README，仅为保留来源与署名而归档，描述的是 MCO，而不是 Ordelis。Ordelis 目前处于早期开发阶段，没有发布版本，也没有可安装的软件包；下文中的 `npx @tt-a1i/mco` 安装的是上游的软件包，不是 Ordelis。
+
 <p align="center">
   <img src="https://raw.githubusercontent.com/mco-org/mco/main/docs/assets/brand/mco-cover-starry.jpg" alt="MCO——十条 Agent 路径在星空下汇聚穿过宏伟的 M" width="100%" />
 </p>
@@ -10,11 +15,11 @@
   <a href="https://www.npmjs.com/package/@tt-a1i/mco"><img src="https://img.shields.io/npm/v/@tt-a1i/mco?style=flat-square&color=cb3837&logo=npm&logoColor=white" alt="npm version" /></a>
   <a href="https://www.npmjs.com/package/@tt-a1i/mco"><img src="https://img.shields.io/npm/dm/@tt-a1i/mco?style=flat-square&color=cb3837" alt="npm downloads" /></a>
   <a href="https://github.com/mco-org/mco/stargazers"><img src="https://img.shields.io/github/stars/mco-org/mco?style=flat-square&color=f59e0b" alt="GitHub stars" /></a>
-  <a href="./LICENSE"><img src="https://img.shields.io/badge/License-MIT-22c55e?style=flat-square" alt="MIT License" /></a>
+  <a href="../../../LICENSE"><img src="https://img.shields.io/badge/License-MIT-22c55e?style=flat-square" alt="MIT License" /></a>
   <img src="https://img.shields.io/badge/Python-3.10%2B-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python 3.10+" />
 </p>
 
-<p align="center"><a href="./README.md">English</a> · 简体中文</p>
+<p align="center"><a href="https://github.com/mco-org/mco/blob/main/README.md">English</a> · 简体中文</p>
 
 MCO 是一个轻量、CLI 优先的 AI Coding Agent 编排层。把同一个任务交给你明确选择的 Agent 和模型，并行执行，比较原始回答，再决定下一步。
 
@@ -131,7 +136,7 @@ MCO 会把统一执行档位转换成各 Provider 的原生参数：
 - ACP terminal 属于可信 Agent 能力；不可信 Agent 或提示词应在隔离环境中运行。
 - MCO 不创建或管理 worktree。用户显式选择并行写入时，应通过不重叠的 `--target-paths` 划分范围，并提前提示编辑冲突风险。
 
-完整映射见 [Provider 与权限参考](./docs/reference/providers.md)。
+完整映射见 [Provider 与权限参考](../../reference/providers.md)。
 
 ## 由其他 Agent 调用 MCO
 
@@ -172,15 +177,15 @@ Provider 进程统一封装在适配器契约后：detect、run、poll、cancel�
 
 | 主题 | 文档 |
 |------|------|
-| 安装、首次运行和常见工作流 | [工作流指南](./docs/guides/workflows.md) |
-| Provider、模型与权限映射 | [Provider 参考](./docs/reference/providers.md) |
-| CLI 参数、输出、产物与退出码 | [CLI 参考](./docs/reference/cli.md) |
-| 配置文件与自定义 Agent | [配置参考](./docs/reference/configuration.md) |
-| 机器可读错误契约 | [错误契约](./docs/contracts/errors-v0.1.x.md) |
-| Invocation 与 artifact 契约 | [Invocation 契约](./docs/contracts/invocation-runtime-v1.md) |
-| Provider 权限契约 | [权限契约](./docs/contracts/provider-permissions-v0.1.x.md) |
+| 安装、首次运行和常见工作流 | [工作流指南](../../guides/workflows.md) |
+| Provider、模型与权限映射 | [Provider 参考](../../reference/providers.md) |
+| CLI 参数、输出、产物与退出码 | [CLI 参考](../../reference/cli.md) |
+| 配置文件与自定义 Agent | [配置参考](../../reference/configuration.md) |
+| 机器可读错误契约 | [错误契约](../../contracts/errors-v0.1.x.md) |
+| Invocation 与 artifact 契约 | [Invocation 契约](../../contracts/invocation-runtime-v1.md) |
+| Provider 权限契约 | [权限契约](../../contracts/provider-permissions-v0.1.x.md) |
 | 发布流程 | [RELEASING.md](./RELEASING.md) |
-| 版本历史 | [CHANGELOG.md](./CHANGELOG.md) |
+| 版本历史 | [CHANGELOG.md](../../../CHANGELOG.md) |
 
 运行 `mco <command> --help` 查看当前安装版本的权威参数列表。
 
@@ -196,4 +201,4 @@ npm test
 
 ## 许可证
 
-MIT — 见 [LICENSE](./LICENSE)。
+MIT — 见 [LICENSE](../../../LICENSE)。

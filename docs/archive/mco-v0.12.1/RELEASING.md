@@ -1,3 +1,6 @@
+> **Inherited MCO document, kept for provenance only. Do not use it to release Ordelis.**
+> This is the upstream MCO guide for publishing `@tt-a1i/mco` to npm, archived unchanged apart from this notice. Ordelis has no approved release and no published installation package, and its publication workflow is disabled by a guard. For the current status, see the root [RELEASING.md](../../../RELEASING.md).
+
 # Releasing MCO
 
 > **Not applicable to this repository.** This guide is inherited from MCO and describes
