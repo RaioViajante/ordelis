@@ -1,10 +1,34 @@
 # Ordelis migration: decision record
 
-**Status:** accepted direction, nothing implemented. This document is documentation only. It records what was decided, what was verified, and what must happen before each later change. It does not rename anything. **One item is time-sensitive and is not part of the migration sequence: [SEC1](#security-exposure-probe-artifacts-in-public-git-history-sec1), an assessment of a possible security exposure in this public repository's git history.**
+**Status:** accepted direction, partly implemented. This document is documentation only; the [current status](#current-status) lists what has been done. It records what was decided, what was verified, and what must happen before each later change. **One item is time-sensitive and is not part of the migration sequence: [SEC1](#security-exposure-probe-artifacts-in-public-git-history-sec1), the assessment of a possible security exposure in this public repository's git history. It was assessed on 2026-10-28 and is tracked as mitigated according to the maintainer's report, with confidential closure documentation pending.**
 
-**Scope of the migration:** the product currently named **Synapse** (a fork of [MCO](https://github.com/mco-org/mco)) becomes **Ordelis** (`ordelis.app`). Brand styling: `ordelis` as the visual wordmark, `Ordelis` in prose. This record covers the repository, desktop app, build metadata, ownership and release hygiene, and the planned website. It deliberately does not rename inherited MCO interfaces.
+**Scope of the migration:** the product developed as **Synapse** (a fork of [MCO](https://github.com/mco-org/mco)) becomes **Ordelis** (`ordelis.app`). The repository has been renamed to `ordelis`; the application, packages and interface text keep the old name until N1 and the I-series PRs. Brand styling: `ordelis` as the visual wordmark, `Ordelis` in prose. This record covers the repository, desktop app, build metadata, ownership and release hygiene, and the planned website. It deliberately does not rename inherited MCO interfaces.
 
-Contents: [Accepted decisions](#accepted-decisions) · [Safety invariants](#safety-invariants) · [Security exposure (SEC1)](#security-exposure-probe-artifacts-in-public-git-history-sec1) · [Provenance](#provenance-and-attribution) · [Identifier matrix](#identifier-migration-matrix) · [Registry migration](#registry-migration-semantics-i2) · [Evidence provenance](#evidence-provenance) · [Platform assumptions](#platform-assumptions) · [Visibility](#repository-visibility-evaluation) · [Rename runbook](#repository-rename-runbook-prepared-not-executed) · [Prerequisites](#outstanding-prerequisites) · [Risk register](#risk-register) · [PR roadmap](#pr-roadmap)
+Contents: [Current status](#current-status) · [Accepted decisions](#accepted-decisions) · [Safety invariants](#safety-invariants) · [Security exposure (SEC1)](#security-exposure-probe-artifacts-in-public-git-history-sec1) · [Provenance](#provenance-and-attribution) · [Identifier matrix](#identifier-migration-matrix) · [Registry migration](#registry-migration-semantics-i2) · [Evidence provenance](#evidence-provenance) · [Platform assumptions](#platform-assumptions) · [Visibility](#repository-visibility-evaluation) · [Rename runbook and execution record](#repository-rename-runbook-and-execution-record) · [Prerequisites](#outstanding-prerequisites) · [Risk register](#risk-register) · [PR roadmap](#pr-roadmap)
+
+## Current status
+
+As of 2026-10-29. The rest of this document keeps the decisions, findings and plans as they were written, so a "Finding" column or a "prepared, not executed" label describes the state at that time. **This table is the current state.**
+
+| ID | Status | Evidence |
+| --- | --- | --- |
+| **B1** | Done | Pull request #52 (merge commit `430ba6b`): this record. |
+| **H1** | Done | Issue #53, pull request #54 (merge `8ad568f`). The inherited npm publish workflow cannot reach its publish job, the root package is `private`, and a test fails if any workflow can publish to npm. Follow-ups needed before the first real GitHub Release are tracked in issue #56. |
+| **H2** | Done | Issue #55, pull request #57 (merge `a420a55`). `CODEOWNERS` names `@RaioViajante` (GitHub's validator reports 0 errors; it reported 5 before). `SECURITY.md` was introduced. The issue-template security link no longer points at an upstream project. The maintainer enabled private vulnerability reporting before the merge. |
+| **R2** | Done on 2026-10-29 | The existing repository was renamed from `RaioViajante/synapse` to `RaioViajante/ordelis` (same repository id; no repository was created). See the [execution record](#repository-rename-runbook-and-execution-record). |
+| **H3** | In progress | Issue #58: the canonical security URL, a private-first `SECURITY.md`, behavior-based security tests, and this status update. |
+| **R1** | Not done | Visibility is unchanged: the repository is public. |
+| **SEC1** | Assessed; mitigated according to the maintainer's report | Assessed on 2026-10-28. The maintainer reports that the exposure is mitigated and that the responsible party has been contacted. This record has not verified that independently. Confidential closure documentation (contact date, confirmation status, residual risk) is pending, and the historical exposure in Git history is unchanged. The release and publication gate described in the SEC1 section is unchanged until that documentation exists. |
+| **N1, I1, I2** | Not started | |
+| **W1 onward, U1 onward, P1 onward** | Not started | |
+
+**Security reporting today.**
+- Private vulnerability reporting is enabled for the repository.
+- The canonical security URL is `https://github.com/RaioViajante/ordelis/security/policy`. The issue-template link uses it from H3 onward.
+- `SECURITY.md` makes private reporting the primary route, promises no response time, and says the project is not production-ready.
+- `CODEOWNERS` routes review requests to `@RaioViajante`. It does not enforce reviews: no branch protection or required review is configured.
+
+**Repository metadata.** The description is "A local-first, open-source workspace for orchestrating AI coding agents." The ten topics were already set. The homepage field was already `https://ordelis.app` before the rename; nothing about the website is deployed or connected.
 
 ## Accepted decisions
 
@@ -12,7 +36,7 @@ Contents: [Accepted decisions](#accepted-decisions) · [Safety invariants](#safe
 | --- | --- |
 | D1 | **Structure.** Keep `desktop/` and `runtime/` in place and add `web/` beside them. No `apps/`, no Turborepo or Nx, no root pnpm workspace for structural symmetry. Lockfiles stay independent: the root is an npm package, `desktop/` has its own `pnpm-lock.yaml`, and `web/` will have its own. |
 | D2 | **Single monorepo.** Temporarily making the repository private during development is being evaluated (see [Repository visibility](#repository-visibility-evaluation)). Until a visibility change is separately authorized and executed, private website exports and other private design assets are not committed to this repository, including on pull-request branches. Any strategy that departs from a single monorepo (for example, keeping private work in a separate repository) is **not** pre-approved: it requires an explicit, recorded amendment to this decision first. |
-| D3 | **Rename.** Destination `RaioViajante/ordelis`, under the existing personal account. No new organization. Full history, issues, pull requests and attribution are preserved. The procedure is [prepared](#repository-rename-runbook-prepared-not-executed) and is not executed without explicit authorization. |
+| D3 | **Rename.** Destination `RaioViajante/ordelis`, under the existing personal account. No new organization. Full history, issues, pull requests and attribution are preserved. The procedure is [prepared](#repository-rename-runbook-and-execution-record) and is not executed without explicit authorization. |
 | D4 | **Bundle identifier.** Proposed `app.ordelis.desktop`, subject to the verification below. The existing local project registry is preserved through a separately tested migration or a documented safe fallback. Trust-origin values and other security-sensitive identifiers are not renamed as part of branding. |
 | D5 | **Design sources.** The newer web export directories (`projeto/`, `preview/`, `imagens/`, `fonte/`) are the provisional canonical website sources. The desktop export is the visual reference for the Tauri application. The two exports are not merged, and prototype HTML is not production code. A final consistency check against the approved design precedes implementation. |
 | D6 | **Design system and fonts.** Preserve the approved palette, symbol, typography and identity. The desktop app uses a system-native font stack with cross-platform fallbacks; JetBrains Mono for code and terminals. No Apple-proprietary font files are distributed. An approved vector master of the symbol is required before final application and installer icons are generated. |
@@ -44,7 +68,9 @@ These hold for every change in this migration.
 
 ## Security exposure: probe artifacts in public git history (SEC1)
 
-**Status: open and unassessed. This is a current exposure question, not a future pre-publication concern.** The repository is **public today** (read on 2026-10-28), so its entire history is available to anyone now.
+**Status (2026-10-29): assessed; mitigated according to the maintainer's report; confidential closure documentation pending.** The historical exposure in Git history is unchanged, and the repository is **public today** (read on 2026-10-28), so its entire history is available to anyone now.
+
+The rest of this section is the policy as written before the assessment. Where it says "unassessed", "open" or "unknown", read the state on 2026-10-28; the [current status](#current-status) is authoritative. No detail of the assessment appears in this document.
 
 **What is known (metadata only).** This record's author did not open, scan or print the contents of any of these files, and this document deliberately names no file, path, hash or value for them.
 
@@ -168,7 +194,7 @@ Each identifier is **Rename**, **Preserve**, **Migrate** (rename with backward c
 
 ### Security-reporting and ownership facts checked for this record
 
-Checked against GitHub's documentation and read-only API queries. "Not established" means the pages read do not say, so no definite claim is made.
+Checked against GitHub's documentation and read-only API queries. "Not established" means the pages read do not say, so no definite claim is made. These are the facts as checked on 2026-10-28; private vulnerability reporting has since been enabled and `SECURITY.md` introduced (see the [current status](#current-status)).
 
 | Fact | Evidence | Status |
 | --- | --- | --- |
@@ -336,7 +362,7 @@ Before authorizing, the maintainer should confirm: the GitHub plan; the Actions 
 
 SEC1 is independent of this decision and does not wait for it. Until then, the roadmap blocks `web/` and the desktop redesign (anything derived from the private designs), and allows only changes that contain no private material.
 
-## Repository rename runbook (prepared, not executed)
+## Repository rename runbook and execution record
 
 Destination `RaioViajante/ordelis`. Reference: [GitHub: renaming a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/renaming-a-repository).
 
@@ -387,6 +413,18 @@ Text that earlier bot comments wrote with the old name stays as history and need
 
 **Rollback:** rename back in Settings. Redirects follow the rename in either direction, but any links created under the new name need updating, and the post-rename checks are repeated. No data is deleted by a rename. If a repository named `synapse` is created by accident, treat it as an incident: it breaks the redirect.
 
+### Execution record (R2)
+
+The runbook above was executed on 2026-10-29 (about 02:52 UTC) with a REST update of the existing repository's name. The measurements below were taken by the record's author and have not been independently reproduced.
+
+- **Before the rename**, these were verified: repository identity, `main` (`a420a55`), a clean working tree, no active workflow runs, no open pull requests, a free destination name, CODEOWNERS (0 errors), private vulnerability reporting, `SECURITY.md` and the security link. A baseline of settings, permissions, labels, issues, pull requests and every ref was recorded.
+- **After the rename**, the same inventory was regenerated and compared. Everything is identical (28 issues, 27 pull requests, 12 branches, 27 pull-request refs, 0 tags, 0 releases, settings, permissions, labels), apart from the repository description, which was then changed on request. `main` is still `a420a55`, and no commit was created.
+- **Local remote:** `origin` was switched to the new name, keeping the same protocol and host alias.
+- **Redirects that are reliable:** the repository, pull requests, commits, trees, labels, and Git over SSH and HTTPS. The old security-policy link followed one redirect to a 200 in 24 of 24 samples, with the policy content arriving every time.
+- **Old-name issue URLs depend on the client.** For browser-like requests, 30 of 30 redirected to the same issue number in each of the last two of three measured rounds (29 of 30 in the first). For a plain HTTP client (`Accept: */*`), only 4 to 7 of 30 did, and the failing set changed between rounds. The failing response is a bare text 404 from GitHub, and its cause is not documented.
+- **Decision:** historical links to old-name issues are **not** rewritten. Browsers, which is how the rendered documents are read, are served correctly. No link checker exists in this repository. The behavior for plain clients is unexplained and may be temporary. A rewrite needs a separate justification, for example a persistent failure in browsers or the introduction of a link checker.
+- **Documentation URL audit:** 18 occurrences in 12 files before H3, as expected (15 historical issue links in 10 `docs/implementation/*.md` files, the `config.yml` link and two test anchors). After H3 the `config.yml` link and the test anchors no longer use the old name, so the only old-name references left are the 15 historical issue links (count them with `raioviajante[/:]synapse`). The broad owner-name pattern above now also matches new-name URLs, such as the canonical security URL and the maintainer profile link in `SECURITY.md`, so it is no longer a measure of old-name references.
+
 ## Outstanding prerequisites
 
 These are recorded, **not** assumed complete.
@@ -428,7 +466,7 @@ These are recorded, **not** assumed complete.
 | 17 | The registry import restores projects the user deliberately removed, or fails to import because of a lock-only directory | Medium | Medium | Precedence keyed only on `projects.json` and `projects.json.corrupt-*`; the decisive check runs under the lock; a test for each remove, reset, lock-only and concurrency sequence | I2 |
 | 18 | A blind find-and-replace changes sample data, test inputs or security vocabulary | Medium | High | The identifier matrix classifies each site; N1 ends with a grep audit against an explicit allowlist of preserved items | N1, I1 |
 | 19 | A source-based platform expectation is mistaken for build evidence (this record's first revision did exactly that for Windows) | Medium | Medium | The evidence ledger; the first P1 step adds Windows and Linux compile jobs and replaces expectations with results | P1 |
-| 20 | **Probe artifacts in this public repository's git history may expose credentials or sensitive environment data** (Sets A to C in SEC1). Upstream's public history carries the same objects. | Unknown: not assessed | **High until assessed** | **SEC1.** Contain now (no copying or public discussion of the artifacts, no public issue). Assess promptly in a private, full-history review. Revoke or rotate every confirmed or reasonably suspected credential through its owner. Send a confidential notice to upstream through its private security channel when warranted, with separate authorization. Owner: the repository maintainer for the assessment; credential owners for rotation. Making the repository private does not contain this. | SEC1 |
+| 20 | **Probe artifacts in this public repository's git history may expose credentials or sensitive environment data** (Sets A to C in SEC1). Upstream's public history carries the same objects. | Unknown: not assessed | **High** at assessment; mitigated according to the maintainer's report, closure documentation pending | **SEC1.** Contain now (no copying or public discussion of the artifacts, no public issue). Assess promptly in a private, full-history review. Revoke or rotate every confirmed or reasonably suspected credential through its owner. Send a confidential notice to upstream through its private security channel when warranted, with separate authorization. Owner: the repository maintainer for the assessment; credential owners for rotation. Making the repository private does not contain this. | SEC1 |
 
 ## PR roadmap
 
@@ -467,3 +505,4 @@ Application changes; renaming any inherited MCO interface; enabling agent execut
 - **Second revision.** Corrections made after a review of the first revision: the Windows compilation statement was replaced by the actual conditional-compilation boundaries and an evidence ledger; the identifier matrix and N1 scope were completed with the CI, test, Rust-string and fixture couplings; the H2 and R2 ordering was resolved by splitting out H3; the rename runbook no longer treats open pull requests as a blocker and gained baseline and post-rename checks; registry migration semantics were specified; visibility, billing and protection claims were qualified, with both CI triggers counted; the privacy prerequisite was reconciled with D2; and attribution was specified as a standalone `NOTICE` plus a README link.
 - **Third revision.** A focused correction after a second review: the registry-import specification no longer contradicts itself (`projects.lock` is not a precedence signal, and eligibility is decided under the lock in a fixed order); lock-only and concurrency tests were added to I2; the identifier matrix now names every tracked file that mentions `synapse`; the origin table is complete by status and records the 26 files removed from tracking; the runbook's documentation step now matches where repository URLs actually are, with a concrete audit; and every measured figure is attributed in a new Evidence provenance section.
 - **Fourth revision.** A final narrowly scoped correction after a third review: a new SEC1 section and risk-register entry track the probe artifacts in public history as a current exposure, with containment, assessment, rotation and confidential-notification expectations and no sensitive detail; the registry text now gives the actual lock ordering, the real sources of a lock-only directory, and states that an existing `projects.json` is authoritative even when its project list is empty; the matrix covers `docs/README.md` and the registry design record and fixes the fixture-comment rows; the documentation URL audit is case-insensitive and covers SSH-style forms; the origin table lists the remaining inherited files; and the possible split of N1 is recorded.
+- **Fifth revision (H3).** Brought the record up to date after H1, H2 and the rename: a current-status section, the SEC1 status line (assessed, mitigated according to the maintainer's report, closure documentation pending, no sensitive detail), and an execution record for the rename, including the old-name issue redirect measurements and the decision not to rewrite historical links. No decision, plan or gate was changed.
