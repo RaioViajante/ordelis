@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3.10+, subprocess (git CLI), existing unittest framework.
 
-**Spec:** `docs/superpowers/specs/2026-03-16-diff-only-review-design.md`
+**Spec:** `docs/archive/phase-2026-03/specs/2026-03-16-diff-only-review-design.md`
 
 ---
 
