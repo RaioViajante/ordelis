@@ -1,5 +1,6 @@
 blank_issues_enabled: false
 contact_links:
   - name: Security disclosure
-    url: https://github.com/tt-a1i/mco/security/advisories/new
-    about: Please report security vulnerabilities privately.
+    # Re-verify this URL after the repository is renamed (H3 in docs/migration/ordelis.md).
+    url: https://github.com/RaioViajante/synapse/security/policy
+    about: Please read the security policy and report vulnerabilities privately. Do not open a public issue.

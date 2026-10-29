@@ -1,8 +1,10 @@
-# Default owner for all files.
-* @tt-a1i
+# Ordelis maintainer: default owner for all files.
+# Code ownership here only routes reviews. The inherited MCO code and history are by
+# the MCO maintainers and are credited in LICENSE.
+* @RaioViajante
 
 # Runtime and adapter core ownership.
-/runtime/ @tt-a1i
-/tests/ @tt-a1i
-/scripts/ @tt-a1i
-/docs/ @tt-a1i
+/runtime/ @RaioViajante
+/tests/ @RaioViajante
+/scripts/ @RaioViajante
+/docs/ @RaioViajante
