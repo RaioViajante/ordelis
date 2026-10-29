@@ -1,25 +1,48 @@
 name: Bug report
-description: Report a defect in runtime, adapters, scripts, or CI workflows.
+description: Report something that is broken or a documentation error.
 title: "[Bug] "
 labels:
   - bug
 body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Ordelis is in early development and maintained on a best-effort basis; see [SUPPORT.md](https://github.com/RaioViajante/ordelis/blob/main/SUPPORT.md).
+
+        **Do not report security vulnerabilities here.** Use the private route in the [security policy](https://github.com/RaioViajante/ordelis/security/policy).
+
+        **Do not paste** credentials, tokens, raw agent transcripts, provider output, shell snapshots, personal file paths or other sensitive data. Describe or redact them.
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - Desktop app
+        - Runtime / agent integrations (the `mco` command and `runtime/`)
+        - Documentation
+        - Build / CI
+        - Other / not sure
+    validations:
+      required: true
+
   - type: textarea
     id: summary
     attributes:
-      label: Summary
-      description: What happened and what should have happened?
+      label: What happened, and what did you expect?
+      description: For a documentation error, name the page and what is wrong or unclear.
     validations:
       required: true
 
   - type: textarea
     id: reproduction
     attributes:
-      label: Reproduction Steps
-      description: Provide exact commands and inputs.
+      label: Steps to reproduce
+      description: Exact commands or actions, in order. Say if it happens every time.
       placeholder: |
-        1. ./mco review --config ...
-        2. ...
+        1.
+        2.
+        3.
     validations:
       required: true
 
@@ -27,35 +50,27 @@ body:
     id: environment
     attributes:
       label: Environment
-      description: OS, Python, provider CLI versions, auth status.
+      description: Operating system and the commit or branch you used. Add tool versions (Python, Node, Rust) only if they could matter.
       placeholder: |
         - OS:
-        - Python:
-        - claude:
-        - codex:
-        - gemini:
-        - opencode:
-        - qwen:
+        - Commit or branch:
     validations:
       required: true
 
   - type: textarea
-    id: artifacts
+    id: evidence
     attributes:
-      label: Relevant Artifacts
-      description: Paste file paths or excerpts from run artifacts.
-      placeholder: |
-        reports/review/<task_id>/run.json
-        reports/adapter-contract/<date>/runtime-gh-report.md
+      label: Logs or screenshots (optional)
+      description: Short, redacted excerpts only.
     validations:
       required: false
 
   - type: checkboxes
     id: checks
     attributes:
-      label: Pre-check
+      label: Before submitting
       options:
-        - label: I have run `./scripts/run_runtime_gate_tests.sh`.
-          required: false
-        - label: I have verified provider auth and CLI availability.
-          required: false
+        - label: I searched the existing issues.
+          required: true
+        - label: This is not a security vulnerability, and I removed credentials, tokens, transcripts and personal paths.
+          required: true
