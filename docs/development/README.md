@@ -1,6 +1,6 @@
 # Contributing and development
 
-**Status:** guide. Commands are taken from the repository's CI workflows, `RELEASING.md`, the pull request template and the desktop README. The short contributor entry point is [CONTRIBUTING.md](../../CONTRIBUTING.md); this guide holds the detail.
+**Status:** guide. Commands are taken from the repository's CI workflows, the pull request template and the desktop README. The short contributor entry point is [CONTRIBUTING.md](../../CONTRIBUTING.md); this guide holds the detail.
 **Scope:** how to get oriented in the repository, run the checks, and make a change that fits. It does not describe the product; see [Architecture](../architecture/overview.md) for that.
 **Related:** [Desktop README](../../desktop/README.md) · [Security policy](../../SECURITY.md) · [Execution safety gate](../implementation/execution-safety-gate.md) · [Migration record](../migration/ordelis.md)
 
@@ -21,7 +21,7 @@
 Much of the root directory is MCO, from which this project began. Its names are intentionally unchanged: the `mco` command, the `runtime` Python package, the npm package name `@tt-a1i/mco`, and the `.mco/` state directory. Do not rename them as part of unrelated work. The [migration record](../migration/ordelis.md#inherited-mco-preserved) explains which identifiers are preserved and why.
 
 - Run the inherited CLI from a checkout with `./mco --help`.
-- **Nothing is published from this repository.** The root package is marked private, a guard blocks npm publication, and a test fails if any workflow can publish. Inherited guides that show `npx @tt-a1i/mco@latest install` refer to the upstream project's package, not to an Ordelis release.
+- **Nothing is published from this repository** (see [RELEASING.md](../../RELEASING.md)). The root package is marked private, a guard blocks npm publication, and a test fails if any workflow can publish. Inherited guides that show `npx @tt-a1i/mco@latest install` refer to the upstream project's package, not to an Ordelis release.
 - Inherited documentation, such as the [workflow guide](../guides/workflows.md), the [CLI reference](../reference/cli.md) and [provider reference](../reference/providers.md), describes MCO and is kept as is.
 
 ## Running the checks
