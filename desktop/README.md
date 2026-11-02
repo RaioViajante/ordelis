@@ -23,4 +23,4 @@ pnpm build                      # production frontend into dist/
 pnpm tauri build --debug --bundles app   # macOS .app under src-tauri/target/debug/bundle
 ```
 
-Keyboard: `⌘1`–`⌘6` (Ctrl on other platforms) switch pages; the rail is reachable with Tab.
+Keyboard: `⌘1`–`⌘6` (Ctrl on other platforms) switch pages in sidebar order (Home, Sessions, Projects, Context, Agents, Settings); the sidebar is reachable with Tab.

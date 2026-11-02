@@ -5,10 +5,6 @@ import { hrefFor, ROUTES, type Location, type RouteId } from "../app/routes";
 import { useWorkspace } from "../app/Workspace";
 import { MOCK_PROJECTS } from "../fixtures/mock";
 
-// The approved order. The keyboard shortcuts (Ctrl/⌘ 1-6) follow ROUTES and are unchanged.
-const BEFORE_TASKS: RouteId[] = ["home"];
-const AFTER_TASKS: RouteId[] = ["sessions", "projects", "context", "agents"];
-
 const label = (id: RouteId) => ROUTES.find((r) => r.id === id)!.label;
 
 function NavLink({ id, current }: { id: RouteId; current: RouteId | undefined }) {
@@ -40,9 +36,7 @@ export function Sidebar({ loc, current, sampleBadge }: { loc: Location; current:
         <span className="side__label">Search</span>
       </Button>
 
-      {BEFORE_TASKS.map((id) => (
-        <NavLink key={id} id={id} current={current} />
-      ))}
+      <NavLink id="home" current={current} />
       <Button variant="bare" className="nav" reason="Tasks and the inbox arrive with task planning. Nothing is waiting on you.">
         {NAV_ICONS.tasks}
         <span className="nav__label">Tasks</span>
@@ -55,8 +49,8 @@ export function Sidebar({ loc, current, sampleBadge }: { loc: Location; current:
           </>
         )}
       </Button>
-      {AFTER_TASKS.map((id) => (
-        <NavLink key={id} id={id} current={current} />
+      {ROUTES.filter((r) => r.id !== "home" && r.id !== "settings").map((r) => (
+        <NavLink key={r.id} id={r.id} current={current} />
       ))}
 
       <div className="side__projects">

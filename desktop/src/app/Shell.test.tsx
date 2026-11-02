@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Button } from "../components/ui";
 import { SampleDataProvider } from "./SampleData";
@@ -39,9 +39,28 @@ describe("navigation", () => {
   it("switches page with Ctrl+number and moves focus to the page", async () => {
     const user = userEvent.setup();
     renderApp();
-    await user.keyboard("{Control>}3{/Control}");
+    await user.keyboard("{Control>}2{/Control}");
     expect(await screen.findByRole("heading", { level: 1, name: "Sessions" })).toBeInTheDocument();
     expect(screen.getByRole("main")).toHaveFocus();
+  });
+
+  it("numbers the shortcuts in sidebar order, and gives the unavailable Tasks entry none", async () => {
+    const user = userEvent.setup();
+    renderApp();
+    const order = ["Home", "Sessions", "Projects", "Context", "Agents", "Settings"];
+    const links = rail()
+      .getAllByRole("link")
+      .map((l) => l.textContent)
+      .filter((t) => order.includes(t ?? ""));
+    expect(links).toEqual(order);
+    for (const [i, name] of order.entries()) {
+      await user.keyboard(`{Control>}${i + 1}{/Control}`);
+      await waitFor(() => expect(rail().getByRole("link", { name })).toHaveAttribute("aria-current", "page"));
+    }
+    expect(within(screen.getByRole("main")).getByRole("heading", { level: 1, name: "Settings" })).toBeInTheDocument();
+    for (const row of screen.getAllByText(/^Go to /)) expect(row.parentElement).toHaveTextContent(/⌘\d · Ctrl\+\d/);
+    expect(screen.getByText("Go to Sessions").parentElement).toHaveTextContent("⌘2");
+    expect(screen.queryByText("Go to Tasks")).not.toBeInTheDocument();
   });
 
   it("ignores unmapped number shortcuts", async () => {
@@ -79,7 +98,7 @@ describe("honesty of mock data", () => {
     await user.click(within(note).getByRole("button", { name: "Hide sample data" }));
     expect(screen.queryByRole("note", { name: "Sample data notice" })).not.toBeInTheDocument();
     expect(screen.queryByText("Move auth to server-side sessions")).not.toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Set up Synapse" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Set up Ordelis" })).toBeInTheDocument();
   });
 
   it("shows no sessions, and nothing running, once sample data is off", async () => {

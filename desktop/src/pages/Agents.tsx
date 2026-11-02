@@ -40,7 +40,7 @@ export function Agents() {
   return (
     <div className="col col--1300">
       <div className="flex flex-wrap items-end gap-5">
-        <PageTitle lede="What each CLI says it can do, and what Synapse has actually checked on this machine.">Agents</PageTitle>
+        <PageTitle lede="What each CLI says it can do, and what Ordelis has actually checked on this machine.">Agents</PageTitle>
         <span className="sp" />
         <div className="legend2 meta" aria-label="Evidence levels">
           <Evidence level="ver">verified</Evidence>
@@ -154,7 +154,7 @@ export function Agents() {
               What “check” does <Vision>planned</Vision>
             </p>
             <p className="hint ink2">
-              Runs the CLI in a throwaway folder with each flag Synapse relies on, then records what actually happened. No project
+              Runs the CLI in a throwaway folder with each flag Ordelis relies on, then records what actually happened. No project
               files are touched.
             </p>
             <div className="actions mt-3">

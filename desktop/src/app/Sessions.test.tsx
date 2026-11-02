@@ -307,7 +307,7 @@ describe("cross-page navigation", () => {
     for (const name of ["Home", "Projects", "Sessions", "Context", "Agents", "Settings"]) {
       expect(rail().getByRole("link", { name })).toBeInTheDocument();
     }
-    await user.keyboard("{Control>}3{/Control}");
+    await user.keyboard("{Control>}2{/Control}");
     expect(await screen.findByRole("list", { name: "Sample sessions" })).toBeInTheDocument();
   });
 });

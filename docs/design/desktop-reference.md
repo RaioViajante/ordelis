@@ -37,6 +37,12 @@ Light is the reference appearance. Dark is designed, not inverted. The app follo
 | `--cc` `--cx` `--km` `--oc` | `#F3E1BC` `#D5E5F4` `#E5DDF8` `#D7EBDD` | `#4B4029` `#24394B` `#382F4F` `#273C2F` | Provider tints (Claude Code, Codex, Kimi, OpenCode) |
 | `--term`, `--add`, `--del` | `#1A1C1B`, green and red tints | `#121413`, tints | Terminal and diff |
 
+### Brand identity versus interface tokens
+
+The documented brand colors in [principles.md](principles.md) are Forest `#2E3A33`, Sage `#6B7F73` and Stone `#A7AFA9`. They identify the product in the wordmark, the icon and marketing surfaces. They stay as documented.
+
+The desktop interface does not derive its colors from them one to one. It uses the approved export's tokens, which are tuned for contrast on interface surfaces: ink `#1D1F1E`, the darker Sage 600 `#56695E` for filled actions (raw Sage carries white text at only 4.3 : 1), and `#46584D` for icons on a selected row. Only Sage appears unchanged (`--brand`). Forest is not forced onto interface elements, and no other palette is introduced. When the two disagree, the export's tokens decide the interface and `principles.md` decides the brand.
+
 Brand colors (Sage, Forest, Sand, Stone, Charcoal) and state colors are separate sets. Sage appears as a seasoning: the one primary action per view, the selected sidebar row and the focus ring. Provider tints identify a provider and never a status.
 
 - **Type:** system font (SF Pro) and SF Mono. Display 30/36, Title 1 22/28, Title 2 17/22, headline 13/18, body 13/20, callout 12/16, caption 11/14, mono 12/18. Weights 400, 500 (controls), 600 (titles). Sentence case, no all-caps labels.
@@ -49,6 +55,10 @@ Brand colors (Sage, Forest, Sand, Stone, Charcoal) and state colors are separate
 ## Shell
 
 A fixed 236 px sidebar and a scrolling page. From the top: the lowercase `ordelis` wordmark, **New Task**, **Search**, then Home, Tasks, Sessions, Projects, Context and Agents, a Projects section, Settings, and the workspace footer. Narrower than 900 px the sidebar keeps its structure and shows icons only (the window minimum is 760 px).
+
+Navigation shortcuts follow the sidebar order: `⌘1` Home, `⌘2` Sessions, `⌘3` Projects, `⌘4` Context, `⌘5` Agents, `⌘6` Settings (Ctrl on other platforms). Tasks, New Task and Search are disabled and have no shortcut; the export's `⌘N`, `⌘K` and `⌘,` are not implemented. Focus moves to the page after a shortcut or a link. The order lives in `ROUTES` in `desktop/src/app/routes.ts`, which the Settings list also reads.
+
+The visible product name is Ordelis (window title, page title, sidebar wordmark, interface copy). The bundle name `Synapse.app`, the bundle identifier, crate and package names, the data directory, and the native folder-panel and error messages in `src-tauri` still say Synapse. They belong to the identity migration, not to this design work.
 
 The export also draws macOS window controls and a top bar with an agent summary and a notification bell. The app uses the native title bar, and the top bar has no real data behind it yet, so neither is drawn.
 
