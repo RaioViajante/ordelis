@@ -3,9 +3,9 @@
 </p>
 
 <p align="center">
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-6B7F73?style=flat-square&labelColor=2E3A33" alt="License: MIT"></a>
-  <a href="docs/product/roadmap.md"><img src="https://img.shields.io/badge/status-early%20development-6B7F73?style=flat-square&labelColor=2E3A33" alt="Status: early development"></a>
-  <a href="https://github.com/RaioViajante/ordelis"><img src="https://img.shields.io/badge/github-RaioViajante%2Fordelis-6B7F73?style=flat-square&labelColor=2E3A33" alt="GitHub repository: RaioViajante/ordelis"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-E6E7E5?style=flat-square&labelColor=4F5651" alt="License: MIT"></a>
+  <a href="docs/product/roadmap.md"><img src="https://img.shields.io/badge/status-early%20development-E6E7E5?style=flat-square&labelColor=4F5651" alt="Status: early development"></a>
+  <a href="https://github.com/RaioViajante/ordelis"><img src="https://img.shields.io/badge/github-RaioViajante%2Fordelis-E6E7E5?style=flat-square&labelColor=4F5651" alt="GitHub repository: RaioViajante/ordelis"></a>
 </p>
 
 <p align="center">
