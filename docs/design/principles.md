@@ -10,7 +10,11 @@
 - **Tagline.** Your agents. In order.
 - **Character.** Calm, precise and spacious. Editorial rather than promotional, and technical without being cold. The product's job is to make complex work legible, so the design should feel like order, not like busyness.
 - **Voice.** Plain and specific. Say what something does and what state it is in. Avoid superlatives, urgency, and generic software-marketing phrases.
-- **The symbol and logo.** An approved vector master of the Ordelis symbol does not exist yet. Until it does, the wordmark is set in type, and no reconstruction is used as an official logo. Final application icons, installer icons, the favicon and social images wait for the approved master.
+- **The symbol and logo.** The symbol is two rounded halves separated by a diagonal channel. The approved marks in [`assets/brand/`](../../assets/brand/) are raster images:
+  - `ordelis-readme-icon.png`, a square monochrome icon: the symbol on its own light, rounded background. It is the logo in the README header. It is not the application icon.
+  - `ordelis-wordmark-dark.png` and `ordelis-wordmark-light.png`, horizontal lockups of the symbol with the lowercase `ordelis` wordmark, in dark and light lettering. They are kept for other approved brand uses.
+
+  An approved vector master of the symbol does not exist yet, and no other reconstruction of the symbol is used as a logo. Final application icons, installer icons, the favicon and social images wait for the approved master.
 
 ## Color
 
@@ -36,7 +40,7 @@ Rules that follow:
 - **Color is never the only signal.** State, severity and approval are also carried by text, shape or position.
 - **Light and dark themes are both first class,** with tokens defined once and remapped, not inverted by filter. Each theme has its own contrast check.
 - **Status colors are held back.** Success, warning and danger appear only when they carry meaning, and each has an accessible text alternative.
-- **The README and documentation do not depend on the palette.** The wordmark there is plain text, so it follows GitHub's light and dark themes.
+- **The README and documentation do not depend on the palette.** Their text is plain Markdown, so it follows GitHub's light and dark themes. The README's logo is the square icon, which carries its own light background and looks the same in both themes.
 
 ## Typography
 
