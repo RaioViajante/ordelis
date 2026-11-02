@@ -29,6 +29,9 @@ dist/
 /reports/adapter-contract/*/
 /reports/dry-run/*/
 
+# Local copies of the design exports (about 25 MB of Claude Design files). Never commit or publish them.
+/reference/
+
 # Local development interpreter for the dev-runtime bridge (an absolute path; never committed)
 /desktop/src-tauri/.dev-python
 
