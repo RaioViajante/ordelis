@@ -1,14 +1,11 @@
 <p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="assets/brand/ordelis-wordmark-light.png">
-    <img src="assets/brand/ordelis-wordmark-dark.png" alt="Ordelis" width="260">
-  </picture>
+  <img src="assets/brand/ordelis-readme-icon.png" alt="Ordelis" width="120" height="120">
 </p>
 
 <p align="center">
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-6B7F73?style=flat-square&labelColor=2E3A33" alt="License: MIT"></a>
-  <a href="docs/product/roadmap.md"><img src="https://img.shields.io/badge/status-early%20development-6B7F73?style=flat-square&labelColor=2E3A33" alt="Status: early development"></a>
-  <a href="https://github.com/RaioViajante/ordelis"><img src="https://img.shields.io/badge/github-RaioViajante%2Fordelis-6B7F73?style=flat-square&labelColor=2E3A33" alt="GitHub repository: RaioViajante/ordelis"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-E6E7E5?style=flat-square&labelColor=4F5651" alt="License: MIT"></a>
+  <a href="docs/product/roadmap.md"><img src="https://img.shields.io/badge/status-early%20development-E6E7E5?style=flat-square&labelColor=4F5651" alt="Status: early development"></a>
+  <a href="https://github.com/RaioViajante/ordelis"><img src="https://img.shields.io/badge/github-RaioViajante%2Fordelis-E6E7E5?style=flat-square&labelColor=4F5651" alt="GitHub repository: RaioViajante/ordelis"></a>
 </p>
 
 <p align="center">
@@ -18,10 +15,6 @@
 <p align="center">
   A local-first, open-source desktop workspace<br>
   being built to coordinate AI coding agents.
-</p>
-
-<p align="center">
-  <sub>Early development. Not ready for production use.</sub>
 </p>
 
 ---
