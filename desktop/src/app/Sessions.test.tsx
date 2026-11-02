@@ -290,7 +290,7 @@ describe("cross-page navigation", () => {
     expect(await screen.findByRole("heading", { level: 1, name: "Move auth to server-side sessions" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /codex · b71c · stopped/ })).toBeInTheDocument();
     await user.click(screen.getByRole("link", { name: /claude-code · a3f2 · paused/ }));
-    await user.click(await screen.findByRole("link", { name: "atlas-api" }));
+    await user.click(await within(screen.getByRole("main")).findByRole("link", { name: "atlas-api" }));
     expect(await screen.findByRole("heading", { level: 2, name: "atlas-api" })).toBeInTheDocument();
   });
 
@@ -304,7 +304,9 @@ describe("cross-page navigation", () => {
     const user = userEvent.setup();
     window.location.hash = "#/sessions/b71c";
     renderApp();
-    expect(rail().getAllByRole("link")).toHaveLength(7);
+    for (const name of ["Home", "Projects", "Sessions", "Context", "Agents", "Settings"]) {
+      expect(rail().getByRole("link", { name })).toBeInTheDocument();
+    }
     await user.keyboard("{Control>}3{/Control}");
     expect(await screen.findByRole("list", { name: "Sample sessions" })).toBeInTheDocument();
   });

@@ -54,8 +54,10 @@ describe("navigation", () => {
   it("reaches every rail destination by Tab and activates with Enter", async () => {
     const user = userEvent.setup();
     renderApp();
-    await user.tab(); // Synapse mark
-    for (let i = 0; i < 4; i++) await user.tab(); // Home, Projects, Sessions, Context
+    await user.tab();
+    expect(rail().getByRole("link", { name: "ordelis" })).toHaveFocus();
+    // New Task, Search, Home, Tasks, Sessions, Projects, Context. The unavailable ones stay focusable.
+    for (let i = 0; i < 7; i++) await user.tab();
     expect(rail().getByRole("link", { name: "Context" })).toHaveFocus();
     await user.keyboard("{Enter}");
     expect(await screen.findByRole("heading", { level: 1, name: "Context" })).toBeInTheDocument();
@@ -94,7 +96,32 @@ describe("honesty of mock data", () => {
     await user.click(rail().getByRole("link", { name: "Agents" }));
     await screen.findByRole("heading", { level: 1, name: "Agents" });
     expect(screen.queryByRole("note", { name: "Sample data notice" })).not.toBeInTheDocument();
-    expect(rail().getByRole("button", { name: "Waiting on you" }).querySelector("b")).toBeNull();
+    expect(rail().getByRole("button", { name: "Tasks" }).querySelector(".badge")).toBeNull();
+  });
+
+  it("labels the Tasks count as sample data, and only where sample data is shown", () => {
+    renderApp();
+    expect(rail().getByRole("button", { name: "Tasks, 3 sample items need you" })).toBeInTheDocument();
+  });
+
+  it("keeps New Task, Search and Tasks unavailable, each with a stated reason", () => {
+    renderApp();
+    for (const name of ["New Task", "Search", /^Tasks/]) {
+      const button = rail().getByRole("button", { name });
+      expect(button).toHaveAttribute("aria-disabled", "true");
+      expect(button).toHaveAccessibleDescription(/.+/);
+    }
+  });
+
+  it("lists sample projects in the sidebar, links them, and says when there are none", async () => {
+    const user = userEvent.setup();
+    const { unmount } = renderApp();
+    await user.click(rail().getByRole("link", { name: "mochi-web" }));
+    expect(await screen.findByRole("heading", { level: 2, name: "mochi-web" })).toBeInTheDocument();
+    expect(rail().getByRole("link", { name: "mochi-web" })).toHaveClass("is-on");
+    unmount();
+    renderApp(false);
+    expect(rail().getByText("No projects yet.")).toBeInTheDocument();
   });
 
   it("never marks an agent capability as verified", async () => {

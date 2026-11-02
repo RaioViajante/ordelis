@@ -256,7 +256,9 @@ describe("accessibility and boundaries", () => {
   it("keeps the six primary destinations and the shortcuts", async () => {
     const user = userEvent.setup();
     renderApp();
-    expect(rail().getAllByRole("link").filter((l) => l.getAttribute("aria-label") !== "Synapse")).toHaveLength(6);
+    for (const name of ["Home", "Projects", "Sessions", "Context", "Agents", "Settings"]) {
+      expect(rail().getByRole("link", { name })).toBeInTheDocument();
+    }
     await user.keyboard("{Control>}2{/Control}");
     expect(await screen.findByRole("heading", { level: 1, name: "Projects" })).toBeInTheDocument();
     expect(screen.getByRole("main")).toHaveFocus();

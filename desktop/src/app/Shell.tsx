@@ -1,7 +1,6 @@
 import { useEffect, useRef } from "react";
-import { INBOX_ICON, RAIL_ICONS, SynapseMark } from "../components/icons";
 import { SampleBar } from "../components/SampleBar";
-import { Button } from "../components/ui";
+import { Sidebar } from "../components/Sidebar";
 import { Agents } from "../pages/Agents";
 import { Context } from "../pages/Context";
 import { Home } from "../pages/Home";
@@ -11,7 +10,7 @@ import { SessionDetail } from "../pages/SessionDetail";
 import { Settings } from "../pages/Settings";
 import { DraftPreview, TaskPreview } from "../pages/Preview";
 import { useSampleData } from "./SampleData";
-import { hrefFor, railRoute, ROUTES } from "./routes";
+import { railRoute, ROUTES } from "./routes";
 import { useRoute } from "./useRoute";
 import { useWorkspace, WorkspaceProvider } from "./Workspace";
 
@@ -58,32 +57,7 @@ function ShellFrame() {
 
   return (
     <div className="app">
-      <nav className="rail" aria-label="Main">
-        <a className="rail__mark" href={hrefFor("home")} aria-label="Synapse">
-          <SynapseMark />
-        </a>
-        {ROUTES.map((r) => (
-          <a
-            key={r.id}
-            className={`rail__btn${current === r.id ? " is-on" : ""}`}
-            href={hrefFor(r.id)}
-            aria-label={r.label}
-            aria-current={current === r.id ? "page" : undefined}
-          >
-            {RAIL_ICONS[r.id]}
-          </a>
-        ))}
-        <span className="rail__sp" />
-        <Button
-          variant="ghost"
-          className="rail__btn rail__badge"
-          reason="The inbox arrives with task planning. There is nothing waiting on you."
-          aria-label="Waiting on you"
-        >
-          {INBOX_ICON}
-          {on && SAMPLE_ROUTES.includes(route) && <b aria-hidden="true">3</b>}
-        </Button>
-      </nav>
+      <Sidebar loc={loc} current={current} sampleBadge={on && SAMPLE_ROUTES.includes(route)} />
 
       <main className="page" ref={mainRef} tabIndex={-1} aria-label={route === "task" || route === "preview" ? PAGE_LABELS[route] : ROUTES.find((r) => r.id === route)?.label}>
         <div className="page__scroll">

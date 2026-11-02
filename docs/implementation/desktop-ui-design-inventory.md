@@ -1,5 +1,7 @@
 # Desktop UI design inventory
 
+> **Legacy.** This inventories the earlier Synapse design references (warm-dark palette, serif headings, icon rail). Since [#72](https://github.com/RaioViajante/ordelis/issues/72) the approved Ordelis desktop export is the canonical reference; see [Desktop reference](../design/desktop-reference.md). The tables below describe the old styling and the sample-data rules, which still apply.
+
 Inventory of the supplied design references for [issue #24](https://github.com/RaioViajante/synapse/issues/24). The references are the visual source of truth; this document records what they contain and which parts are implemented, mocked or not yet real. The `reference/` directory itself is not committed (about 20 MB of exports); only the assets listed under [Provenance](desktop-architecture.md#asset-provenance-and-branding) are copied.
 
 ## Reference files
