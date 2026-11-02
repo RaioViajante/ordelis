@@ -69,7 +69,8 @@ The export also draws macOS window controls and a top bar with an agent summary 
 | Foundations, Components | Tokens, sidebar, buttons, fields, switch, focus ring, count badge and disabled-with-reason controls are implemented. Status pills, chips, tabs, avatars and the diff and terminal styles are not |
 | Home (light and dark) | Appearance follows the system. The layout is still the legacy sample page, not the export's composer |
 | First launch, New task (both), Task detail, Execution, Terminal, Review, Product states, Dialogs | Not implemented. Where the app has an equivalent sample page it only picks up the new tokens |
-| Projects, Sessions, Context, Agents, Settings | Legacy sample pages with the new tokens. Their layouts have not been rebuilt to the export |
+| Projects | Real local folders (add, list, status, confirmed removal) on the legacy layout, with the sample projects in a separate labelled group. Not yet rebuilt to the export, which shows repository, worktree and task data that does not exist |
+| Sessions, Context, Agents, Settings | Legacy sample pages with the new tokens. Their layouts have not been rebuilt to the export |
 
 New Task, Search and Tasks appear in the sidebar but are disabled with a stated reason, because task planning, search and a task list do not exist. Sample data stays labelled as sample data.
 

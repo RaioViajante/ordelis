@@ -18,7 +18,7 @@ mod registry;
 #[cfg(target_os = "macos")]
 const MAIN_WINDOW: &str = "main";
 #[cfg(target_os = "macos")]
-const PANEL_TITLE: &str = "Choose a project folder. Synapse remembers its location and does not read its contents.";
+const PANEL_TITLE: &str = "Choose a project folder. Ordelis remembers its location and does not read its contents.";
 
 // Most codes are only produced by the macOS registry, which other targets do not compile.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
@@ -61,7 +61,7 @@ impl From<ErrorCode> for ProjectError {
             ErrorCode::RegistryFull => "The project list is full.",
             ErrorCode::InvalidInput => "The project reference is not valid.",
             ErrorCode::RegistryCorrupt => "The project list could not be read. The file was kept unchanged.",
-            ErrorCode::RegistryNewerVersion => "The project list was saved by a newer version of Synapse.",
+            ErrorCode::RegistryNewerVersion => "The project list was saved by a newer version of Ordelis.",
             ErrorCode::RegistryUnavailable => "The project list is unavailable.",
             ErrorCode::UnsupportedPlatform => "Local projects are not supported on this platform.",
         };

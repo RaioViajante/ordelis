@@ -1,6 +1,7 @@
 // @vitest-environment node
-// The production bundle may only contain the app's own src/ modules and its pinned packages, and no project
-// command may be reachable from it yet (the Projects UI is a later increment).
+// The production bundle may only contain the app's own src/ modules and its pinned packages. Only the project
+// adapter (src/app/projects.ts) may name list_projects, add_project or remove_project, and nothing in the frontend
+// may name reset_projects (the UI has no reset).
 //
 // The inspector below looks at what a production Vite build of the desktop UI actually contains, rather than
 // which files happen to exist under src/. It builds without writing anything and reads Rollup's module graph and
@@ -15,6 +16,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, sep } from "node:path";
 
 const PROJECT_COMMANDS = /\b(?:list_projects|add_project|remove_project|reset_projects)\b/;
+const RESET_COMMAND = /\breset_projects\b/;
 // Every extension Vite resolves as a script module.
 const SCRIPT = /\.(?:[cm]?[jt]sx?)$/;
 // Rollup ids of Vite's own helpers; anything else virtual (such as an inline index.html script) is refused.
@@ -32,7 +34,9 @@ async function frontendBuildViolations(projectRoot: string): Promise<string[]> {
   const src = join(root, "src") + sep;
   const packages = realpathSync(join(root, "node_modules")) + sep;
   const tauriApi = `${sep}node_modules${sep}@tauri-apps${sep}`;
-  const adapter = join(root, "src", "app", "runtimeStatus.ts");
+  // The reviewed adapters: the only modules that may load the Tauri API.
+  const adapters = [join(root, "src", "app", "runtimeStatus.ts"), join(root, "src", "app", "projects.ts")];
+  const projectAdapter = adapters[1];
   const graph = new Map<string, string[]>();
   const outputs: Output[] = [];
   const inspector: Plugin = {
@@ -65,10 +69,10 @@ async function frontendBuildViolations(projectRoot: string): Promise<string[]> {
     const query = id.indexOf("?");
     const file = query === -1 ? id : id.slice(0, query);
     if (file.startsWith(packages)) {
-      // Only the one reviewed adapter may load the Tauri API; packages inside it may load each other.
+      // Only the reviewed adapters may load the Tauri API; packages inside it may load each other.
       if (file.includes(tauriApi)) {
         for (const importer of importers) {
-          if (importer !== adapter && !importer.includes(tauriApi)) violations.push(`${name(importer)}: imports the Tauri API`);
+          if (!adapters.includes(importer) && !importer.includes(tauriApi)) violations.push(`${name(importer)}: imports the Tauri API`);
         }
       }
       continue;
@@ -85,14 +89,14 @@ async function frontendBuildViolations(projectRoot: string): Promise<string[]> {
     if (isTestSource(root, file)) violations.push(`${name(id)}: test code in the production bundle`);
     if (SCRIPT.test(file)) {
       const text = readFileSync(file, "utf8");
-      if (PROJECT_COMMANDS.test(text)) violations.push(`${name(id)}: names a project command`);
+      if ((file === projectAdapter ? RESET_COMMAND : PROJECT_COMMANDS).test(text)) violations.push(`${name(id)}: names a project command`);
       if (text.includes("__TAURI")) violations.push(`${name(id)}: reaches Tauri internals`);
     }
   }
   for (const out of outputs) {
     // A script emitted as a plain asset (new URL(..., import.meta.url), a worker) bypasses the module graph.
     if (out.type === "asset" && SCRIPT.test(out.fileName)) violations.push(`emits script asset ${out.fileName}`);
-    if (out.type === "chunk" && PROJECT_COMMANDS.test(out.code)) violations.push(`${out.fileName}: names a project command`);
+    if (out.type === "chunk" && RESET_COMMAND.test(out.code)) violations.push(`${out.fileName}: names a project command`);
   }
   return violations;
 }
@@ -172,8 +176,14 @@ describe("production bundle boundary", () => {
         write(d, "src/app/boot.test.ts", "export const x = 1;\n");
         prepend(d, "src/main.tsx", 'import "./app/boot.test";\n');
       },
-      "a project command named in the adapter": (d) => {
+      "a project command named in the runtime adapter": (d) => {
         prepend(d, "src/app/runtimeStatus.ts", 'export const NEXT = "add_project";\n');
+      },
+      "a project command named in a page": (d) => {
+        prepend(d, "src/pages/Home.tsx", 'export const NEXT = "remove_project";\n');
+      },
+      "the reset command named in the project adapter": (d) => {
+        prepend(d, "src/app/projects.ts", 'export const NEXT = "reset_projects";\n');
       },
     };
     const dirs: string[] = [];

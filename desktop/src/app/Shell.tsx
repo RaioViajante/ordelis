@@ -9,6 +9,7 @@ import { Sessions } from "../pages/Sessions";
 import { SessionDetail } from "../pages/SessionDetail";
 import { Settings } from "../pages/Settings";
 import { DraftPreview, TaskPreview } from "../pages/Preview";
+import { RegistryProvider } from "./Registry";
 import { useSampleData } from "./SampleData";
 import { railRoute, ROUTES } from "./routes";
 import { useRoute } from "./useRoute";
@@ -20,7 +21,9 @@ const PAGE_LABELS = { task: "Task preview", preview: "Task preview" };
 export function Shell() {
   return (
     <WorkspaceProvider>
-      <ShellFrame />
+      <RegistryProvider>
+        <ShellFrame />
+      </RegistryProvider>
     </WorkspaceProvider>
   );
 }

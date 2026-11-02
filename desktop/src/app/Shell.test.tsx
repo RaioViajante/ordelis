@@ -132,15 +132,14 @@ describe("honesty of mock data", () => {
     }
   });
 
-  it("lists sample projects in the sidebar, links them, and says when there are none", async () => {
-    const user = userEvent.setup();
+  it("lists only registered folders in the sidebar, never sample projects", () => {
+    // Outside the desktop app there is no registry: the sidebar says so, with or without sample data.
     const { unmount } = renderApp();
-    await user.click(rail().getByRole("link", { name: "mochi-web" }));
-    expect(await screen.findByRole("heading", { level: 2, name: "mochi-web" })).toBeInTheDocument();
-    expect(rail().getByRole("link", { name: "mochi-web" })).toHaveClass("is-on");
+    expect(rail().queryByRole("link", { name: "mochi-web" })).not.toBeInTheDocument();
+    expect(rail().getByText("Folders can be added in the desktop app.")).toBeInTheDocument();
     unmount();
     renderApp(false);
-    expect(rail().getByText("No projects yet.")).toBeInTheDocument();
+    expect(rail().getByText("Folders can be added in the desktop app.")).toBeInTheDocument();
   });
 
   it("never marks an agent capability as verified", async () => {
@@ -186,7 +185,7 @@ describe("controls", () => {
     await user.click(rail().getByRole("link", { name: "Projects" }));
     const add = await screen.findByRole("button", { name: "Add a folder…" });
     expect(add).toHaveAttribute("aria-disabled", "true");
-    expect(add).toHaveAccessibleDescription(/never reads your filesystem/i);
+    expect(add).toHaveAccessibleDescription(/needs the desktop app/i);
     expect(screen.getByRole("button", { name: "Draft task here" })).not.toHaveAttribute("aria-disabled");
   });
 

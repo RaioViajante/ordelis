@@ -343,6 +343,9 @@
     flex: none;
     background: var(--brand);
   }
+  .dot--warn {
+    background: var(--att);
+  }
   .side__sp {
     flex: 1 1 16px;
     min-height: 16px;
@@ -1740,5 +1743,65 @@
       white-space: nowrap;
       pointer-events: none;
     }
+  }
+}
+
+@layer components {
+  /* Registered projects and the confirmation sheet */
+  .bidi {
+    unicode-bidi: isolate;
+    overflow-wrap: anywhere;
+  }
+  .pj-grp {
+    padding: 4px 12px;
+    font: 600 11px/14px var(--font-sans);
+    color: var(--ink3);
+  }
+  .btn--bad {
+    background: var(--bad-fill);
+    border-color: transparent;
+    color: #ffffff;
+  }
+  .btn--bad:hover {
+    background: var(--bad-fill);
+    filter: brightness(0.93);
+  }
+  .scrim {
+    position: fixed;
+    inset: 0;
+    z-index: 50;
+    display: flex;
+    justify-content: center;
+    align-items: flex-start;
+    padding: 72px 24px 24px;
+    background: rgba(29, 31, 30, 0.28);
+  }
+  .sheet {
+    width: 100%;
+    max-width: 400px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    padding: 22px;
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    background: var(--surf);
+    box-shadow: var(--pop);
+  }
+  .sheet__t {
+    font: 600 16px/22px var(--font-sans);
+    letter-spacing: -0.01em;
+  }
+  .sheet__body {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    color: var(--ink2);
+  }
+  .sheet__ft {
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+    margin-top: 4px;
   }
 }

@@ -1,9 +1,7 @@
 import { NAV_ICONS, PLUS_ICON, SEARCH_ICON } from "./icons";
 import { Button } from "./ui";
-import { useSampleData } from "../app/SampleData";
+import { useRegistry } from "../app/Registry";
 import { hrefFor, ROUTES, type Location, type RouteId } from "../app/routes";
-import { useWorkspace } from "../app/Workspace";
-import { MOCK_PROJECTS } from "../fixtures/mock";
 
 const label = (id: RouteId) => ROUTES.find((r) => r.id === id)!.label;
 
@@ -19,8 +17,7 @@ function NavLink({ id, current }: { id: RouteId; current: RouteId | undefined })
 
 /** `sampleBadge` is true on the pages that show sample data, so the count is never shown outside them. */
 export function Sidebar({ loc, current, sampleBadge }: { loc: Location; current: RouteId | undefined; sampleBadge: boolean }) {
-  const { on } = useSampleData();
-  const { project } = useWorkspace();
+  const { desktop, loading, projects } = useRegistry();
 
   return (
     <nav className="side" aria-label="Main">
@@ -55,18 +52,21 @@ export function Sidebar({ loc, current, sampleBadge }: { loc: Location; current:
 
       <div className="side__projects">
         <div className="side__sec">Projects</div>
-        {on ? (
-          MOCK_PROJECTS.map((p) => {
-            const here = loc.page === "projects" && project === p.name;
-            return (
-              <a key={p.name} className={`nav${here ? " is-on" : ""}`} href={hrefFor("projects", p.name)}>
-                <span className="dot" aria-hidden="true" />
-                <span className="nav__label">{p.name}</span>
-              </a>
-            );
-          })
-        ) : (
-          <p className="side__none">No projects yet.</p>
+        {projects.map((p) => {
+          // The registry id is the identity; names can repeat.
+          const here = loc.page === "projects" && loc.param === p.id;
+          return (
+            <a key={p.id} className={`nav${here ? " is-on" : ""}`} href={hrefFor("projects", p.id)} aria-current={here ? "page" : undefined}>
+              <span className={`dot${p.status === "available" ? "" : " dot--warn"}`} aria-hidden="true" />
+              <span className="nav__label bidi" dir="auto">
+                {p.name}
+              </span>
+              {p.status !== "available" && <span className="sr">, needs attention</span>}
+            </a>
+          );
+        })}
+        {projects.length === 0 && (
+          <p className="side__none">{loading ? "Loading projects…" : desktop ? "No projects yet." : "Folders can be added in the desktop app."}</p>
         )}
       </div>
 
