@@ -1,7 +1,9 @@
+// The order is the sidebar's order, and Ctrl/⌘ 1-6 follow it. Tasks sits between Home and Sessions in the
+// sidebar but has no route yet, so it has no shortcut.
 export const ROUTES = [
   { id: "home", label: "Home" },
-  { id: "projects", label: "Projects" },
   { id: "sessions", label: "Sessions" },
+  { id: "projects", label: "Projects" },
   { id: "context", label: "Context" },
   { id: "agents", label: "Agents" },
   { id: "settings", label: "Settings" },

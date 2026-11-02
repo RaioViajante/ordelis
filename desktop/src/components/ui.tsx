@@ -1,7 +1,7 @@
 import { ChevronDown } from "lucide-react";
 import { useId, useState, type ButtonHTMLAttributes, type ReactNode, type SelectHTMLAttributes } from "react";
 
-type Variant = "default" | "go" | "ghost" | "link";
+type Variant = "default" | "go" | "ghost" | "link" | "bare";
 
 interface ButtonProps extends Omit<ButtonHTMLAttributes<HTMLButtonElement>, "disabled"> {
   variant?: Variant;
@@ -14,8 +14,9 @@ export function Button({ variant = "default", small, reason, className = "", chi
   const id = useId();
   // Flip the reason to the control's right edge when it would run off the window.
   const [flip, setFlip] = useState(false);
+  // "bare" carries no button chrome; the caller supplies the class (the sidebar's disabled destinations).
   const cls = [
-    "btn",
+    variant !== "bare" && "btn",
     variant === "go" && "btn--go",
     variant === "ghost" && "btn--ghost",
     variant === "link" && "btn--link",

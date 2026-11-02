@@ -158,7 +158,7 @@ function SampleSections() {
 function FirstUse() {
   return (
     <section className="empty max-w-[840px]">
-      <h3>Set up Synapse</h3>
+      <h3>Set up Ordelis</h3>
       <p>Three things before the first task. Only the first two are required.</p>
       <ul className="setup-list">
         <li>

@@ -43,7 +43,7 @@ export function Continuity({ session: s }: { session: MockSession }) {
                 Continue this session<small>Same process or CLI conversation, same worktree.</small>
               </th>
               <th scope="col">
-                New run with this context<small>Fresh CLI session; Synapse would hand over a summary of this one.</small>
+                New run with this context<small>Fresh CLI session; Ordelis would hand over a summary of this one.</small>
               </th>
               <th scope="col">
                 Repeat with new settings<small>Run the original step again from the base, configured differently.</small>

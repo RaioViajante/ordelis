@@ -26,7 +26,7 @@ Where a phase has no issue yet, none is linked. Issues are created when a phase 
 
 ### 3. Desktop UI redesign
 
-**Not started.** A design system with light and dark themes, then the screens rebuilt as clearly labelled sample-data prototypes. It waits on the approved vector master of the Ordelis symbol and on the migration record's private-content gate, so the existing interface keeps its previous styling for now. No screen in this phase connects to execution. See [Design principles](../design/principles.md).
+**Started.** The approved desktop export is the canonical reference ([desktop reference](../design/desktop-reference.md)). The tokens, light and dark appearance and the sidebar shell are in place ([#72](https://github.com/RaioViajante/ordelis/issues/72)); the screens are still to be rebuilt as clearly labelled sample-data prototypes. The application icon and logo symbol wait on the approved vector master, and publishing the export waits on the migration record's private-content gate. No screen in this phase connects to execution. See [Design principles](../design/principles.md).
 
 ### 4. Provider discovery and capability integration
 

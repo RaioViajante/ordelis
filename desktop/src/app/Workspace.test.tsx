@@ -146,7 +146,7 @@ describe("Home composer", () => {
   it("shows first-use guidance, keeps the draft and cannot preview when sample data is off", async () => {
     const user = userEvent.setup();
     renderApp(false);
-    expect(screen.getByRole("heading", { name: "Set up Synapse" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Set up Ordelis" })).toBeInTheDocument();
     expect(projectSelect()).toBeDisabled();
     await user.type(draftBox(), "still typing");
     expect(screen.getByRole("button", { name: "Preview task" })).toHaveAccessibleDescription(/Sample data is hidden/);
@@ -256,8 +256,10 @@ describe("accessibility and boundaries", () => {
   it("keeps the six primary destinations and the shortcuts", async () => {
     const user = userEvent.setup();
     renderApp();
-    expect(rail().getAllByRole("link").filter((l) => l.getAttribute("aria-label") !== "Synapse")).toHaveLength(6);
-    await user.keyboard("{Control>}2{/Control}");
+    for (const name of ["Home", "Projects", "Sessions", "Context", "Agents", "Settings"]) {
+      expect(rail().getByRole("link", { name })).toBeInTheDocument();
+    }
+    await user.keyboard("{Control>}3{/Control}");
     expect(await screen.findByRole("heading", { level: 1, name: "Projects" })).toBeInTheDocument();
     expect(screen.getByRole("main")).toHaveFocus();
   });

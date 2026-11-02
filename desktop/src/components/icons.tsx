@@ -1,52 +1,46 @@
-// Paths are the rail glyphs and three-node mark from the supplied design export
-// (reference/Synapse — telas.html). They are reproduced, not redrawn.
+// Sidebar glyphs. Paths are copied from the approved desktop export (Components and Home boards, 24 px grid,
+// 1.6 px round stroke), not redrawn. The product symbol is deliberately absent: no approved vector master
+// exists yet (see docs/design/principles.md).
 import type { ReactNode } from "react";
 import type { RouteId } from "../app/routes";
 
-export function SynapseMark() {
-  return (
-    <svg className="mark" viewBox="0 0 22 22" aria-hidden="true">
-      <path d="M5 15 L11 5 L18 14" />
-      <circle cx="5" cy="15" r="2.4" />
-      <circle cx="11" cy="5" r="2.4" />
-      <circle cx="18" cy="14" r="2.4" />
-    </svg>
-  );
-}
-
 const glyph = (children: ReactNode) => (
-  <svg viewBox="0 0 20 20" aria-hidden="true">
+  <svg className="ic" viewBox="0 0 24 24" aria-hidden="true">
     {children}
   </svg>
 );
 
-export const RAIL_ICONS: Record<RouteId, ReactNode> = {
-  home: glyph(<path d="M3.5 9.5 10 4l6.5 5.5V16h-13zM8 16v-4h4v4" />),
-  projects: glyph(
-    <path d="M3 6.5A1.5 1.5 0 0 1 4.5 5H8l1.5 1.5h6A1.5 1.5 0 0 1 17 8v6.5a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 3 14.5z" />,
-  ),
+export const NAV_ICONS: Record<RouteId | "tasks", ReactNode> = {
+  home: glyph(<path d="M4 10.5 12 4l8 6.5V20h-5.5v-5.5h-5V20H4z" />),
+  tasks: glyph(<path d="M10 6h10M10 12h10M10 18h10M4 6l1.5 1.5L8 5M4 12l1.5 1.5L8 11M4 18h3" />),
   sessions: glyph(
     <>
-      <rect x="3" y="3.5" width="14" height="13" rx="3" />
-      <path d="M6.5 8l2 2-2 2M10.5 12h3" />
+      <rect x="4" y="4" width="16" height="6.5" rx="1.8" />
+      <rect x="4" y="13.5" width="16" height="6.5" rx="1.8" />
     </>,
   ),
-  context: glyph(<path d="M5 3h8.5A1.5 1.5 0 0 1 15 4.5V17H6.5A1.5 1.5 0 0 1 5 15.5V3zM5 15.5A1.5 1.5 0 0 1 6.5 14H15" />),
+  projects: glyph(<path d="M3.5 7a2 2 0 0 1 2-2H10l2 2.5h6.5a2 2 0 0 1 2 2V17a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z" />),
+  context: glyph(<path d="M12 6.5C10 5 7 4.5 4 5v13c3-.5 6 0 8 1.5 2-1.5 5-2 8-1.5V5c-3-.5-6 0-8 1.5zM12 6.5v13" />),
   agents: glyph(
     <>
-      <circle cx="5" cy="6" r="2" />
-      <circle cx="15" cy="6" r="2" />
-      <circle cx="10" cy="15" r="2" />
-      <path d="M6.5 7.5l2.6 5.6M13.5 7.5l-2.6 5.6" />
+      <circle cx="9" cy="8.5" r="3.5" />
+      <path d="M3 19.5c.7-3.2 3.1-5 6-5s5.3 1.8 6 5M15.5 5.5a3.5 3.5 0 0 1 0 6.5M17.5 14.8c1.8.7 3 2.3 3.5 4.7" />
     </>,
   ),
   settings: glyph(
     <>
-      <path d="M4 6h7M14.5 6H16M4 14h2M9.5 14H16" />
-      <circle cx="12.5" cy="6" r="1.7" />
-      <circle cx="7.5" cy="14" r="1.7" />
+      <path d="M4 7h10M18 7h2M4 17h4M12 17h8" />
+      <circle cx="16" cy="7" r="2" />
+      <circle cx="10" cy="17" r="2" />
     </>,
   ),
 };
 
-export const INBOX_ICON = glyph(<path d="M3.5 11h3.5l1.5 2h3l1.5-2h3.5M4.5 5h11l1 6v4.5h-13V11z" />);
+export const PLUS_ICON = glyph(<path d="M12 5v14M5 12h14" />);
+
+export const SEARCH_ICON = glyph(
+  <>
+    <circle cx="11" cy="11" r="6.5" />
+    <path d="m20 20-4.2-4.2" />
+  </>,
+);

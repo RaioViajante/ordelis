@@ -1,8 +1,8 @@
 # Design principles
 
-**Status:** guidance. It records the approved brand direction and the principles the interface and website are built to. The existing desktop prototype predates this direction and has not yet been restyled to it.
+**Status:** guidance. It records the approved brand direction and the principles the interface and website are built to. The desktop app follows the approved desktop export only in its tokens and sidebar shell ([desktop reference](desktop-reference.md)); its pages predate this direction and have not been rebuilt.
 **Scope:** identity, color, typography, responsive behavior, accessibility, motion, and which surface is responsible for what. It is not a component library, and it publishes no design files.
-**Related:** [Vision](../product/vision.md) · [Roadmap: desktop UI redesign](../product/roadmap.md#3-desktop-ui-redesign) · [Migration record: design decisions](../migration/ordelis.md#accepted-decisions) · [Desktop UI design inventory](../implementation/desktop-ui-design-inventory.md)
+**Related:** [Desktop reference](desktop-reference.md) · [Vision](../product/vision.md) · [Roadmap: desktop UI redesign](../product/roadmap.md#3-desktop-ui-redesign) · [Migration record: design decisions](../migration/ordelis.md#accepted-decisions) · [Desktop UI design inventory](../implementation/desktop-ui-design-inventory.md)
 
 ## Identity
 

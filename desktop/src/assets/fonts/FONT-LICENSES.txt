@@ -1,16 +1,10 @@
-Bundled font copyright notices
-================================
-
-IBM Plex Sans
-Copyright © 2017 IBM Corp. with Reserved Font Name "Plex"
+Bundled font copyright notice
+===============================
 
 JetBrains Mono
 Copyright 2020 The JetBrains Mono Project Authors (https://github.com/JetBrains/JetBrainsMono)
 
-Newsreader
-Copyright 2020 The Newsreader Project Authors (http://github.com/productiontype/Newsreader)
-
-Each bundled font is licensed under the SIL Open Font License, Version 1.1.
+The bundled font is licensed under the SIL Open Font License, Version 1.1.
 The license is copied below.
 
 -----------------------------------------------------------

@@ -1,5 +1,7 @@
 # Desktop visual verification
 
+> **Historical.** This records the comparison against the earlier Synapse references. The screenshots show the legacy styling; since [#72](https://github.com/RaioViajante/ordelis/issues/72) the canonical reference is the approved Ordelis desktop export ([Desktop reference](../design/desktop-reference.md)).
+
 Evidence for [issue #24](https://github.com/RaioViajante/synapse/issues/24). A successful build proves nothing about fidelity, so this compares the running app against the supplied references.
 
 **Method.** The debug `Synapse.app` (`pnpm tauri build --debug --bundles app`) was launched on macOS and its real window captured with `screencapture`. For Home and Projects the window was sized to a 1440×1000 viewport (the export's preview size), cropped below the native title bar, and laid side by side with the reference PNG (`telas-png/Home.png`, `Projects.png`) at equal width. Context, Agents, Sessions and Settings were compared by eye against PDF pages 3–6. The side-by-side images were produced locally and are not committed because they contain reference pixels.

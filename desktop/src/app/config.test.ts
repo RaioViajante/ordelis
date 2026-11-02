@@ -241,15 +241,21 @@ describe("desktop trust boundary", () => {
     expect(hits).toEqual([]);
   });
 
-  it("bundles the font copyright notices and OFL license texts", () => {
+  it("bundles the font copyright notice and OFL license text", () => {
     const license = "src/assets/fonts/FONT-LICENSES.txt";
     expect(conf.bundle.resources).toEqual({ [`../${license}`]: "FONT-LICENSES.txt" });
     expect(existsSync(join(root, license))).toBe(true);
     const notice = read(license);
-    expect(notice).toContain('Copyright © 2017 IBM Corp. with Reserved Font Name "Plex"');
     expect(notice).toContain("Copyright 2020 The JetBrains Mono Project Authors");
-    expect(notice).toContain("Copyright 2020 The Newsreader Project Authors");
     expect(notice).toContain("SIL OPEN FONT LICENSE Version 1.1");
+  });
+
+  it("bundles only the fonts the notice covers; the interface text is the system font", () => {
+    const css = read("src/styles/index.css");
+    const families = [...css.matchAll(/@font-face\s*{[^}]*?font-family:\s*"([^"]+)"/g)].map((m) => m[1]);
+    expect(families).toEqual(["JetBrains Mono"]);
+    expect(readdirSync(join(root, "src/assets/fonts")).filter((f) => f.endsWith(".woff2"))).toEqual(["jetbrains-mono-latin.woff2"]);
+    expect(css).toMatch(/--font-sans:\s*-apple-system/);
   });
 
   it("removes control animation when reduced motion is requested", () => {
