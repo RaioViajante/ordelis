@@ -1,8 +1,5 @@
 <p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="assets/brand/ordelis-wordmark-light.png">
-    <img src="assets/brand/ordelis-wordmark-dark.png" alt="Ordelis" width="260">
-  </picture>
+  <img src="assets/brand/ordelis-readme-icon.png" alt="Ordelis" width="120" height="120">
 </p>
 
 <p align="center">
@@ -18,10 +15,6 @@
 <p align="center">
   A local-first, open-source desktop workspace<br>
   being built to coordinate AI coding agents.
-</p>
-
-<p align="center">
-  <sub>Early development. Not ready for production use.</sub>
 </p>
 
 ---
