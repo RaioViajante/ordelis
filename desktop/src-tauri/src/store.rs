@@ -1,13 +1,14 @@
-// The reviewed file protocol behind the project registry (see "Storage" in docs/implementation/desktop-local-projects.md):
-// the directory and file checks, the read protocol, the lock and the atomic replace. A store is one file and its
-// sidecar names, all fixed by the module that owns it, inside a directory Rust resolved; nothing here takes a name
-// or a path from the webview. It knows nothing of what the file holds: parsing, validation, limits and what each
-// failure means belong to the owner. Every failure here is `Unavailable`.
+// The reviewed file protocol behind the project registry and the task store (see "Storage" in
+// docs/implementation/desktop-local-projects.md): the directory and file checks, the read protocol, the lock and the
+// atomic replace. A store is one file and its sidecar names, all fixed by the module that owns it, inside a directory
+// Rust resolved; nothing here takes a name or a path from the webview. It knows nothing of what the file holds:
+// parsing, validation, limits and what each failure means belong to the owner. Every failure here is `Unavailable`.
 use std::fs::{DirBuilder, File, Metadata, OpenOptions};
 use std::io::{ErrorKind, Read, Write};
+use std::marker::PhantomData;
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -31,12 +32,19 @@ pub(crate) struct Files {
     pub(crate) writer: &'static Mutex<()>,
 }
 
+/// One store, named by a marker type so that the compiler can tell stores apart. Implemented only by the module that
+/// owns each store (config.test.ts pins the implementations).
+pub(crate) trait Store: 'static {
+    fn files() -> &'static Files;
+}
+
 // Read protocol: never creates, writes, renames, truncates or changes permissions of anything.
 
 /// `None` when the directory or the file does not exist. Otherwise at most `max + 1` bytes, so the owner can tell
 /// an oversized file, with the metadata of the descriptor they were read from. I/O and permission failures are
 /// `Unavailable`, never a judgement about the contents.
-pub(crate) fn read(dir: &Path, files: &Files, max: u64) -> Result<Option<(Vec<u8>, Metadata)>, Unavailable> {
+pub(crate) fn read<S: Store>(dir: &Path, max: u64) -> Result<Option<(Vec<u8>, Metadata)>, Unavailable> {
+    let files = S::files();
     match std::fs::symlink_metadata(dir) {
         Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
         Err(_) => return Err(Unavailable),
@@ -77,15 +85,21 @@ fn owned_regular_file(meta: &Metadata) -> Result<(), Unavailable> {
 
 // Write protocol
 
-/// Steps 1–4 of the write protocol, held until dropped. Dropping it is step 12: fields drop in declaration
-/// order, so the descriptor closes (releasing the flock) before the mutex is released.
-pub(crate) struct Locked {
+/// Proof that this thread holds store `S`'s lock in `dir`: steps 1–4 of the write protocol, held until dropped.
+/// Only `lock` can make one, because its fields are private to this module. Its type names its store, so a guard
+/// for one store cannot authorize a write to another, and it records the directory it locked, so it cannot
+/// authorize a write elsewhere. It is neither Clone nor Send (it holds a MutexGuard). Dropping it is step 12: fields
+/// drop in declaration order, so the descriptor closes (releasing the flock) before the mutex is released.
+pub(crate) struct Locked<S: Store> {
+    dir: PathBuf,
     _file: File,
     _writer: MutexGuard<'static, ()>,
+    _store: PhantomData<fn() -> S>,
 }
 
 /// `None` only when `dir` is missing and `create` is false. Existing permissions are never changed.
-pub(crate) fn lock(dir: &Path, files: &Files, create: bool) -> Result<Option<Locked>, Unavailable> {
+pub(crate) fn lock<S: Store>(dir: &Path, create: bool) -> Result<Option<Locked<S>>, Unavailable> {
+    let files = S::files();
     // The mutex serializes this process's threads without spending the flock budget: a second descriptor in
     // the same process would also be refused by flock.
     let writer = files.writer.lock().unwrap_or_else(|e| e.into_inner());
@@ -108,7 +122,7 @@ pub(crate) fn lock(dir: &Path, files: &Files, create: bool) -> Result<Option<Loc
     loop {
         // SAFETY: flock on a descriptor owned by `file`. Closing it releases the lock, also when the process dies.
         if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
-            return Ok(Some(Locked { _file: file, _writer: writer }));
+            return Ok(Some(Locked { dir: dir.to_path_buf(), _file: file, _writer: writer, _store: PhantomData }));
         }
         match std::io::Error::last_os_error().raw_os_error() {
             Some(libc::EWOULDBLOCK | libc::EINTR) if Instant::now() < deadline => std::thread::sleep(LOCK_RETRY),
@@ -122,9 +136,10 @@ fn open_lock(path: &Path) -> std::io::Result<File> {
     OpenOptions::new().read(true).write(true).create(true).mode(0o600).custom_flags(libc::O_NOFOLLOW).open(path)
 }
 
-/// Steps 8–11, called by the owner with the store's lock held and `bytes` already checked against its limits.
-/// Only a temp file this call created exclusively and synced is ever renamed over the stored file.
-pub(crate) fn replace(dir: &Path, files: &Files, bytes: &[u8]) -> Result<(), Unavailable> {
+/// Steps 8–11, in the directory and for the store the guard locked, with `bytes` already checked against the owner's
+/// limits. Only a temp file this call created exclusively and synced is ever renamed over the stored file.
+pub(crate) fn replace<S: Store>(locked: &Locked<S>, bytes: &[u8]) -> Result<(), Unavailable> {
+    let (dir, files) = (locked.dir.as_path(), S::files());
     let temp = dir.join(files.temp);
     // unlink removes a symlink itself, never its target, and fails on a directory.
     match std::fs::remove_file(&temp) {
@@ -214,3 +229,6 @@ pub(crate) fn fault(step: Step) -> std::io::Result<()> {
         None => Ok(()),
     }
 }
+
+#[cfg(test)]
+mod tests;

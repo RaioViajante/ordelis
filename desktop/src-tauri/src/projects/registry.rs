@@ -5,7 +5,7 @@
 // the metadata functions in folder.rs.
 use super::folder::{self, Candidate, FileId};
 use super::{AddOutcome, ErrorCode, Project, ProjectList, RemoveOutcome, ResetOutcome, Status};
-use crate::store::{self, fault, sync_dir, trusted_dir, Files, Step};
+use crate::store::{self, fault, sync_dir, trusted_dir, Files, Step, Store};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::io::ErrorKind;
@@ -28,6 +28,15 @@ const BACKUP_SUFFIXES: u32 = 15;
 
 static WRITER: Mutex<()> = Mutex::new(());
 static FILES: Files = Files { file: REGISTRY, lock: LOCK, temp: TEMP, writer: &WRITER };
+
+/// The registry's store: its lock guards are `store::Locked<Registry>`.
+pub(super) struct Registry;
+
+impl Store for Registry {
+    fn files() -> &'static Files {
+        &FILES
+    }
+}
 
 use ErrorCode::{RegistryCorrupt, RegistryFull, RegistryNewerVersion, RegistryUnavailable as Unavailable};
 
@@ -86,10 +95,16 @@ pub(super) fn list(dir: &Path) -> Result<ProjectList, ErrorCode> {
     Ok(ProjectList { schema_version: 1, projects: stored.projects.iter().map(|r| r.project(home.as_deref())).collect() })
 }
 
+/// Each record's id and registration time, for the task store's project links (see
+/// docs/implementation/desktop-tasks.md). The read protocol only: no lock, no write, and no look at any folder.
+pub(super) fn registrations(dir: &Path) -> Result<Vec<(String, u64)>, ErrorCode> {
+    Ok(load(dir)?.projects.into_iter().map(|r| (r.id, r.registered_at_ms)).collect())
+}
+
 /// `picked` is the path the native panel returned. Nothing is created unless it passes the registration check.
 pub(super) fn add(dir: &Path, picked: &Path) -> Result<AddOutcome, ErrorCode> {
     let candidate = folder::inspect(picked, valid_path)?;
-    let _locked = lock(dir, true)?.ok_or(Unavailable)?;
+    let locked = lock(dir, true)?.ok_or(Unavailable)?;
     let mut stored = load(dir)?;
     let home = folder::display_home();
     if let Some(existing) = duplicate(&stored, &candidate) {
@@ -111,7 +126,7 @@ pub(super) fn add(dir: &Path, picked: &Path) -> Result<AddOutcome, ErrorCode> {
     #[cfg(test)]
     tests::before_recheck();
     folder::recheck(&candidate)?;
-    commit(dir, &stored)?;
+    commit(&locked, &stored)?;
     Ok(AddOutcome::Added { project: record.project(home.as_deref()) })
 }
 
@@ -120,13 +135,13 @@ pub(super) fn remove(dir: &Path, id: &str) -> Result<RemoveOutcome, ErrorCode> {
     if id_number(id).is_none() {
         return Err(ErrorCode::InvalidInput);
     }
-    let _locked = lock(dir, true)?.ok_or(Unavailable)?;
+    let locked = lock(dir, true)?.ok_or(Unavailable)?;
     let mut stored = load(dir)?;
     let Some(index) = stored.projects.iter().position(|r| r.id == id) else {
         return Ok(RemoveOutcome::NotFound);
     };
     stored.projects.remove(index);
-    commit(dir, &stored)?;
+    commit(&locked, &stored)?;
     Ok(RemoveOutcome::Removed)
 }
 
@@ -223,7 +238,7 @@ pub(super) fn import(dir: &Path, legacy: &Path) -> Import {
     }
     // 3. Creates `dir` if absent, exactly as every write does. This creates projects.lock, which is therefore not a
     // precedence signal.
-    let Ok(Some(_locked)) = lock(dir, true) else {
+    let Ok(Some(locked)) = lock(dir, true) else {
         return Import::Failed;
     };
     // 4. The decisive check, under the lock: an add or another instance's import that committed first wins.
@@ -231,7 +246,7 @@ pub(super) fn import(dir: &Path, legacy: &Path) -> Import {
         return Import::Superseded;
     }
     // 5. The atomic write path, which also removes a stale projects.json.tmp.
-    match commit(dir, &stored) {
+    match commit(&locked, &stored) {
         Ok(()) => Import::Imported,
         Err(_) => Import::Failed,
     }
@@ -353,7 +368,7 @@ fn load(dir: &Path) -> Result<Stored, ErrorCode> {
 
 /// I/O and permission failures are `registry_unavailable`, never corruption.
 fn read(dir: &Path) -> Result<Loaded, ErrorCode> {
-    let Some((bytes, meta)) = store::read(dir, &FILES, MAX_BYTES)? else {
+    let Some((bytes, meta)) = store::read::<Registry>(dir, MAX_BYTES)? else {
         return Ok(Loaded::Empty);
     };
     let found = FileId::of(&meta);
@@ -370,17 +385,18 @@ fn read(dir: &Path) -> Result<Loaded, ErrorCode> {
 // Write protocol, through crate::store with the registry's own names.
 
 /// Steps 1–4 of the write protocol, held until dropped (step 12). See store::lock.
-fn lock(dir: &Path, create: bool) -> Result<Option<store::Locked>, ErrorCode> {
-    Ok(store::lock(dir, &FILES, create)?)
+fn lock(dir: &Path, create: bool) -> Result<Option<store::Locked<Registry>>, ErrorCode> {
+    Ok(store::lock::<Registry>(dir, create)?)
 }
 
-/// Steps 7–11. Only a temp file this call created exclusively and synced is ever renamed over the registry.
-fn commit(dir: &Path, stored: &Stored) -> Result<(), ErrorCode> {
+/// Steps 7–11, only under the registry's own lock, in the directory it locked. Only a temp file this call created
+/// exclusively and synced is ever renamed over the registry.
+fn commit(locked: &store::Locked<Registry>, stored: &Stored) -> Result<(), ErrorCode> {
     let bytes = serde_json::to_vec_pretty(stored).map_err(|_| Unavailable)?;
     if stored.projects.len() > MAX_RECORDS || bytes.len() as u64 > MAX_BYTES {
         return Err(RegistryFull);
     }
-    Ok(store::replace(dir, &FILES, &bytes)?)
+    Ok(store::replace(locked, &bytes)?)
 }
 
 #[cfg(test)]

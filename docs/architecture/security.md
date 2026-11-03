@@ -19,7 +19,7 @@
 
 | Property | State | Source |
 | --- | --- | --- |
-| The interface can call exactly six reviewed native commands, checked by Tauri's access control with an explicit app manifest | Implemented and tested | [IPC authorization](../implementation/desktop-architecture.md#ipc-authorization) |
+| The interface can call exactly ten reviewed native commands, checked by Tauri's access control with an explicit app manifest | Implemented and tested | [IPC authorization](../implementation/desktop-architecture.md#ipc-authorization) |
 | Strict content security policy: no remote scripts, fonts or images, no inline styles in production | Implemented and tested | [Trust boundaries](../implementation/desktop-architecture.md#tauri-and-webview-trust-boundaries) |
 | The interface has no filesystem, shell, network or plugin permission | Implemented and tested | [Capabilities](../implementation/desktop-architecture.md#security-capabilities-and-permissions) |
 | A release build cannot start Python; the one runtime query is development-only, fixed and argument-free | Implemented, verified on a real bundle in CI | [Runtime bridge](../implementation/desktop-runtime-bridge.md) |
