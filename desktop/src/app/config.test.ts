@@ -16,10 +16,13 @@ const read = (p: string) => readFileSync(join(root, p), "utf8");
 // this list against the compiler's dep-info, so any other compiled file fails CI however it was brought in.
 const nativeSources: { configurations: Record<string, string[]> } = JSON.parse(read("scripts/native-sources.json"));
 
-// The production project registry files, as listed (and compiler-verified) above, keyed by path under src-tauri/src.
+// The production project registry files and the storage protocol they use (src/store.rs), as listed (and
+// compiler-verified) above, keyed by path under src-tauri/src.
 function projectSources(): Record<string, string> {
   const production = new Set(
-    ["default", "release", "dev-runtime"].flatMap((c) => nativeSources.configurations[c]).filter((f) => f.startsWith("src/projects")),
+    ["default", "release", "dev-runtime"]
+      .flatMap((c) => nativeSources.configurations[c])
+      .filter((f) => f.startsWith("src/projects") || f === "src/store.rs"),
   );
   return Object.fromEntries([...production].map((f) => [f.slice("src/".length), read(`src-tauri/${f}`)]));
 }
@@ -30,11 +33,12 @@ function projectSources(): Record<string, string> {
 const REVIEWED_LISTING = "std::fs::read_dir(dir)";
 
 // Content rules for the project registry: no listing, contents, processes, network, Git, Python or gate, and only
-// registry.rs touches files. Which files exist is not decided here; the compiler-verified list above decides it.
+// registry.rs and store.rs touch files. Which files exist is not decided here; the compiler-verified list above decides it.
 function projectContentViolations(files: Record<string, string>): string[] {
   const violations: string[] = [];
   const fsAllowed: Record<string, string[]> = {
-    "projects/registry.rs": ["DirBuilder", "File", "Metadata", "OpenOptions", "hard_link", "remove_file", "rename", "symlink_metadata"],
+    "projects/registry.rs": ["hard_link", "remove_file", "symlink_metadata"],
+    "store.rs": ["DirBuilder", "File", "Metadata", "OpenOptions", "remove_file", "rename", "symlink_metadata"],
     "projects/folder.rs": ["Metadata", "canonicalize", "symlink_metadata"],
   };
   const libcAllowed = new Set([
@@ -60,7 +64,7 @@ function projectContentViolations(files: Record<string, string>): string[] {
     const fsItems = [...rust.matchAll(/std::fs::(\w+)|use std::fs::\{([^}]*)\}/g)].flatMap((m) => (m[1] ? [m[1]] : m[2].split(",").map((x) => x.trim())));
     for (const item of fsItems) if (!(fsAllowed[file] ?? []).includes(item)) violations.push(`${file}: std::fs::${item}`);
     if (/use std::fs(?:;|::\*)/.test(rust)) violations.push(`${file}: imports all of std::fs`);
-    if (file !== "projects/registry.rs" && /OpenOptions|DirBuilder|remove_file|rename\(|hard_link/.test(rust)) {
+    if (!["projects/registry.rs", "store.rs"].includes(file) && /OpenOptions|DirBuilder|remove_file|rename\(|hard_link/.test(rust)) {
       violations.push(`${file}: file operation outside the registry`);
     }
     for (const m of rust.matchAll(/libc::(\w+)/g)) if (!libcAllowed.has(m[1])) violations.push(`${file}: libc::${m[1]}`);
@@ -151,23 +155,37 @@ describe("desktop trust boundary", () => {
   // Registration is a bookmark: the registry module looks at folder metadata and its own files, nothing else.
   it("keeps the project registry away from folder contents, processes and the network", () => {
     const files = projectSources();
-    expect(Object.keys(files).sort()).toEqual(["projects.rs", "projects/folder.rs", "projects/registry.rs"]);
+    expect(Object.keys(files).sort()).toEqual(["projects.rs", "projects/folder.rs", "projects/registry.rs", "store.rs"]);
     expect(projectContentViolations(files)).toEqual([]);
     const production = (p: string) => {
       const text = read(p);
       // registry.rs ends with its test module declaration; tests live in their own file.
       return p.endsWith("registry.rs") ? text.slice(0, text.lastIndexOf("#[cfg(test)]\nmod tests;")) : text;
     };
-    // The registry opens files only in its four registry-file functions, and changes only its own fixed names.
+    // The registry's files are opened only in the store's four functions, and only under the registry's own fixed
+    // names: the store holds no name of its own and receives only FILES. The registry itself only links the
+    // corrupt file to its backup name and then removes the registry name (reset).
     const registry = production("src-tauri/src/projects/registry.rs");
+    const store = read("src-tauri/src/store.rs");
     const functions = [...registry.matchAll(/^(?:pub\(super\) )?fn (\w+)[\s\S]*?^\}/gm)];
-    const opening = functions.filter((f) => /OpenOptions/.test(f[0])).map((f) => f[1]);
-    expect(opening).toEqual(["open_registry", "open_lock", "create_temp", "open_dir"]);
-    expect(registry.match(/OpenOptions::new\(\)/g)).toHaveLength(4);
-    expect(registry.match(/remove_file\([^)]*\)/g)).toEqual(["remove_file(&registry)", "remove_file(&temp)", "remove_file(&temp)"]);
-    expect(registry.match(/rename\([^)]*\)/g)).toEqual(["rename(&temp, dir.join(REGISTRY)"]);
+    const storeFunctions = [...store.matchAll(/^(?:pub\(crate\) )?fn (\w+)[\s\S]*?^\}/gm)];
+    expect(storeFunctions.filter((f) => /OpenOptions/.test(f[0])).map((f) => f[1])).toEqual(["open_read", "open_lock", "create_temp", "open_dir"]);
+    expect(store.match(/OpenOptions::new\(\)/g)).toHaveLength(4);
+    expect(store.match(/remove_file\([^)]*\)/g)).toEqual(["remove_file(&temp)", "remove_file(&temp)"]);
+    expect(store.match(/rename\([^)]*\)/g)).toEqual(["rename(&temp, dir.join(files.file)"]);
+    expect(store.match(/hard_link/g)).toBeNull();
+    expect(store.match(/DirBuilder::new\(\)[^\n]*/g)).toEqual(["DirBuilder::new().mode(0o700).create(dir) {"]);
+    expect(store.match(/\bjoin\([^)]*\)/g)).toEqual(["join(files.file)", "join(files.lock)", "join(files.temp)", "join(files.file)"]);
+    expect(store).not.toMatch(/const \w+: &str|"[^"]*\.(?:json|lock|tmp)"/);
+    expect(registry).toMatch(/^static FILES: Files = Files \{ file: REGISTRY, lock: LOCK, temp: TEMP, writer: &WRITER \};$/m);
+    expect(registry.match(/store::\w+\([^)]*\)/g)).toEqual([
+      "store::read(dir, &FILES, MAX_BYTES)",
+      "store::lock(dir, &FILES, create)",
+      "store::replace(dir, &FILES, &bytes)",
+    ]);
+    expect(registry.match(/OpenOptions|DirBuilder|rename\(/g)).toBeNull();
+    expect(registry.match(/remove_file\([^)]*\)/g)).toEqual(["remove_file(&registry)"]);
     expect(registry.match(/hard_link\([^)]*\)/g)).toEqual(["hard_link(registry, &backup)"]);
-    expect(registry.match(/DirBuilder::new\(\)[^\n]*/g)).toEqual(["DirBuilder::new().mode(0o700).create(dir) {"]);
     // Criterion 21's exception: one listing, of the directory backup_present was given, reading entry names only
     // and comparing them with the fixed backup prefix. It opens, stats, reads, renames and removes no entry, and
     // its only caller is the import's precedence check.
@@ -184,13 +202,21 @@ describe("desktop trust boundary", () => {
     expect(registry).toMatch(/^const TEMP: &str = "projects\.json\.tmp";$/m);
     expect(registry).toMatch(/^const BACKUP_PREFIX: &str = "projects\.json\.corrupt-";$/m);
     // Failure injection and the pre-commit test hook are compiled out of production builds.
-    expect(registry).toMatch(/#\[cfg\(not\(test\)\)\]\nfn fault\(_: Step\) -> std::io::Result<\(\)> \{\n {4}Ok\(\(\)\)\n\}/);
-    expect(registry.match(/tests::\w+\(/g)).toEqual(["tests::before_recheck(", "tests::after_backup_scan(", "tests::fault("]);
+    expect(store).toMatch(/#\[cfg\(not\(test\)\)\]\npub\(crate\) fn fault\(_: Step\) -> std::io::Result<\(\)> \{\n {4}Ok\(\(\)\)\n\}/);
+    expect(store.match(/^#\[cfg\(test\)\]\n(?:thread_local!|pub\(crate\) fn \w+)/gm)).toEqual([
+      "#[cfg(test)]\nthread_local!",
+      "#[cfg(test)]\npub(crate) fn arm",
+      "#[cfg(test)]\npub(crate) fn fault",
+    ]);
+    expect(store.match(/FAULTS/g)).toHaveLength(3);
+    expect(store.match(/tests::/g)).toBeNull();
+    expect(registry.match(/tests::\w+\(/g)).toEqual(["tests::before_recheck(", "tests::after_backup_scan("]);
     expect(registry).toMatch(/ {4}#\[cfg\(test\)\]\n {4}tests::after_backup_scan\(\);\n/);
     expect(registry).toMatch(/ {4}#\[cfg\(test\)\]\n {4}tests::before_recheck\(\);\n {4}folder::recheck\(&candidate\)\?;/);
     // The registry and the panel are macOS-only; other targets answer unsupported_platform.
     const projects = read("src-tauri/src/projects.rs");
     expect(projects).toMatch(/#\[cfg\(target_os = "macos"\)\]\nmod folder;\n#\[cfg\(target_os = "macos"\)\]\nmod registry;/);
+    expect(read("src-tauri/src/lib.rs")).toMatch(/\nmod runtime_bridge;\n#\[cfg\(target_os = "macos"\)\]\nmod store;\n/);
     expect(projects.match(/rfd::/g)).toEqual(["rfd::"]);
     expect(projects).toMatch(/\.set_can_create_directories\(false\)/);
   });
@@ -217,6 +243,11 @@ describe("desktop trust boundary", () => {
       },
       "the reviewed listing outside the registry": add("projects/folder.rs", "fn m(dir: &Path) { let _ = std::fs::read_dir(dir); }"),
       "a listing through Path in the registry": add("projects/registry.rs", "fn n(dir: &Path) { let _ = dir.read_dir(); }"),
+      // The shared store is held to the same rules, and the exemption does not reach it.
+      "the reviewed listing in the store": add("store.rs", "fn o(dir: &Path) { let _ = std::fs::read_dir(dir); }"),
+      "a hard link in the store": add("store.rs", "fn p(a: &Path, b: &Path) { let _ = std::fs::hard_link(a, b); }"),
+      "a process in the store": add("store.rs", 'fn q() { let _ = std::process::Command::new("sh"); }'),
+      "an environment read in the store": add("store.rs", 'fn r() { let _ = std::env::var("HOME"); }'),
     };
     for (const [name, files] of Object.entries(bypasses)) {
       expect(projectContentViolations(files), name).not.toEqual([]);

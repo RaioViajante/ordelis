@@ -1,19 +1,18 @@
 // The project registry and its file protocol (see "Storage" in docs/implementation/desktop-local-projects.md).
 // Every file it creates, opens, renames or removes is one of the fixed names below inside `dir`, the app data
-// directory resolved by Tauri; nothing here takes a path from the webview. On chosen and registered folders
-// it only calls the metadata functions in folder.rs.
+// directory resolved by Tauri; nothing here takes a path from the webview. The read, lock and atomic-replace
+// steps are in crate::store, which receives only these names. On chosen and registered folders it only calls
+// the metadata functions in folder.rs.
 use super::folder::{self, Candidate, FileId};
 use super::{AddOutcome, ErrorCode, Project, ProjectList, RemoveOutcome, ResetOutcome, Status};
+use crate::store::{self, fault, sync_dir, trusted_dir, Files, Step};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use std::fs::{DirBuilder, File, OpenOptions};
-use std::io::{ErrorKind, Read, Write};
-use std::os::fd::AsRawFd;
+use std::io::ErrorKind;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const REGISTRY: &str = "projects.json";
 const LOCK: &str = "projects.lock";
@@ -25,11 +24,19 @@ const MAX_RECORDS: usize = 256;
 const MAX_PATH_BYTES: usize = 1024;
 const MAX_NEXT_ID: u64 = 10_000_000_000;
 const MAX_SAFE_INTEGER: u64 = (1 << 53) - 1;
-const LOCK_RETRY: Duration = Duration::from_millis(50);
-const LOCK_BUDGET: Duration = Duration::from_secs(2);
 const BACKUP_SUFFIXES: u32 = 15;
 
+static WRITER: Mutex<()> = Mutex::new(());
+static FILES: Files = Files { file: REGISTRY, lock: LOCK, temp: TEMP, writer: &WRITER };
+
 use ErrorCode::{RegistryCorrupt, RegistryFull, RegistryNewerVersion, RegistryUnavailable as Unavailable};
+
+/// Every storage failure of the registry is registry_unavailable.
+impl From<store::Unavailable> for ErrorCode {
+    fn from(_: store::Unavailable) -> Self {
+        Unavailable
+    }
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -346,20 +353,9 @@ fn load(dir: &Path) -> Result<Stored, ErrorCode> {
 
 /// I/O and permission failures are `registry_unavailable`, never corruption.
 fn read(dir: &Path) -> Result<Loaded, ErrorCode> {
-    match std::fs::symlink_metadata(dir) {
-        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(Loaded::Empty),
-        Err(_) => return Err(Unavailable),
-        Ok(meta) => trusted_dir(&meta)?,
-    }
-    let file = match open_registry(&dir.join(REGISTRY)) {
-        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(Loaded::Empty),
-        Err(_) => return Err(Unavailable),
-        Ok(file) => file,
+    let Some((bytes, meta)) = store::read(dir, &FILES, MAX_BYTES)? else {
+        return Ok(Loaded::Empty);
     };
-    let meta = file.metadata().map_err(|_| Unavailable)?;
-    owned_regular_file(&meta)?;
-    let mut bytes = Vec::new();
-    (&file).take(MAX_BYTES + 1).read_to_end(&mut bytes).map_err(|_| Unavailable)?;
     let found = FileId::of(&meta);
     if bytes.len() as u64 > MAX_BYTES {
         return Ok(Loaded::Corrupt(found));
@@ -371,74 +367,11 @@ fn read(dir: &Path) -> Result<Loaded, ErrorCode> {
     })
 }
 
-/// A symlink (ELOOP) or anything unexpected fails; O_NONBLOCK makes a FIFO return at once instead of waiting
-/// for a writer. std adds O_CLOEXEC.
-fn open_registry(path: &Path) -> std::io::Result<File> {
-    OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(path)
-}
+// Write protocol, through crate::store with the registry's own names.
 
-fn euid() -> u32 {
-    // SAFETY: geteuid has no preconditions.
-    unsafe { libc::geteuid() }
-}
-
-/// The directory itself, not a symlink, owned by this user and writable by nobody else.
-fn trusted_dir(meta: &std::fs::Metadata) -> Result<(), ErrorCode> {
-    let trusted = meta.is_dir() && meta.uid() == euid() && meta.mode() & 0o022 == 0;
-    trusted.then_some(()).ok_or(Unavailable)
-}
-
-fn owned_regular_file(meta: &std::fs::Metadata) -> Result<(), ErrorCode> {
-    (meta.is_file() && meta.uid() == euid()).then_some(()).ok_or(Unavailable)
-}
-
-// Write protocol
-
-static WRITER: Mutex<()> = Mutex::new(());
-
-/// Steps 1–4 of the write protocol, held until dropped. Dropping it is step 12: fields drop in declaration
-/// order, so the descriptor closes (releasing the flock) before the mutex is released.
-struct Locked {
-    _file: File,
-    _writer: MutexGuard<'static, ()>,
-}
-
-/// `None` only when `dir` is missing and `create` is false. Existing permissions are never changed.
-fn lock(dir: &Path, create: bool) -> Result<Option<Locked>, ErrorCode> {
-    // The mutex serializes this process's threads without spending the flock budget: a second descriptor in
-    // the same process would also be refused by flock.
-    let writer = WRITER.lock().unwrap_or_else(|e| e.into_inner());
-    let meta = match std::fs::symlink_metadata(dir) {
-        Err(e) if e.kind() == ErrorKind::NotFound && !create => return Ok(None),
-        Err(e) if e.kind() == ErrorKind::NotFound => {
-            // Not recursive: the parent must already exist.
-            match DirBuilder::new().mode(0o700).create(dir) {
-                Err(e) if e.kind() != ErrorKind::AlreadyExists => return Err(Unavailable),
-                _ => std::fs::symlink_metadata(dir),
-            }
-        }
-        other => other,
-    }
-    .map_err(|_| Unavailable)?;
-    trusted_dir(&meta)?;
-    let file = open_lock(&dir.join(LOCK)).map_err(|_| Unavailable)?;
-    owned_regular_file(&file.metadata().map_err(|_| Unavailable)?)?;
-    let deadline = Instant::now() + LOCK_BUDGET;
-    loop {
-        // SAFETY: flock on a descriptor owned by `file`. Closing it releases the lock, also when the process dies.
-        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
-            return Ok(Some(Locked { _file: file, _writer: writer }));
-        }
-        match std::io::Error::last_os_error().raw_os_error() {
-            Some(libc::EWOULDBLOCK | libc::EINTR) if Instant::now() < deadline => std::thread::sleep(LOCK_RETRY),
-            _ => return Err(Unavailable),
-        }
-    }
-}
-
-/// The stable sidecar lock file: created once, never written, renamed or removed.
-fn open_lock(path: &Path) -> std::io::Result<File> {
-    OpenOptions::new().read(true).write(true).create(true).mode(0o600).custom_flags(libc::O_NOFOLLOW).open(path)
+/// Steps 1–4 of the write protocol, held until dropped (step 12). See store::lock.
+fn lock(dir: &Path, create: bool) -> Result<Option<store::Locked>, ErrorCode> {
+    Ok(store::lock(dir, &FILES, create)?)
 }
 
 /// Steps 7–11. Only a temp file this call created exclusively and synced is ever renamed over the registry.
@@ -447,79 +380,7 @@ fn commit(dir: &Path, stored: &Stored) -> Result<(), ErrorCode> {
     if stored.projects.len() > MAX_RECORDS || bytes.len() as u64 > MAX_BYTES {
         return Err(RegistryFull);
     }
-    let temp = dir.join(TEMP);
-    // unlink removes a symlink itself, never its target, and fails on a directory.
-    match std::fs::remove_file(&temp) {
-        Err(e) if e.kind() != ErrorKind::NotFound => return Err(Unavailable),
-        _ => {}
-    }
-    let file = create_temp(&temp).map_err(|_| Unavailable)?;
-    let replaced = write_synced(file, &bytes).and_then(|()| {
-        fault(Step::Rename)?;
-        std::fs::rename(&temp, dir.join(REGISTRY))
-    });
-    if replaced.is_err() {
-        // If this cleanup fails too, the stale temp file is never read or promoted; the next write removes it.
-        let _ = fault(Step::TempCleanup).and_then(|()| std::fs::remove_file(&temp));
-        return Err(Unavailable);
-    }
-    // The rename is the commit point: every process now sees the new registry. A failure below is still an
-    // error, and the frontend re-lists after any mutation error instead of assuming nothing changed.
-    sync_dir(dir, Step::CommitSync)
-}
-
-/// O_EXCL fails on any existing name, including a symlink.
-fn create_temp(path: &Path) -> std::io::Result<File> {
-    OpenOptions::new().write(true).create_new(true).mode(0o600).custom_flags(libc::O_NOFOLLOW).open(path)
-}
-
-/// On Apple targets File::sync_all issues fcntl(F_FULLFSYNC), which asks the drive to flush its cache too.
-/// The file is closed when it goes out of scope.
-fn write_synced(mut file: File, bytes: &[u8]) -> std::io::Result<()> {
-    fault(Step::TempWrite)?;
-    file.write_all(bytes)?;
-    fault(Step::TempSync)?;
-    file.sync_all()
-}
-
-/// Best effort where the filesystem does not support it (EINVAL, ENOTSUP); any other failure is an error.
-fn sync_dir(dir: &Path, step: Step) -> Result<(), ErrorCode> {
-    match fault(step).and_then(|()| open_dir(dir)?.sync_all()) {
-        Err(e) if !matches!(e.raw_os_error(), Some(libc::EINVAL | libc::ENOTSUP)) => Err(Unavailable),
-        _ => Ok(()),
-    }
-}
-
-fn open_dir(dir: &Path) -> std::io::Result<File> {
-    OpenOptions::new().read(true).custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW).open(dir)
-}
-
-// Failure injection. Production builds compile `fault` to nothing; the test build arms it per thread from
-// tests.rs, so it cannot be reached through IPC (commands run registry work on other threads).
-
-#[cfg_attr(not(test), allow(dead_code))]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-enum Step {
-    TempWrite,
-    TempSync,
-    Rename,
-    TempCleanup,
-    CommitSync,
-    BackupLink,
-    BackupCheck,
-    BackupSync,
-    ResetUnlink,
-    ResetSync,
-}
-
-#[cfg(not(test))]
-fn fault(_: Step) -> std::io::Result<()> {
-    Ok(())
-}
-
-#[cfg(test)]
-fn fault(step: Step) -> std::io::Result<()> {
-    tests::fault(step)
+    Ok(store::replace(dir, &FILES, &bytes)?)
 }
 
 #[cfg(test)]
