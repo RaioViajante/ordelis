@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
-  "description": "Synapse desktop UI foundation (Tauri 2 + React). Not part of the published npm package.",
+  "description": "Ordelis desktop UI foundation (Tauri 2 + React). Not part of the published npm package.",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit -p . && vite build",

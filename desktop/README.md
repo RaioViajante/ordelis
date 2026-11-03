@@ -1,6 +1,6 @@
-# Synapse desktop
+# Ordelis desktop
 
-Tauri 2 + React + TypeScript shell for Synapse. It is a **local UI only**: it does not start agents,
+Tauri 2 + React + TypeScript shell for Ordelis. It is a **local UI only**: it does not start agents,
 read your files, open a vault or call a provider. The one thing it does with a folder is remember its location
 when you add it in Projects (macOS only; nothing inside the folder is read). Its one link to the Python runtime is a
 development-only status query that is compiled out of default and release builds; Settings → Runtime shows

@@ -58,7 +58,7 @@ A fixed 236 px sidebar and a scrolling page. From the top: the lowercase `ordeli
 
 Navigation shortcuts follow the sidebar order: `⌘1` Home, `⌘2` Sessions, `⌘3` Projects, `⌘4` Context, `⌘5` Agents, `⌘6` Settings (Ctrl on other platforms). Tasks, New Task and Search are disabled and have no shortcut; the export's `⌘N`, `⌘K` and `⌘,` are not implemented. Focus moves to the page after a shortcut or a link. The order lives in `ROUTES` in `desktop/src/app/routes.ts`, which the Settings list also reads.
 
-The visible product name is Ordelis (window title, page title, sidebar wordmark, interface copy). The bundle name `Synapse.app`, the bundle identifier, crate and package names, the data directory, and the native folder-panel and error messages in `src-tauri` still say Synapse. They belong to the identity migration, not to this design work.
+The visible product name is Ordelis (window title, page title, sidebar wordmark, interface copy, the macOS bundle name `Ordelis.app`, native messages). The bundle identifier, crate and package names and the data directory still say Synapse. They belong to the identity migration ([I1 and I2](../migration/ordelis.md#pr-roadmap)), not to this design work.
 
 The export also draws macOS window controls and a top bar with an agent summary and a notification bell. The app uses the native title bar, and the top bar has no real data behind it yet, so neither is drawn.
 

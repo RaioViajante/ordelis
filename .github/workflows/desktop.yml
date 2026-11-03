@@ -128,7 +128,7 @@ jobs:
         run: pnpm tauri build --bundles app
 
       - name: Release bundle holds no development runtime
-        run: scripts/verify-release-isolation.sh src-tauri/target/release/bundle/macos/Synapse.app
+        run: scripts/verify-release-isolation.sh src-tauri/target/release/bundle/macos/Ordelis.app
 
       # Negative control: the same verifier must reject a real bundle built with the bridge, and its fixture
       # tests must reject missing, invalid or uninspectable executables.
@@ -136,4 +136,4 @@ jobs:
         run: pnpm tauri build --debug --bundles app --features dev-runtime
 
       - name: Release verifier rejects the development bundle and bad fixtures
-        run: scripts/test-verify-release-isolation.sh src-tauri/target/debug/bundle/macos/Synapse.app
+        run: scripts/test-verify-release-isolation.sh src-tauri/target/debug/bundle/macos/Ordelis.app

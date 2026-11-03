@@ -83,7 +83,7 @@ pub fn run() {
             reset_projects
         ])
         .run(context())
-        .expect("error while running the Synapse desktop shell");
+        .expect("error while running the Ordelis desktop shell");
 }
 
 #[cfg(test)]
@@ -171,6 +171,17 @@ mod tests {
 
     fn rejected(result: Result<serde_json::Value, serde_json::Value>) -> String {
         result.expect_err("command must be rejected").to_string()
+    }
+
+    // The project registry lives in app_data_dir, which Tauri derives from the bundle identifier and not from
+    // the product name. Renaming the product must not move it; changing the identifier moves it and needs the
+    // reviewed registry import (docs/migration/ordelis.md, I2). The path is computed here, never read or created.
+    #[test]
+    fn product_name_is_ordelis_while_the_data_directory_still_follows_the_legacy_identifier() {
+        let app = app();
+        assert_eq!(app.package_info().name, "Ordelis");
+        assert_eq!(app.config().identifier, "dev.raioviajante.synapse");
+        assert!(app.path().app_data_dir().unwrap().ends_with("dev.raioviajante.synapse"));
     }
 
     #[test]
