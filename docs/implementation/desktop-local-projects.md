@@ -27,7 +27,7 @@ The Python runtime is not involved: nothing it offers is needed to pick a folder
 - Local-origin app commands are ACL-checked only because `build.rs` declares an app manifest; plugin commands are always checked ([details](desktop-architecture.md#ipc-authorization)). The existing Rust tests in `src-tauri/src/lib.rs` show the pattern every new command must follow.
 - Tauri binds command arguments by key: each parameter is looked up in the JSON body by name (`tauri-2.12.3/src/ipc/command.rs`), so extra top-level keys are ignored, as `get_runtime_status` already relies on.
 - Projects and Home are keyed by sample project **name** (`#/projects/<name>`, `Workspace.project`), and `src/fixtures/mock.ts` is the only data source.
-- macOS is the only platform built and launched; desktop CI runs on `macos-latest` only. The bundle identifier is `dev.raioviajante.synapse` for debug and release builds alike.
+- macOS is the only platform built and launched; desktop CI runs on `macos-latest` only. The bundle identifier is `app.ordelis.desktop` for debug and release builds alike; before I2 ([issue #82](https://github.com/RaioViajante/ordelis/issues/82)) it was `dev.raioviajante.synapse`.
 - `rfd` 0.17.2 (latest stable, checked on crates.io) needs, on macOS, `objc2` 0.6, `objc2-app-kit`, `objc2-foundation` and `objc2-core-foundation` 0.3, `block2` 0.6, `dispatch2` 0.3 and `raw-window-handle` 0.6. All are already in `Cargo.lock` at compatible versions through Tauri, so on macOS `rfd` is the only new compiled crate.
 - The official `tauri-plugin-dialog` 2.8.2 depends on `rfd ^0.16` and `tauri-plugin-fs ^2.7.0`. Its Rust API is usable without granting a frontend permission. Its frontend `open` command, when granted, adds the chosen folder to the asset-protocol and fs plugin scopes.
 
@@ -158,14 +158,14 @@ Not part of this slice, but binding on any feature that later reads or acts insi
 
 ### Storage
 
-All registry files live in `D = <app_data_dir>` (`~/Library/Application Support/dev.raioviajante.synapse/` on macOS), resolved by Rust's path resolver, never by the frontend. It is not the Python runtime's external state root and not browser storage. Registry functions take `D` as a parameter; only the commands resolve it, so tests never touch the real directory.
+All registry files live in `D = <app_data_dir>` (`~/Library/Application Support/app.ordelis.desktop/` on macOS, as Tauri's path resolver computes it), resolved by Rust's path resolver, never by the frontend. It is not the Python runtime's external state root and not browser storage. Registry functions take `D` as a parameter; only startup resolves it, for the commands and for the one-time [import](#import-from-the-former-identifier), so tests never touch the real directory.
 
 | File | Role |
 | --- | --- |
 | `projects.json` | The registry |
 | `projects.lock` | Stable sidecar lock file. Created once, never written, renamed or removed |
 | `projects.json.tmp` | Temporary file of an in-progress write; never read, and never promoted unless the same write created and synced it |
-| `projects.json.corrupt-<ms>[-<n>]` | A corrupt registry preserved by `reset_projects`; never read, renamed or removed by Synapse |
+| `projects.json.corrupt-<ms>[-<n>]` | A corrupt registry preserved by `reset_projects`; never read, renamed or removed by Synapse. The one-time [import](#import-from-the-former-identifier) only checks whether such a name exists |
 
 ```json
 {
@@ -251,6 +251,15 @@ Argument-free; offered by the UI only after `registry_corrupt`, behind a confirm
 The empty registry is the absence of `projects.json`: nothing is written until the next add, which creates it through the [write protocol](#write-protocol). The backup is never read, renamed or removed by Synapse, so no later step can discard it. Any failure before step 5 leaves `projects.json` in place, still corrupt, so commands keep returning `registry_corrupt` and a retry makes another preserved copy; a crash anywhere behaves the same way or leaves the committed reset. After a reset, IDs restart at `p1`; the frontend discards all cached selections and re-lists. Because step 2 refuses anything but a corrupt file, and steps 3–5 only add a name and remove one name of that same file, `reset_projects` never modifies a valid or newer-schema registry, whoever calls it.
 
 A UI confirmation is not authentication: a script running in `main` with the grant can call `reset_projects` without it. The capability boundary governs who can call; step 2 bounds what any caller can do. The step 4 identity check confirms the link under the lock against cooperating writers; like every check here, it is not a defense against a same-user process racing the filesystem.
+
+### Import from the former identifier
+
+Before I2 the registry lived under the bundle identifier `dev.raioviajante.synapse`. At startup, before the registry state is managed and so before any command can run, Rust imports it once into `D`, copy-only. The full semantics and the maintainer's decisions are in the [migration record](../migration/ordelis.md#registry-migration-semantics-i2); in short:
+
+- The source is `D`'s sibling named `dev.raioviajante.synapse`, a fixed name in Rust, never anything from the webview. It is read through the [read protocol](#read-protocol) only, so nothing there is created, written, locked, renamed or removed.
+- Only a valid version-1 registry is imported, including a valid one with no projects. Anything else (absent, corrupt, newer, untrusted, unreadable) imports nothing and creates nothing.
+- `D` takes precedence: `projects.json` in any form, or any `projects.json.corrupt-*` name, means no import. `projects.lock` and a stale `projects.json.tmp` do not count. The decisive check is made under `D`'s lock, so concurrent launches import once and an add that commits first wins.
+- The records are committed through the [write protocol](#write-protocol) with their ids and `next_id`. A failure before the rename commits nothing, and the next launch tries again.
 
 ### IPC boundary
 
@@ -370,7 +379,7 @@ Authorization and boundaries
 
 19. **[ipc]** Each of the four commands is callable from `main` at `tauri://localhost`; rejected for another window, for a remote origin, and with its grant removed while the manifest remains. Manifest, handler, capability and permission files name exactly the same commands. `add_project` and `reset_projects` behave identically with a hostile payload (e.g. `{ "path": "/etc" }`); `remove_project` returns `invalid_input` for malformed IDs and ignores extra keys.
 20. **[fe]** `config.test.ts` pins every Cargo dependency table, `rfd` only in the macOS target table with default features off, no `tauri-plugin`, exactly two `@tauri-apps` importers and exactly the five command names in the frontend.
-21. **[unit, fe]** Source scans: the registry module contains no `read_dir`, `std::process`, `Command::` or network API, and opens files only in its registry-file functions. The Execution Safety Gate is not imported.
+21. **[unit, fe]** Source scans: the registry module contains no `read_dir`, `std::process`, `Command::` or network API, and opens files only in its registry-file functions. The Execution Safety Gate is not imported. **One reviewed exception** ([issue #82](https://github.com/RaioViajante/ordelis/issues/82)): `backup_present` in `registry.rs` lists the app data directory it is given, reads entry names only, and compares them with the fixed `projects.json.corrupt-` prefix, so the [import](#import-from-the-former-identifier) can see whether a backup exists. `config.test.ts` exempts exactly that one call, `std::fs::read_dir(dir)`, in that file only, and pins it to `backup_present` and its single caller; any other listing, in any registry file, is still a violation.
 22. **[native]** During add, list, remove and reset no child process is created (kqueue `NOTE_FORK` watch as in #42). Nothing under the chosen folder is read: verified with `fs_usage` where a root-capable machine is available, otherwise recorded as covered only by the source scan.
 23. **[native]** Remove from Synapse leaves the folder byte-for-byte unchanged (tree hash before and after).
 24. **[fe]** The browser preview shows the disabled button with its reason and makes no IPC call. The corrupt state offers reset only after confirmation; the newer state offers none. Existing tests pass.
@@ -426,7 +435,7 @@ Resolved by the review of the first draft:
 Still open, none blocking implementation:
 
 - Whether Windows and Linux support is a goal before any content-access feature.
-- Whether development builds should use a separate identifier so they stop sharing the release registry.
+- Whether development builds should use a separate identifier so they stop sharing the release registry. Decided on 2026-11-03 ([issue #82](https://github.com/RaioViajante/ordelis/issues/82)): they keep sharing one identifier for now.
 - TCC and network-volume behavior, to be measured natively in PR 1 and PR 2.
 
 ## Implementation status
