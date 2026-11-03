@@ -78,6 +78,6 @@ Report vulnerabilities privately: open the repository's **Security** tab and cho
 
 #### origins & license
 
-Ordelis was previously named Synapse and began from [MCO](https://github.com/mco-org/mco) `v0.12.1` by the mco maintainers. The inherited runtime keeps its names (the `mco` command, the `runtime` package) and its history. Details are in the [provenance record](docs/migration/ordelis.md#provenance-and-attribution).
+Ordelis was previously named Synapse and began from [MCO](https://github.com/mco-org/mco) `v0.12.1` by the mco maintainers. The inherited runtime keeps its names (the `mco` command, the `runtime` package) and its history. Attribution is in [NOTICE](NOTICE); details are in the [provenance record](docs/migration/ordelis.md#provenance-and-attribution).
 
 Released under the [MIT License](LICENSE), which carries the original copyright notice (Copyright (c) 2026 mco maintainers).

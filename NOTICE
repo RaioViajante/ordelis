@@ -1,0 +1,18 @@
+Ordelis
+=======
+
+Ordelis, formerly named Synapse, began as a fork of the open-source project MCO
+and still contains MCO code.
+
+Upstream project   : MCO, https://github.com/mco-org/mco, version 0.12.1
+Upstream copyright : Copyright (c) 2026 mco maintainers
+License            : MIT. The full text is in the LICENSE file, which is unchanged.
+Fork base          : commit 3cfce13 ("fix(ci): repair npm publishing and prepare
+                     v0.12.1 (#131)", 2026-10-07)
+
+The upstream commit history up to the fork base is retained in this repository.
+Which files come from MCO, and which were added for Ordelis, is recorded in
+docs/migration/ordelis.md#original-mco-foundations-versus-ordelis-specific-work
+
+Bundled fonts carry their own licenses, listed in
+desktop/src/assets/fonts/FONT-LICENSES.txt
