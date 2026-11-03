@@ -2,7 +2,7 @@
  * SYNTHETIC SESSION FIXTURES — SAMPLE DATA ONLY.
  *
  * Every record here is invented to mirror the supplied design reference. None of it was
- * recorded from a process, an agent CLI, a worktree or the Synapse runtime, and no record
+ * recorded from a process, an agent CLI, a worktree or the Ordelis runtime, and no record
  * corresponds to anything running. Ids are made-up labels, not process or provider ids.
  */
 import type { AgentId } from "../components/ui";

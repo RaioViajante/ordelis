@@ -1,10 +1,10 @@
 # Provider runtime-validation foundations
 
-`runtime/runtime_validation.py` defines how Synapse will judge evidence about a real provider CLI **before** any dispatch is allowed. It is a library module only: it has no CLI command, runs no provider, starts no process, reads no credentials, and writes no files. `mco context preview`, `mco context plan`, and `mco context inspect-codex` are unchanged and remain non-dispatching, and the MCO invocation workflow is not wired into Synapse planning. A test pins that no other runtime module references this one except the [probe runner](codex-zero-model-probes.md) and the non-executing [safety gate](../implementation/execution-safety-gate.md), which reuses its parser and status rules unchanged.
+`runtime/runtime_validation.py` defines how Ordelis will judge evidence about a real provider CLI **before** any dispatch is allowed. It is a library module only: it has no CLI command, runs no provider, starts no process, reads no credentials, and writes no files. `mco context preview`, `mco context plan`, and `mco context inspect-codex` are unchanged and remain non-dispatching, and the MCO invocation workflow is not wired into Ordelis planning. A test pins that no other runtime module references this one except the [probe runner](codex-zero-model-probes.md) and the non-executing [safety gate](../implementation/execution-safety-gate.md), which reuses its parser and status rules unchanged.
 
 Evidence for a real provider does not exist yet. The tests use only synthetic records and a fake executable.
 
-**The evaluator is a consistency check over unauthenticated input, not a trusted gate.** It cannot tell a record produced by trusted Synapse code from a forged one. Its output therefore says `evidence_authenticated: false` and `dispatch_authorized: false` in every case, including when all requirements are met.
+**The evaluator is a consistency check over unauthenticated input, not a trusted gate.** It cannot tell a record produced by trusted Ordelis code from a forged one. Its output therefore says `evidence_authenticated: false` and `dispatch_authorized: false` in every case, including when all requirements are met.
 
 ## Evidence model
 
@@ -28,7 +28,7 @@ All string values must match `[A-Za-z0-9._:/@+=-]{1,128}`. The schema is closed:
 | `adapter_declaration` | `adapter_declared` | MCO's adapter says it supports a key or value. Says nothing about the installed CLI or the account. |
 | `cli_help` | `cli_advertised` | The installed CLI's help lists a control. A parser option, not behavior. |
 | `runtime_probe` | `runtime_observed` | Behavior seen in a controlled run of the provider, or a direct local observation such as hashing the executable file. The provider's own output is the witness. |
-| `external_check` | `independently_verified` | A check made by Synapse outside the provider process, for example comparing the scratch directory before and after a probe, or inspecting a sandbox profile that Synapse applied. |
+| `external_check` | `independently_verified` | A check made by Ordelis outside the provider process, for example comparing the scratch directory before and after a probe, or inspecting a sandbox profile that Ordelis applied. |
 
 A fifth state, **unknown**, means no evidence exists for the current executable and probe run. `unsupported` is an explicit outcome: the provider or adapter says the capability is unavailable.
 
@@ -80,12 +80,12 @@ Result for `model="model-1"`, `probe_id="run-1"`:
 
 **What this means.**
 
-- Provider output must never be parsed into a record. A provider is the party being constrained, so its statements about itself are at most `runtime_probe` evidence, and only when trusted Synapse code observed them.
+- Provider output must never be parsed into a record. A provider is the party being constrained, so its statements about itself are at most `runtime_probe` evidence, and only when trusted Ordelis code observed them.
 - `source: "external_check"` is a label. Anyone can write it; a test shows that fully forged records produce `evidence_sufficient`. The label only expresses what a trusted producer is obliged to mean by it.
 - Replay: the `probe_id` filter stops accidental reuse of earlier runs, not deliberate forgery, because the forger also chooses the `probe_id`.
 - A successful model run cannot satisfy an isolation requirement, because only `external_check` can. A forged `external_check` can.
 
-**Trusted construction rule.** Records with source `runtime_probe` or `external_check` may only be built by reviewed Synapse probe-runner code, in the same process and invocation that evaluates them, from the runner's own observations. They must not be read from a file, a command-line argument, an environment variable, a prompt, a vault note, or provider output. Following that rule is what makes `evidence_sufficient` meaningful. A simpler trusted construction boundary like this is enough for the planned runner; cryptographic signing would only be needed if evidence ever had to cross a trust boundary, which is not planned.
+**Trusted construction rule.** Records with source `runtime_probe` or `external_check` may only be built by reviewed Ordelis probe-runner code, in the same process and invocation that evaluates them, from the runner's own observations. They must not be read from a file, a command-line argument, an environment variable, a prompt, a vault note, or provider output. Following that rule is what makes `evidence_sufficient` meaningful. A simpler trusted construction boundary like this is enough for the planned runner; cryptographic signing would only be needed if evidence ever had to cross a trust boundary, which is not planned.
 
 **The only evidence producer is the [zero-model-call probe runner](codex-zero-model-probes.md)**, and it is trusted by construction rule, not by any mechanism: its records are still plain dictionaries and `evidence_authenticated` stays `false`. The runner's authorization is a caller-asserted in-memory object; this library still cannot tell who approved a probe.
 
@@ -99,7 +99,7 @@ Real execution therefore remains unauthorized. A sufficient report does not unbl
 
 ### Why external witnesses are required
 
-A confined program cannot vouch for its own confinement. If the provider reports "I could not write outside the scratch directory," that statement is only as strong as the provider's honesty and its own sandbox. `external_check` evidence must come from Synapse observing effects from outside the provider process, for example by snapshotting the scratch directory and the protected roots before and after a probe, by applying an operating-system confinement itself and inspecting the applied profile, or by observing network attempts at a layer the provider cannot bypass. Absence of an observed effect from one run shows that run did not misbehave, not that enforcement exists; that is why such checks must actively try the forbidden action (for example, attempt a write to a canary path) rather than only watch.
+A confined program cannot vouch for its own confinement. If the provider reports "I could not write outside the scratch directory," that statement is only as strong as the provider's honesty and its own sandbox. `external_check` evidence must come from Ordelis observing effects from outside the provider process, for example by snapshotting the scratch directory and the protected roots before and after a probe, by applying an operating-system confinement itself and inspecting the applied profile, or by observing network attempts at a layer the provider cannot bypass. Absence of an observed effect from one run shows that run did not misbehave, not that enforcement exists; that is why such checks must actively try the forbidden action (for example, attempt a write to a canary path) rather than only watch.
 
 ### Limits of SHA-256 executable identity
 
@@ -128,12 +128,12 @@ A future probe needs an explicit authorization written by the user. No authoriza
 - `capabilities` lists the capabilities the probe may examine; duplicates, non-string items, and unknown names are rejected.
 - `execution_mode` must be `read_only`. There is no fallback to a less restrictive mode.
 - `max_model_calls` is 0 to 3. `network` must be `none` with zero model calls and `provider_endpoint_only` otherwise. Nothing else grants network access, and nothing installs dependencies.
-- `scratch_root` must be an absolute, existing, **empty**, non-symlink directory that does not overlap the repository checkout or any caller-supplied protected root (the vault, the private state root, and real project directories). Overlap is decided by file identity (the shared check described in [Path overlap checks](private-execution-plan.md#path-overlap-checks)), not by comparing path text, so a path spelled in a different case on a case-insensitive filesystem cannot hide an overlap. Probes never run in the Synapse checkout, in a vault, or in a real project.
+- `scratch_root` must be an absolute, existing, **empty**, non-symlink directory that does not overlap the repository checkout or any caller-supplied protected root (the vault, the private state root, and real project directories). Overlap is decided by file identity (the shared check described in [Path overlap checks](private-execution-plan.md#path-overlap-checks)), not by comparing path text, so a path spelled in a different case on a case-insensitive filesystem cannot hide an overlap. Probes never run in the Ordelis checkout, in a vault, or in a real project.
 - `hard_timeout_seconds` is 1 to 300.
 
 On success the result carries `probe_id`, the canonical `scratch_root`, and `path_checks: "point_in_time"`. The checks hold only at the moment of the call. Directories, symlinks, and contents can change afterwards, so a runner must not treat the result as a lasting guarantee. The library check has no expiry. The runner's own `ProbeAuthorization` adds a 15-minute cap and durable single use among cooperating processes through the [private ledger](../implementation/private-authorization-ledger.md) (see [the runner guide](codex-zero-model-probes.md#authorization-lifecycle)).
 
-Synapse never authenticates for the user, reads credential files, or logs prompts. A probe may only use the provider's own existing local login, and only when `max_model_calls` is above zero. Authorization permits a probe; it never permits dispatch.
+Ordelis never authenticates for the user, reads credential files, or logs prompts. A probe may only use the provider's own existing local login, and only when `max_model_calls` is above zero. Authorization permits a probe; it never permits dispatch.
 
 ## Future controlled-probe workflow
 
@@ -148,7 +148,7 @@ Steps 2, 4 and 5 now exist as a library, tested only with fake executables (see 
 
 ## Inherited MCO integration risks (reviewed, not changed)
 
-- `artifact_base` defaults to `reports/review` relative to the working directory ([config](../../runtime/config.py)), and session state lives under `<repo>/.mco/sessions` ([session state](../../runtime/session/state.py)). Both are inside a checkout and incompatible with Synapse privacy.
+- `artifact_base` defaults to `reports/review` relative to the working directory ([config](../../runtime/config.py)), and session state lives under `<repo>/.mco/sessions` ([session state](../../runtime/session/state.py)). Both are inside a checkout and incompatible with Ordelis privacy.
 - MCO loads `<repo>/.mcorc.json`, `.mcorc.yaml`, `.mco/agents.yaml`, and global `~/.mco` settings. A provider run against an untrusted checkout can be influenced by that configuration.
 - The Codex adapter passes `-C <repo_root>` and does not pass `--ephemeral`, so where a real Codex run stores its own session data is unverified and is exactly what `session_persistence` evidence must establish.
 - Retries exist in the session path and the planning config accepts only zero retries; a probe must not reuse that retry path.

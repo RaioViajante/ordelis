@@ -1302,7 +1302,7 @@ def build_parser() -> argparse.ArgumentParser:
     context_preview.add_argument("--total-bytes", type=int, default=8192)
     context_preview.add_argument("--json", action="store_true", help="Print JSON (default for preview)")
     context_plan = context_actions.add_parser("plan", help="Print a private, non-dispatching execution plan")
-    context_plan.add_argument("--config", type=Path, required=True, help="Absolute external Synapse JSON config")
+    context_plan.add_argument("--config", type=Path, required=True, help="Absolute external Ordelis JSON config")
     context_plan.add_argument("--repo", type=Path, required=True, help="Repository to keep private state outside")
     context_plan.add_argument("--project", help="Indexed project ID")
     context_plan.add_argument("--topic", help="Indexed topic ID")

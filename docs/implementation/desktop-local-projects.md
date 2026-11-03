@@ -1,5 +1,7 @@
 # Local project registration (architecture)
 
+> **Formerly Synapse.** Written when the product was named Synapse; the name is kept as written. The product is now Ordelis.
+
 [Issue #45](https://github.com/RaioViajante/synapse/issues/45) (design), [issue #47](https://github.com/RaioViajante/synapse/issues/47) (implementation PR 1). **The Rust backend (milestone PR 1) is implemented, and the Projects UI (PR 2) is implemented in [#74](https://github.com/RaioViajante/ordelis/issues/74) without a reset flow** (see [Implementation status](#implementation-status)). See [Implementation status](#implementation-status) for what is built, verified and still open; the rest of this document is the approved design. It proposes the first real local-project integration: the user explicitly picks a folder, Synapse remembers it, Projects lists it, and the user can forget it again. Registration is a bookmark. It grants no access to the folder's contents and authorizes nothing.
 
 It builds on the [IPC authorization](desktop-architecture.md#ipc-authorization) and follows the pattern of the [runtime bridge](desktop-runtime-bridge.md): a closed list of argument-light commands, fixed error messages, strict parsing and Rust-owned validation. Unlike the runtime bridge, it is meant to ship in release builds, so it must not depend on development-only trust.

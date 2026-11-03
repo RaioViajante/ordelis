@@ -79,8 +79,8 @@ describe("Context search", () => {
     await user.selectOptions(screen.getByRole("combobox", { name: "Project" }), "mochi-web");
     expect(screen.getByText("1 of 1 sample entries · mochi-web")).toBeInTheDocument();
     expect(screen.queryByRole("checkbox", { name: "Select Security / Tokens" })).not.toBeInTheDocument();
-    await user.selectOptions(screen.getByRole("combobox", { name: "Project" }), "synapse");
-    expect(screen.getByRole("heading", { name: "No sample context for synapse" })).toBeInTheDocument();
+    await user.selectOptions(screen.getByRole("combobox", { name: "Project" }), "example-project");
+    expect(screen.getByRole("heading", { name: "No sample context for example-project" })).toBeInTheDocument();
     await user.selectOptions(screen.getByRole("combobox", { name: "Project" }), "");
     expect(screen.getByRole("heading", { name: "No project selected" })).toBeInTheDocument();
   });

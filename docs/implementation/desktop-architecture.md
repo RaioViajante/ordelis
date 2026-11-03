@@ -1,5 +1,7 @@
 # Desktop application architecture
 
+> **Formerly Synapse.** Written when the product was named Synapse; the name is kept as written. The product is now Ordelis.
+
 Foundation for [issue #24](https://github.com/RaioViajante/synapse/issues/24). Synapse stays CLI-first and the Python runtime is unchanged. This increment adds a **disconnected** desktop UI: it shows layout, navigation and honest empty states, and does nothing a user could mistake for execution. See also the [design inventory](desktop-ui-design-inventory.md) and the [visual verification](desktop-visual-verification.md).
 
 ## Where it lives

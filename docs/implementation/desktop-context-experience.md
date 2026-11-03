@@ -1,5 +1,7 @@
 # Desktop Context experience
 
+> **Formerly Synapse.** Written when the product was named Synapse; the name is kept as written. The product is now Ordelis.
+
 For [issue #28](https://github.com/RaioViajante/synapse/issues/28). Frontend-only and display-only: nothing here reads a vault, history, the filesystem, a provider or the Python runtime. See [architecture](desktop-architecture.md) and [visual verification](desktop-visual-verification.md).
 
 ## Sources

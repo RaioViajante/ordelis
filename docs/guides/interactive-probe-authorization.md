@@ -66,7 +66,7 @@ The digest is a SHA-256 over the whole `ProbeAuthorization` (including the priva
 ### Non-guarantees
 
 - **Not resistant to a malicious process running as the same user.** Such a process can write to the terminal (for example with `TIOCSTI` where the OS still allows it), read its own prompt, replace this module, import private capability objects, forge registry entries, call internal Python functions, or execute the selected file directly. Python naming and module visibility do not enforce this boundary.
-- Synapse cannot tell whether a human or a program typed the phrase. A controlling terminal is not proof of a person: agent harnesses and automation commonly run commands inside a pseudo-terminal that the controlling program reads and writes itself, and terminals can be shared or recorded (remote shells, multiplexers). Run the future CLI from a terminal you operate yourself.
+- Ordelis cannot tell whether a human or a program typed the phrase. A controlling terminal is not proof of a person: agent harnesses and automation commonly run commands inside a pseudo-terminal that the controlling program reads and writes itself, and terminals can be shared or recorded (remote shells, multiplexers). Run the future CLI from a terminal you operate yourself.
 - Oversized dynamic values or prompts are rejected before `/dev/tty` is opened.
 - The approval records that this process wrote the prompt and read the matching phrase; it proves neither human presence nor identity.
 - Evidence stays unauthenticated (`evidence_authenticated: false`); dispatch stays unauthorized.

@@ -3,7 +3,7 @@
  *
  * Everything in this file is invented to mirror the supplied design reference
  * (reference/Synapse — telas.pdf). None of it was read from a repository,
- * vault, agent CLI or the Synapse runtime. Pages must render it behind the
+ * vault, agent CLI or the Ordelis runtime. Pages must render it behind the
  * "sample data" label and must never present it as verified or live.
  */
 import type { AgentId } from "../components/ui";
@@ -108,8 +108,8 @@ export const MOCK_PROJECTS: MockProject[] = [
     tasks: [{ id: "onboarding-copy", name: "Draft onboarding copy", tone: "wait", state: "not started" }],
   },
   {
-    name: "synapse",
-    path: "~/code/synapse",
+    name: "example-project",
+    path: "~/code/example-project",
     line: "no tasks yet",
     stages: [
       { label: "Workspace", tone: "ok", text: "no worktrees" },

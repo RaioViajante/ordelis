@@ -1,5 +1,7 @@
 # Synapse MVP plan and MCO capability audit
 
+> **Formerly Synapse.** Written when the product was named Synapse; the name is kept as written, and so is this file's name, because other documents link to it. The product is now Ordelis.
+
 This records the conclusions of [Synapse issue #1](https://github.com/RaioViajante/synapse/issues/1) in the repository so they remain available if the fork is detached. The inherited MCO baseline was `3cfce13` (`v0.12.1`); this audit reads the fork source on `feat/vault-context-preview`. Synapse will remain CLI-first, preserve the existing MCO commands and [MIT attribution](../../LICENSE), and treat an explicitly configured Obsidian vault as read-only reference data. No real vault, credential, subscription, or provider installation was inspected for this plan.
 
 ## What exists today
