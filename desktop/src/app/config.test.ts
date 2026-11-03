@@ -208,7 +208,7 @@ describe("desktop trust boundary", () => {
     expect(pkg.dependencies["@tauri-apps/api"]).toBe(crate);
   });
 
-  it("calls exactly one native command, from one module, with no arguments", () => {
+  it("calls get_runtime_status from the runtime adapter, with no arguments", () => {
     // What the production bundle may contain, including which module may import @tauri-apps, is checked against a
     // real build in frontend-boundary.test.ts.
     // index.html loads the app's one entry module, and there is no public/ directory to serve other scripts from.
@@ -223,6 +223,40 @@ describe("desktop trust boundary", () => {
     expect(adapter.match(/\binvoke\b/g)).toHaveLength(2);
     expect(adapter).toMatch(/\binvoke\(COMMAND\)/);
     expect(adapter).not.toMatch(/export[^\n]*\binvoke\b(?!\()|export \{|export \*/);
+  });
+
+  // Issue #74: the project registry commands are reachable from one adapter, and the reset command from nowhere.
+  it("names the project commands in one module only, sends no path, and never names the reset command", () => {
+    const sources: string[] = [];
+    const walk = (dir: string) => {
+      for (const name of readdirSync(dir)) {
+        const p = join(dir, name);
+        if (statSync(p).isDirectory()) walk(p);
+        else if (/\.[cm]?[jt]sx?$/.test(name) && !/\.(test|spec)\./.test(name)) sources.push(p.slice(join(root, "src").length + 1));
+      }
+    };
+    walk(join(root, "src"));
+    const adapter = "app/projects.ts";
+    expect(sources).toContain(adapter);
+    for (const file of sources.filter((f) => f !== adapter)) {
+      expect(read(`src/${file}`), file).not.toMatch(/\b(?:list_projects|add_project|remove_project|reset_projects)\b/);
+    }
+    // Exactly the two reviewed adapters load the Tauri API.
+    expect(sources.filter((f) => /@tauri-apps/.test(read(`src/${f}`))).sort()).toEqual(["app/projects.ts", "app/runtimeStatus.ts"]);
+
+    const code = read(`src/${adapter}`);
+    expect(code).not.toMatch(/reset_projects/);
+    expect(code.match(/from "@tauri-apps[^"]*"/g)).toEqual(['from "@tauri-apps/api/core"']);
+    expect(code).toMatch(/^import \{ invoke, isTauri \} from "@tauri-apps\/api\/core";$/m);
+    // Three call sites. The first two take nothing; the third takes only a registration id.
+    expect(code.match(/\binvoke\(/g)).toHaveLength(3);
+    expect(code).toMatch(/\binvoke\("list_projects"\)/);
+    expect(code).toMatch(/\binvoke\("add_project"\)/);
+    expect(code).toMatch(/\binvoke\("remove_project", \{ id \}\)/);
+    expect(code).toMatch(/export function listProjects\(\): /);
+    expect(code).toMatch(/export function addProject\(\): /);
+    expect(code).toMatch(/export function removeProject\(id: string\): /);
+    expect(code).not.toMatch(/export[^\n]*\binvoke\b(?!\()|export \{|export \*/);
   });
 
   it("references no remote URL from the app sources", () => {

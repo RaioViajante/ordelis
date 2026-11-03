@@ -299,15 +299,15 @@ describe("accessibility and boundaries", () => {
     };
     walk(join(__dirname, ".."));
     expect(files.length).toBeGreaterThan(10);
-    // The runtime status adapter is the one reviewed exception for the Tauri API and invoke (see config.test.ts).
-    const adapter = join(__dirname, "runtimeStatus.ts");
-    expect(files).toContain(adapter);
+    // The runtime status and project adapters are the reviewed exceptions for the Tauri API and invoke (see config.test.ts).
+    const adapters = [join(__dirname, "runtimeStatus.ts"), join(__dirname, "projects.ts")];
+    for (const a of adapters) expect(files).toContain(a);
     for (const f of files) {
       const text = readFileSync(f, "utf8");
       expect(text, f).not.toMatch(
         /__TAURI|fetch\(|XMLHttpRequest|WebSocket|localStorage|sessionStorage|indexedDB|child_process|node:fs|process\.env/,
       );
-      if (f !== adapter) expect(text, f).not.toMatch(/@tauri-apps|\binvoke\(/);
+      if (!adapters.includes(f)) expect(text, f).not.toMatch(/@tauri-apps|\binvoke\(/);
     }
   });
 });

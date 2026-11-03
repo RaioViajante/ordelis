@@ -40,7 +40,7 @@ Nothing here is a release commitment, a delivery date or a version number.
 **Today**
 
 - *Prototype.* Home (with a task composer), Projects, Sessions and Context show invented sample data and say so. The Agents page lists agent CLIs but runs no check, so every capability reads "unknown". In Settings, the Runtime tab shows the runtime's answer to one fixed identity query in development builds, and an "unavailable" state in release builds. Pages switch with `⌘` or Ctrl plus 1 to 6: the interface accepts either key on every system and shows both labels, and does not detect the operating system. The Context page searches sample notes. The interface is dark only.
-- *Foundation.* A Rust registry that lets the user pick a folder through a native panel and remembers it, with list, add, remove and reset commands. macOS only, and no interface calls it yet. See [local project registration](../implementation/desktop-local-projects.md).
+- *Foundation.* A Rust registry that lets the user pick a folder through a native panel and remembers it, with list, add, remove and reset commands. macOS only. Projects, Home and the sidebar call it through one typed adapter ([#74](https://github.com/RaioViajante/ordelis/issues/74)); removal asks for confirmation, and the interface has no reset. The full flow in the real app is not yet verified. See [local project registration](../implementation/desktop-local-projects.md).
 - *Planned.* Git awareness, real task history, project configuration, light theme, and Windows and Linux conventions.
 
 **Constraints, security and open questions**

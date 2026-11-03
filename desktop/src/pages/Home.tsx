@@ -1,9 +1,11 @@
 import { useState } from "react";
+import { useAddFolder, useRegistry } from "../app/Registry";
 import { useSampleData } from "../app/SampleData";
 import { hrefFor, type Location } from "../app/routes";
 import { useWorkspace } from "../app/Workspace";
 import { MOCK_PROJECTS, SOURCE_LABEL, MOCK_TASKS, MOCK_WAITING } from "../fixtures/mock";
 import { Agent, Button, SecHead, Select } from "../components/ui";
+import { StatusText } from "./Projects";
 
 export function Home({ go }: { go: (page: Location["page"], param?: string) => void }) {
   const { on } = useSampleData();
@@ -11,7 +13,7 @@ export function Home({ go }: { go: (page: Location["page"], param?: string) => v
   const [picking, setPicking] = useState(false);
   const chosen = contextIds.length;
   const blocker = !on
-    ? "Sample data is hidden and this build cannot add projects yet."
+    ? "Sample data is hidden. Drafting a task in your own folders isn't built yet."
     : !project
       ? "Choose a project first."
       : !draft.trim()
@@ -51,7 +53,7 @@ export function Home({ go }: { go: (page: Location["page"], param?: string) => v
                   ))}
                 </>
               ) : (
-                <option value="">No projects</option>
+                <option value="">No sample projects</option>
               )}
             </Select>
             <span className="t-label">
@@ -104,6 +106,8 @@ export function Home({ go }: { go: (page: Location["page"], param?: string) => v
         <p className="hint">Preview only: nothing here starts an agent. Your draft stays while you move around the app.</p>
       </section>
 
+      <RecentProjects />
+
       {on ? <SampleSections /> : <FirstUse />}
     </div>
   );
@@ -155,7 +159,60 @@ function SampleSections() {
   );
 }
 
+function Result({ message }: { message: ReturnType<typeof useAddFolder>["message"] }) {
+  if (!message) return null;
+  return (
+    <div className={`notice ${message.tone === "ok" ? "notice--quiet" : ""}`} role={message.tone === "error" ? "alert" : "note"}>
+      <p>{message.text}</p>
+    </div>
+  );
+}
+
+// Folders the user has added, newest first. Real data from the project registry; in a browser preview there is none.
+function RecentProjects() {
+  const { desktop, loading, projects, listError } = useRegistry();
+  const { message, reason, add, adding, id } = useAddFolder();
+  if (!desktop) return null;
+  const recent = [...projects].sort((a, b) => b.registered_at_ms - a.registered_at_ms).slice(0, 5);
+  return (
+    <section aria-label="Recent projects">
+      <SecHead title="Recent projects" meta="your folders">
+        <span className="ml-auto">
+          <Button id={id} small reason={reason} onClick={add}>
+            {adding ? "Choose a folder…" : "Add a folder…"}
+          </Button>
+        </span>
+      </SecHead>
+      <Result message={message} />
+      <div className="rows">
+        {loading && <div className="r meta">Loading your folders…</div>}
+        {!loading && recent.length === 0 && !listError && (
+          <div className="r meta">No folders yet. Add one to see it here. Ordelis saves only its location.</div>
+        )}
+        {recent.map((p) => (
+          <a className="r" key={p.id} href={hrefFor("projects", p.id)}>
+            <span className="bidi min-w-0 flex-1 text-[15px]" dir="auto">
+              {p.name}
+            </span>
+            <span className="bidi mono meta" dir="auto">
+              {p.path_display}
+            </span>
+            <StatusText status={p.status} />
+          </a>
+        ))}
+      </div>
+      {projects.length > recent.length && (
+        <a className="link meta" href={hrefFor("projects")}>
+          All {projects.length} projects
+        </a>
+      )}
+    </section>
+  );
+}
+
 function FirstUse() {
+  const { projects } = useRegistry();
+  const { reason, add, adding, id } = useAddFolder();
   return (
     <section className="empty max-w-[840px]">
       <h3>Set up Ordelis</h3>
@@ -163,7 +220,7 @@ function FirstUse() {
       <ul className="setup-list">
         <li>
           <span>
-            Add a project folder<small>a git repository or a plain folder</small>
+            Add a project folder<small>{projects.length ? `${projects.length} added` : "any folder on this Mac"}</small>
           </span>
         </li>
         <li>
@@ -178,8 +235,8 @@ function FirstUse() {
         </li>
       </ul>
       <div className="actions">
-        <Button variant="go" reason="Folder access isn't built yet. This build never reads your filesystem.">
-          Add a folder
+        <Button id={id} variant="go" reason={reason} onClick={add}>
+          {adding ? "Choose a folder…" : "Add a folder"}
         </Button>
         <Button reason="Agent checks run the CLIs, and this build doesn't connect to the runtime.">Check agents</Button>
       </div>

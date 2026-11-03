@@ -1,7 +1,8 @@
 # Synapse desktop
 
 Tauri 2 + React + TypeScript shell for Synapse. It is a **local UI only**: it does not start agents,
-read your filesystem, open a vault or call a provider. Its one link to the Python runtime is a
+read your files, open a vault or call a provider. The one thing it does with a folder is remember its location
+when you add it in Projects (macOS only; nothing inside the folder is read). Its one link to the Python runtime is a
 development-only status query that is compiled out of default and release builds; Settings → Runtime shows
 its answer ([details](../docs/implementation/desktop-runtime-bridge.md#runtime-status-in-settings)). Other pages render
 clearly labelled sample data. See [`docs/implementation/desktop-architecture.md`](../docs/implementation/desktop-architecture.md).

@@ -1,6 +1,6 @@
 # Local project registration (architecture)
 
-[Issue #45](https://github.com/RaioViajante/synapse/issues/45) (design), [issue #47](https://github.com/RaioViajante/synapse/issues/47) (implementation PR 1). **The Rust backend (milestone PR 1) is implemented; the Projects UI (PR 2) is not**, so nothing in the app calls the commands yet. See [Implementation status](#implementation-status) for what is built, verified and still open; the rest of this document is the approved design. It proposes the first real local-project integration: the user explicitly picks a folder, Synapse remembers it, Projects lists it, and the user can forget it again. Registration is a bookmark. It grants no access to the folder's contents and authorizes nothing.
+[Issue #45](https://github.com/RaioViajante/synapse/issues/45) (design), [issue #47](https://github.com/RaioViajante/synapse/issues/47) (implementation PR 1). **The Rust backend (milestone PR 1) is implemented, and the Projects UI (PR 2) is implemented in [#74](https://github.com/RaioViajante/ordelis/issues/74) without a reset flow** (see [Implementation status](#implementation-status)). See [Implementation status](#implementation-status) for what is built, verified and still open; the rest of this document is the approved design. It proposes the first real local-project integration: the user explicitly picks a folder, Synapse remembers it, Projects lists it, and the user can forget it again. Registration is a bookmark. It grants no access to the folder's contents and authorizes nothing.
 
 It builds on the [IPC authorization](desktop-architecture.md#ipc-authorization) and follows the pattern of the [runtime bridge](desktop-runtime-bridge.md): a closed list of argument-light commands, fixed error messages, strict parsing and Rust-owned validation. Unlike the runtime bridge, it is meant to ship in release builds, so it must not depend on development-only trust.
 
@@ -434,8 +434,20 @@ Still open, none blocking implementation:
 | Registry: validation, read and write protocols, `reset_projects`, identity, refusal policy, revalidation (`src-tauri/src/projects/`) | Implemented in #47 |
 | `rfd` folder panel, the four commands, manifest, capability and generated permission files | Implemented in #47 |
 | `config.test.ts` Rust side: every Cargo dependency table, `rfd`'s specification, six commands, registry source scans | Implemented in #47 |
-| `src/app/projects.ts`, the Projects UI, the confirmed reset, browser-preview state, criteria 20 (frontend part) and 24 | Pending (PR 2). No frontend module names a project command; `config.test.ts` fails if one does, so `reset_projects` cannot gain a caller before its confirmation exists |
+| `src/app/projects.ts`, the Projects, Home and sidebar integration, browser-preview state, criteria 20 (frontend part) and 24 | Implemented in #74 (see below). The confirmed reset is **not** built: the maintainer decided the UI must not expose `reset_projects`, and the frontend boundary tests keep any frontend module from naming it |
 | Other targets | Answer `unsupported_platform`. Only macOS is built: neither this machine nor CI has another target installed, so that code path is not compiled anywhere |
+
+### Projects UI (#74)
+
+- **One adapter.** `src/app/projects.ts` is the only module that names `list_projects`, `add_project` or `remove_project`. It takes no path (`remove_project` takes only a registration id, checked against `^p[1-9][0-9]{0,9}$` before it is sent), checks every answer against the contract above, keeps only a known error code, and does nothing outside the desktop app. Concurrent adds share one native call; `config.test.ts` and `frontend-boundary.test.ts` pin that no other module names a project command and that no frontend module names `reset_projects`.
+- **State.** `RegistryProvider` (`src/app/Registry.tsx`) holds the last list for the sidebar, Home and Projects, and reads it again after every add and remove. Nothing is stored in the webview; Rust's file is the only persistence.
+- **Identity.** Registered folders are routed and keyed by registry id (`#/projects/p3`); sample projects keep their name routes.
+- **Differences from the design above.**
+  - No reset: a list that cannot be read blocks add and remove, shows its fixed wording and offers "Try again". A corrupt file therefore has no in-app recovery yet.
+  - The UI words each error code itself instead of showing the native message, so no native text reaches the screen.
+  - The sidebar and Home list registered folders only. Sample projects appear only in a labelled group on the Projects page.
+  - The panel title and the "newer version" message in Rust now say Ordelis.
+- **Verification.** The frontend is tested against a mocked native layer (adapter results, cancel, duplicate, concurrent add, each status, add and remove, focus, cross-view updates, a simulated restart, browser preview). The mock is not Rust: persistence across a real quit and relaunch, the real panel, and the folder staying untouched after removal have **not** been verified natively for this UI. An attempt to drive the real app was stopped because UI scripting was not permitted on the machine.
 
 ### Where the implementation refines the design
 
