@@ -14,10 +14,11 @@
  │  Interface (React, TypeScript, in a webview)                     │
  │    Home · Projects · Sessions · Context · Agents · Settings      │
  │    mostly sample data; no network, files or processes            │
- │             │  a closed list of six reviewed native commands     │
+ │             │  a closed list of ten reviewed native commands     │
  │             ▼                                                    │
  │  Native layer (Rust, Tauri 2)                                    │
- │    project registry (macOS) · IPC boundary · dev-only status     │
+ │    project registry and saved tasks (macOS) · IPC boundary ·     │
+ │    dev-only status                                               │
  └──────────────────────────────┬───────────────────────────────────┘
                                 │ development builds only, one fixed question
                                 ▼
