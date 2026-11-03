@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Rejects a macOS app bundle that could reach, or points at, the development Python runtime.
-# Usage: verify-release-isolation.sh <path to Synapse.app>
+# Usage: verify-release-isolation.sh <path to Ordelis.app>
 # Exit 0: inspected and clean. Exit 1: development-runtime evidence found. Exit 2: the bundle could not be
 # inspected (bad layout, missing or invalid executable, a tool failed). Anything but 0 must fail CI.
 # These checks are evidence, not proof: see docs/implementation/desktop-runtime-bridge.md#release-isolation.
@@ -12,7 +12,7 @@ die() { echo "ERROR: $1" >&2; exit 2; }
 failures=0
 fail() { echo "FAIL: $1"; failures=$((failures + 1)); }
 
-[ "$#" -eq 1 ] || die "usage: $0 <Synapse.app>"
+[ "$#" -eq 1 ] || die "usage: $0 <Ordelis.app>"
 app="$1"
 desktop="$(cd "$(dirname "$0")/.." && pwd -P)"
 checkout="$(cd "$desktop/.." && pwd -P)"

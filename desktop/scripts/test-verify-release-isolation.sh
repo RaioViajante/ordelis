@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Negative and positive tests for verify-release-isolation.sh, using controlled fixture bundles.
-# Usage: test-verify-release-isolation.sh [<dev-runtime Synapse.app>]
+# Usage: test-verify-release-isolation.sh [<dev-runtime Ordelis.app>]
 # With a bundle built with --features dev-runtime, also requires the verifier to reject that real artifact
 # through each independent check.
 set -euo pipefail

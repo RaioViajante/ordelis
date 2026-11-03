@@ -1,7 +1,7 @@
 [package]
 name = "synapse-desktop"
 version = "0.0.0"
-description = "Synapse desktop shell. Presents a local UI; its only runtime connection is the development-only runtime status bridge."
+description = "Ordelis desktop shell. Presents a local UI; its only runtime connection is the development-only runtime status bridge."
 edition = "2021"
 publish = false
 

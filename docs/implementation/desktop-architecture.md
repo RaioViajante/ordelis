@@ -58,7 +58,7 @@ All sample data is in `src/fixtures/mock.ts`, is on by default for layout review
 ## Tauri and WebView trust boundaries
 
 ```text
- macOS user ── Synapse.app (Rust, tauri 2, no plugins, one boundary-check command, one development-only status command,
+ macOS user ── Ordelis.app (Rust, tauri 2, no plugins, one boundary-check command, one development-only status command,
                   │          four local project registration commands with no frontend caller yet)
                   │  custom protocol serves bundled dist/ only
                   ▼
