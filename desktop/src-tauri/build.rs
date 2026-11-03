@@ -36,6 +36,10 @@ fn main() {
                 "add_project",
                 "remove_project",
                 "reset_projects",
+                "list_tasks",
+                "get_task",
+                "create_task",
+                "update_task",
             ])),
     )
     .expect("failed to run tauri-build");

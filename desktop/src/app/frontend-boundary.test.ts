@@ -1,7 +1,8 @@
 // @vitest-environment node
 // The production bundle may only contain the app's own src/ modules and its pinned packages. Only the project
 // adapter (src/app/projects.ts) may name list_projects, add_project or remove_project, and nothing in the frontend
-// may name reset_projects (the UI has no reset).
+// may name reset_projects (the UI has no reset). No frontend module names a task command yet: list_tasks, get_task,
+// create_task and update_task have no caller until a reviewed adapter is added (D3.1c, issue #86).
 //
 // The inspector below looks at what a production Vite build of the desktop UI actually contains, rather than
 // which files happen to exist under src/. It builds without writing anything and reads Rollup's module graph and
@@ -17,6 +18,7 @@ import { dirname, join, sep } from "node:path";
 
 const PROJECT_COMMANDS = /\b(?:list_projects|add_project|remove_project|reset_projects)\b/;
 const RESET_COMMAND = /\breset_projects\b/;
+const TASK_COMMANDS = /\b(?:list_tasks|get_task|create_task|update_task)\b/;
 // Every extension Vite resolves as a script module.
 const SCRIPT = /\.(?:[cm]?[jt]sx?)$/;
 // Rollup ids of Vite's own helpers; anything else virtual (such as an inline index.html script) is refused.
@@ -90,6 +92,7 @@ async function frontendBuildViolations(projectRoot: string): Promise<string[]> {
     if (SCRIPT.test(file)) {
       const text = readFileSync(file, "utf8");
       if ((file === projectAdapter ? RESET_COMMAND : PROJECT_COMMANDS).test(text)) violations.push(`${name(id)}: names a project command`);
+      if (TASK_COMMANDS.test(text)) violations.push(`${name(id)}: names a task command`);
       if (text.includes("__TAURI")) violations.push(`${name(id)}: reaches Tauri internals`);
     }
   }
@@ -97,6 +100,7 @@ async function frontendBuildViolations(projectRoot: string): Promise<string[]> {
     // A script emitted as a plain asset (new URL(..., import.meta.url), a worker) bypasses the module graph.
     if (out.type === "asset" && SCRIPT.test(out.fileName)) violations.push(`emits script asset ${out.fileName}`);
     if (out.type === "chunk" && RESET_COMMAND.test(out.code)) violations.push(`${out.fileName}: names a project command`);
+    if (out.type === "chunk" && TASK_COMMANDS.test(out.code)) violations.push(`${out.fileName}: names a task command`);
   }
   return violations;
 }
@@ -184,6 +188,12 @@ describe("production bundle boundary", () => {
       },
       "the reset command named in the project adapter": (d) => {
         prepend(d, "src/app/projects.ts", 'export const NEXT = "reset_projects";\n');
+      },
+      "a task command named in the project adapter": (d) => {
+        prepend(d, "src/app/projects.ts", 'export const NEXT = "create_task";\n');
+      },
+      "a task command named in a page": (d) => {
+        prepend(d, "src/pages/Home.tsx", 'export const NEXT = "list_tasks";\n');
       },
     };
     const dirs: string[] = [];

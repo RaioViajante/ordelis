@@ -280,6 +280,14 @@ impl Projects {
     }
 }
 
+/// Each registered project's id and registration time in `data_dir`, for the task store's project links; `None` when
+/// the registry cannot be read as valid (corrupt, newer or unavailable). The read protocol only: it takes no lock,
+/// writes nothing and looks at no folder.
+#[cfg(target_os = "macos")]
+pub(crate) fn registrations(data_dir: &std::path::Path) -> Option<Vec<(String, u64)>> {
+    registry::registrations(data_dir).ok()
+}
+
 /// Registry work touches the filesystem, so it runs on a blocking worker, never on the UI thread.
 #[cfg(target_os = "macos")]
 async fn blocking<T: Send + 'static>(

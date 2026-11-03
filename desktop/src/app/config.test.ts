@@ -9,6 +9,10 @@ const COMMANDS = [
   "add_project",
   "remove_project",
   "reset_projects",
+  "list_tasks",
+  "get_task",
+  "create_task",
+  "update_task",
 ];
 const read = (p: string) => readFileSync(join(root, p), "utf8");
 
@@ -16,13 +20,13 @@ const read = (p: string) => readFileSync(join(root, p), "utf8");
 // this list against the compiler's dep-info, so any other compiled file fails CI however it was brought in.
 const nativeSources: { configurations: Record<string, string[]> } = JSON.parse(read("scripts/native-sources.json"));
 
-// The production project registry files and the storage protocol they use (src/store.rs), as listed (and
-// compiler-verified) above, keyed by path under src-tauri/src.
+// The production storage files: the project registry, the task store and the protocol they share (src/store.rs), as
+// listed (and compiler-verified) above, keyed by path under src-tauri/src.
 function projectSources(): Record<string, string> {
   const production = new Set(
     ["default", "release", "dev-runtime"]
       .flatMap((c) => nativeSources.configurations[c])
-      .filter((f) => f.startsWith("src/projects") || f === "src/store.rs"),
+      .filter((f) => f.startsWith("src/projects") || f.startsWith("src/tasks") || f === "src/store.rs"),
   );
   return Object.fromEntries([...production].map((f) => [f.slice("src/".length), read(`src-tauri/${f}`)]));
 }
@@ -32,8 +36,8 @@ function projectSources(): Record<string, string> {
 // before the rules below; every other listing, in any file, is still a violation. Its scope is pinned below.
 const REVIEWED_LISTING = "std::fs::read_dir(dir)";
 
-// Content rules for the project registry: no listing, contents, processes, network, Git, Python or gate, and only
-// registry.rs and store.rs touch files. Which files exist is not decided here; the compiler-verified list above decides it.
+// Content rules for the project registry and the task store: no listing, contents, processes, network, Git, Python or
+// gate, and only registry.rs and store.rs touch files (the task store has no file operation of its own). Which files exist is not decided here; the compiler-verified list above decides it.
 function projectContentViolations(files: Record<string, string>): string[] {
   const violations: string[] = [];
   const fsAllowed: Record<string, string[]> = {
@@ -75,7 +79,7 @@ function projectContentViolations(files: Record<string, string>): string[] {
 describe("desktop trust boundary", () => {
   const conf = JSON.parse(read("src-tauri/tauri.conf.json"));
 
-  it("grants the main window exactly six app permissions and no other", () => {
+  it("grants the main window exactly ten app permissions and no other", () => {
     const dir = join(root, "src-tauri", "capabilities");
     const files = readdirSync(dir).filter((f) => f.endsWith(".json"));
     expect(files).toEqual(["default.json"]);
@@ -88,6 +92,10 @@ describe("desktop trust boundary", () => {
       "allow-add-project",
       "allow-remove-project",
       "allow-reset-projects",
+      "allow-list-tasks",
+      "allow-get-task",
+      "allow-create-task",
+      "allow-update-task",
     ]);
     expect(cap.windows).toEqual(["main"]);
     expect(cap.remote).toBeUndefined();
@@ -121,7 +129,7 @@ describe("desktop trust boundary", () => {
     expect(read("src-tauri/Cargo.lock")).toMatch(/^name = "rfd"\nversion = "0\.17\.2"$/m);
   });
 
-  it("registers no Tauri plugins or sidecars and exactly six declared app commands", () => {
+  it("registers no Tauri plugins or sidecars and exactly ten declared app commands", () => {
     const cargo = read("src-tauri/Cargo.toml");
     expect(cargo).not.toMatch(/tauri-plugin|sidecar/i);
     // The development bridge is opt-in: dev-runtime is the only feature and nothing enables it by default.
@@ -136,13 +144,19 @@ describe("desktop trust boundary", () => {
     expect(rust.match(/invoke_handler\(/g)).toHaveLength(1);
     const names = (list: string | undefined) => list?.split(",").map((n) => n.trim().replaceAll('"', "")).filter(Boolean);
     expect(names(rust.match(/generate_handler!\[([^\]]*)\]/)?.[1])).toEqual(COMMANDS);
-    expect(rust.match(/#\[tauri::command\]/g)).toHaveLength(6);
+    expect(rust.match(/#\[tauri::command(?:\([^)]*\))?\]/g)).toHaveLength(10);
+    expect(rust.match(/#\[tauri::command\([^)]*\)\]/g)).toEqual(['#[tauri::command(rename_all = "snake_case")]']);
     // The project commands take no path: add_project, list_projects and reset_projects take no argument from
     // the webview, and remove_project takes only the registration id.
     expect(rust).toMatch(/async fn list_projects\(projects: State<'_, Projects>\)/);
     expect(rust).toMatch(/async fn add_project<R: Runtime>\(\s*window: WebviewWindow<R>,\s*projects: State<'_, Projects>,\s*picker: State<'_, Picker<R>>,\s*\)/);
     expect(rust).toMatch(/async fn remove_project\(id: String, projects: State<'_, Projects>\)/);
     expect(rust).toMatch(/async fn reset_projects\(projects: State<'_, Projects>\)/);
+    // The task commands take text, ids and a revision, never a path; create_task keeps the documented snake_case keys.
+    expect(rust).toMatch(/async fn list_tasks\(tasks: State<'_, Tasks>\)/);
+    expect(rust).toMatch(/async fn get_task\(id: String, tasks: State<'_, Tasks>\)/);
+    expect(rust).toMatch(/#\[tauri::command\(rename_all = "snake_case"\)\]\nasync fn create_task\(project_id: String, title: String, description: String, tasks: State<'_, Tasks>\)/);
+    expect(rust).toMatch(/async fn update_task\(\s*id: String,\s*revision: u64,\s*title: String,\s*description: String,\s*status: String,\s*tasks: State<'_, Tasks>,\s*\)/);
     const bridge = read("src-tauri/src/runtime_bridge.rs");
     expect(bridge).not.toMatch(/Command::|std::process|std::fs|std::env/);
     expect(bridge).toMatch(/#\[cfg\(any\(test, all\(feature = "dev-runtime", target_os = "macos"\)\)\)\]\s*mod process;/);
@@ -155,18 +169,18 @@ describe("desktop trust boundary", () => {
   // Registration is a bookmark: the registry module looks at folder metadata and its own files, nothing else.
   it("keeps the project registry away from folder contents, processes and the network", () => {
     const files = projectSources();
-    expect(Object.keys(files).sort()).toEqual(["projects.rs", "projects/folder.rs", "projects/registry.rs", "store.rs"]);
+    expect(Object.keys(files).sort()).toEqual(["projects.rs", "projects/folder.rs", "projects/registry.rs", "store.rs", "tasks.rs", "tasks/records.rs"]);
     expect(projectContentViolations(files)).toEqual([]);
     const production = (p: string) => {
       const text = read(p);
-      // registry.rs ends with its test module declaration; tests live in their own file.
-      return p.endsWith("registry.rs") ? text.slice(0, text.lastIndexOf("#[cfg(test)]\nmod tests;")) : text;
+      // These files end with their test module declaration; tests live in their own files.
+      return /(?:registry|records|store)\.rs$/.test(p) ? text.slice(0, text.lastIndexOf("#[cfg(test)]\nmod tests;")) : text;
     };
     // The registry's files are opened only in the store's four functions, and only under the registry's own fixed
     // names: the store holds no name of its own and receives only FILES. The registry itself only links the
     // corrupt file to its backup name and then removes the registry name (reset).
     const registry = production("src-tauri/src/projects/registry.rs");
-    const store = read("src-tauri/src/store.rs");
+    const store = production("src-tauri/src/store.rs");
     const functions = [...registry.matchAll(/^(?:pub\(super\) )?fn (\w+)[\s\S]*?^\}/gm)];
     const storeFunctions = [...store.matchAll(/^(?:pub\(crate\) )?fn (\w+)[\s\S]*?^\}/gm)];
     expect(storeFunctions.filter((f) => /OpenOptions/.test(f[0])).map((f) => f[1])).toEqual(["open_read", "open_lock", "create_temp", "open_dir"]);
@@ -178,11 +192,21 @@ describe("desktop trust boundary", () => {
     expect(store.match(/\bjoin\([^)]*\)/g)).toEqual(["join(files.file)", "join(files.lock)", "join(files.temp)", "join(files.file)"]);
     expect(store).not.toMatch(/const \w+: &str|"[^"]*\.(?:json|lock|tmp)"/);
     expect(registry).toMatch(/^static FILES: Files = Files \{ file: REGISTRY, lock: LOCK, temp: TEMP, writer: &WRITER \};$/m);
-    expect(registry.match(/store::\w+\([^)]*\)/g)).toEqual([
-      "store::read(dir, &FILES, MAX_BYTES)",
-      "store::lock(dir, &FILES, create)",
-      "store::replace(dir, &FILES, &bytes)",
+    expect(registry).toMatch(/^impl Store for Registry \{\n {4}fn files\(\) -> &'static Files \{\n {8}&FILES\n {4}\}\n\}$/m);
+    expect(registry.match(/store::\w+(?:::<\w+>)?\([^)]*\)/g)).toEqual([
+      "store::read::<Registry>(dir, MAX_BYTES)",
+      "store::lock::<Registry>(dir, create)",
+      "store::replace(locked, &bytes)",
     ]);
+    expect(registry).toMatch(/^fn commit\(locked: &store::Locked<Registry>, stored: &Stored\)/m);
+    // The registry never depends on the task store; the dependency runs the other way, through registrations().
+    expect(registry).not.toMatch(/crate::tasks|TaskStore|tasks::/);
+    // The guard: only lock() builds one, its fields are private, and a replace takes the guard, not a directory.
+    expect(store).toMatch(/^pub\(crate\) struct Locked<S: Store> \{\n {4}dir: PathBuf,\n {4}_file: File,\n {4}_writer: MutexGuard<'static, \(\)>,\n {4}_store: PhantomData<fn\(\) -> S>,\n\}$/m);
+    expect(store.match(/\bLocked \{/g)).toEqual(["Locked {"]);
+    expect(store).toMatch(/return Ok\(Some\(Locked \{ dir: dir\.to_path_buf\(\), _file: file, _writer: writer, _store: PhantomData \}\)\);/);
+    expect(store).toMatch(/^pub\(crate\) fn replace<S: Store>\(locked: &Locked<S>, bytes: &\[u8\]\) -> Result<\(\), Unavailable> \{\n {4}let \(dir, files\) = \(locked\.dir\.as_path\(\), S::files\(\)\);/m);
+    expect(store).not.toMatch(/#\[derive\([^)]*\)\]\npub\(crate\) struct Locked/);
     expect(registry.match(/OpenOptions|DirBuilder|rename\(/g)).toBeNull();
     expect(registry.match(/remove_file\([^)]*\)/g)).toEqual(["remove_file(&registry)"]);
     expect(registry.match(/hard_link\([^)]*\)/g)).toEqual(["hard_link(registry, &backup)"]);
@@ -221,6 +245,48 @@ describe("desktop trust boundary", () => {
     expect(projects).toMatch(/\.set_can_create_directories\(false\)/);
   });
 
+  // A saved task is a record about work, not work: the task store reads the registry's ids and times, keeps its own
+  // fixed files through the shared protocol, and has no file operation, folder access, recovery or deletion of its own.
+  it("keeps the task store to its own files, the registry's ids and the approved schema", () => {
+    const files = projectSources();
+    const records = files["tasks/records.rs"].slice(0, files["tasks/records.rs"].lastIndexOf("#[cfg(test)]\nmod tests;"));
+    const tasks = files["tasks.rs"];
+    expect(records).toMatch(/^const TASKS: &str = "tasks\.json";$/m);
+    expect(records).toMatch(/^const LOCK: &str = "tasks\.lock";$/m);
+    expect(records).toMatch(/^const TEMP: &str = "tasks\.json\.tmp";$/m);
+    expect(records).toMatch(/^static WRITER: Mutex<\(\)> = Mutex::new\(\(\)\);$/m);
+    expect(records).toMatch(/^static FILES: Files = Files \{ file: TASKS, lock: LOCK, temp: TEMP, writer: &WRITER \};$/m);
+    expect(records).toMatch(/^impl Store for TaskStore \{\n {4}fn files\(\) -> &'static Files \{\n {8}&FILES\n {4}\}\n\}$/m);
+    expect(records.match(/store::\w+(?:::<\w+>)?\([^)]*\)/g)).toEqual([
+      "store::read::<TaskStore>(dir, MAX_BYTES)",
+      "store::lock::<TaskStore>(dir, create)",
+      "store::replace(locked, &bytes)",
+    ]);
+    expect(records).toMatch(/^fn commit\(locked: &store::Locked<TaskStore>, stored: &Stored\)/m);
+    // Exactly two stores in the whole crate, each implemented by the module that owns its files.
+    const stores = Object.entries(files).flatMap(([f, t]) => [...t.matchAll(/impl Store for (\w+)/g)].map((m) => `${f}: ${m[1]}`));
+    expect(stores.sort()).toEqual(["projects/registry.rs: Registry", "tasks/records.rs: TaskStore"]);
+    // The registry is reached only through its read-only accessor; no folder, backup or recovery code is used.
+    expect([...new Set([...records.matchAll(/crate::projects::(\w+)/g)].map((m) => m[1]))]).toEqual(["registrations"]);
+    expect(records + tasks).not.toMatch(/folder::|registry::|symlink_metadata|canonicalize|hard_link|remove_file|BACKUP|corrupt-|fault\(|sync_dir|trusted_dir|std::fs|libc::/);
+    expect([...records.matchAll(/^pub\(super\) fn (\w+)/gm)].map((m) => m[1])).toEqual(["list", "get", "create", "update"]);
+    expect(records + tasks).not.toMatch(/fn (?:reset|delete|remove)\w*/);
+    // Schema version 1: exactly the approved fields, with no path, plan, run or authority field, and two statuses.
+    const fields = (text: string, name: string) =>
+      text.match(new RegExp(`^(?:pub )?struct ${name} \\{\\n([\\s\\S]*?)^\\}`, "m"))?.[1].match(/^\s+(?:#\[[^\]]*\]\s+)?(\w+):/gm)?.map((f) => f.trim().replace(/^#\[[^\]]*\]\s+/, "").replace(":", ""));
+    expect(fields(records, "Stored")).toEqual(["schema_version", "next_id", "tasks"]);
+    expect(fields(records, "Record")).toEqual(["id", "project", "title", "description", "status", "created_at_ms", "updated_at_ms", "revision"]);
+    expect(fields(records, "ProjectRef")).toEqual(["id", "registered_at_ms"]);
+    expect(records.match(/#\[serde\(deny_unknown_fields\)\]\nstruct (\w+)/g)).toEqual([
+      "#[serde(deny_unknown_fields)]\nstruct Stored",
+      "#[serde(deny_unknown_fields)]\nstruct Record",
+      "#[serde(deny_unknown_fields)]\nstruct ProjectRef",
+    ]);
+    expect(tasks).toMatch(/^pub enum Status \{\n {4}Draft,\n {4}Archived,\n\}$/m);
+    expect(tasks).toMatch(/#\[cfg\(target_os = "macos"\)\]\nmod records;/);
+    expect(read("src-tauri/src/lib.rs")).toMatch(/\nmod store;\nmod tasks;\n/);
+  });
+
   // Which files compile is verified from rustc's dep-info by scripts/verify-native-boundary.mjs (with its own
   // regression fixtures in scripts/test-verify-native-boundary.sh); these fixtures cover the content rules.
   it("finds prohibited operations in any compiled project registry file", () => {
@@ -248,6 +314,12 @@ describe("desktop trust boundary", () => {
       "a hard link in the store": add("store.rs", "fn p(a: &Path, b: &Path) { let _ = std::fs::hard_link(a, b); }"),
       "a process in the store": add("store.rs", 'fn q() { let _ = std::process::Command::new("sh"); }'),
       "an environment read in the store": add("store.rs", 'fn r() { let _ = std::env::var("HOME"); }'),
+      // The task store has no file operation of its own, and no listing, folder look-up, process or network.
+      "a file operation in the task store": add("tasks/records.rs", "fn s(p: &Path) { let _ = std::fs::remove_file(p); }"),
+      "a folder look-up in the task store": add("tasks/records.rs", "fn t(p: &Path) { let _ = std::fs::symlink_metadata(p); }"),
+      "a listing in the task store": add("tasks.rs", "fn u(p: &std::path::Path) { let _ = std::fs::read_dir(p); }"),
+      "a process in the task store": add("tasks.rs", 'fn v() { let _ = std::process::Command::new("sh"); }'),
+      "a network call in the task store": add("tasks/records.rs", 'fn w() { let _ = std::net::TcpStream::connect("127.0.0.1:1"); }'),
     };
     for (const [name, files] of Object.entries(bypasses)) {
       expect(projectContentViolations(files), name).not.toEqual([]);

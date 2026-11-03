@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "The main window may call exactly six app commands: ipc_boundary_status, which only proves the IPC boundary; get_runtime_status, a fixed read-only runtime identity query that is unavailable unless the development-only dev-runtime feature is built; and list_projects, add_project, remove_project and reset_projects, which manage the local project registry, take no path and open the folder panel only from Rust. It is granted no shell, filesystem, dialog, network, opener or core plugin permission.",
+  "description": "The main window may call exactly ten app commands: ipc_boundary_status, which only proves the IPC boundary; get_runtime_status, a fixed read-only runtime identity query that is unavailable unless the development-only dev-runtime feature is built; list_projects, add_project, remove_project and reset_projects, which manage the local project registry, take no path and open the folder panel only from Rust; and list_tasks, get_task, create_task and update_task, which keep saved tasks in the app data directory, take text and ids only and start nothing. It is granted no shell, filesystem, dialog, network, opener or core plugin permission.",
   "windows": [
     "main"
   ],
@@ -11,6 +11,10 @@
     "allow-list-projects",
     "allow-add-project",
     "allow-remove-project",
-    "allow-reset-projects"
+    "allow-reset-projects",
+    "allow-list-tasks",
+    "allow-get-task",
+    "allow-create-task",
+    "allow-update-task"
   ]
 }

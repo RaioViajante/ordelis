@@ -1,15 +1,17 @@
 // Deliberately minimal: no plugins, no sidecar, one inert command that proves the IPC boundary, one
-// development-only runtime status command (see runtime_bridge.rs) and four local project registration
-// commands (see projects.rs), none of which takes a path.
+// development-only runtime status command (see runtime_bridge.rs), four local project registration
+// commands (see projects.rs) and four saved-task commands (see tasks.rs), none of which takes a path.
 // Authorization is enforced by the app manifest in build.rs plus capabilities/default.json.
 // See docs/implementation/desktop-architecture.md.
 mod projects;
 mod runtime_bridge;
 #[cfg(target_os = "macos")]
 mod store;
+mod tasks;
 
 use projects::{AddOutcome, Picker, ProjectError, ProjectList, Projects, RemoveOutcome, ResetOutcome};
 use runtime_bridge::{BridgeError, ErrorCode, RuntimeStatus};
+use tasks::{CreateOutcome, GetOutcome, TaskError, TaskList, Tasks, UpdateOutcome};
 use serde::Serialize;
 use tauri::{Manager, Runtime, State, WebviewWindow};
 
@@ -64,6 +66,38 @@ async fn reset_projects(projects: State<'_, Projects>) -> Result<ResetOutcome, P
     projects.reset().await
 }
 
+/// Lists saved tasks, each with its project link computed now. Never writes.
+#[tauri::command]
+async fn list_tasks(tasks: State<'_, Tasks>) -> Result<TaskList, TaskError> {
+    tasks.list().await
+}
+
+/// `id` is looked up, never resolved.
+#[tauri::command]
+async fn get_task(id: String, tasks: State<'_, Tasks>) -> Result<GetOutcome, TaskError> {
+    tasks.get(id).await
+}
+
+/// Text and a registration id only: Rust reads the project's identity from the registry and never touches its folder.
+/// Saving a task starts nothing.
+#[tauri::command(rename_all = "snake_case")]
+async fn create_task(project_id: String, title: String, description: String, tasks: State<'_, Tasks>) -> Result<CreateOutcome, TaskError> {
+    tasks.create(project_id, title, description).await
+}
+
+/// Writes only if `revision` is the task's current one; the project identity cannot be changed.
+#[tauri::command]
+async fn update_task(
+    id: String,
+    revision: u64,
+    title: String,
+    description: String,
+    status: String,
+    tasks: State<'_, Tasks>,
+) -> Result<UpdateOutcome, TaskError> {
+    tasks.update(id, revision, title, description, status).await
+}
+
 /// The registry state. The one-time import of the former identifier's registry runs here, synchronously and before
 /// the state is managed, so no command can read or change the registry until it has finished.
 fn projects_state(data_dir: Option<std::path::PathBuf>) -> Projects {
@@ -81,6 +115,7 @@ pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
             app.manage(projects_state(app.path().app_data_dir().ok()));
+            app.manage(Tasks::new(app.path().app_data_dir().ok()));
             app.manage(Picker::<tauri::Wry>::native());
             Ok(())
         })
@@ -90,7 +125,11 @@ pub fn run() {
             list_projects,
             add_project,
             remove_project,
-            reset_projects
+            reset_projects,
+            list_tasks,
+            get_task,
+            create_task,
+            update_task
         ])
         .run(context())
         .expect("error while running the Ordelis desktop shell");
@@ -152,6 +191,7 @@ mod tests {
 
     fn app_with(data_dir: Option<PathBuf>, picker: FakePicker) -> tauri::App<MockRuntime> {
         mock_builder()
+            .manage(Tasks::new(data_dir.clone()))
             .manage(projects_state(data_dir))
             .manage(Picker::<MockRuntime>::new(Box::new(picker)))
             .invoke_handler(tauri::generate_handler![
@@ -161,6 +201,10 @@ mod tests {
                 add_project,
                 remove_project,
                 reset_projects,
+                list_tasks,
+                get_task,
+                create_task,
+                update_task,
                 unlisted_probe
             ])
             .build(context())
@@ -309,6 +353,7 @@ mod tests {
         *ctx.runtime_authority_mut() = authority;
         let app = mock_builder()
             .manage(Projects::new(None))
+            .manage(Tasks::new(None))
             .manage(Picker::<MockRuntime>::new(Box::new(cancels())))
             .invoke_handler(tauri::generate_handler![
                 ipc_boundary_status,
@@ -317,6 +362,10 @@ mod tests {
                 add_project,
                 remove_project,
                 reset_projects,
+                list_tasks,
+                get_task,
+                create_task,
+                update_task,
                 unlisted_probe
             ])
             .build(ctx)
@@ -381,11 +430,21 @@ mod tests {
         list.split(',').map(|s| s.trim().trim_matches('"').to_string()).filter(|s| !s.is_empty()).collect()
     }
 
-    const COMMANDS: [&str; 6] =
-        ["ipc_boundary_status", "get_runtime_status", "list_projects", "add_project", "remove_project", "reset_projects"];
+    const COMMANDS: [&str; 10] = [
+        "ipc_boundary_status",
+        "get_runtime_status",
+        "list_projects",
+        "add_project",
+        "remove_project",
+        "reset_projects",
+        "list_tasks",
+        "get_task",
+        "create_task",
+        "update_task",
+    ];
 
     #[test]
-    fn manifest_handler_and_capability_name_the_same_six_commands() {
+    fn manifest_handler_and_capability_name_the_same_ten_commands() {
         let build = include_str!("../build.rs");
         let manifest = quoted_names(build, ".commands(&[");
         let source = include_str!("lib.rs");
@@ -698,6 +757,170 @@ mod tests {
         }
         let _guard = projects::GUARD_TESTS.lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(invoke(&main, "add_project", serde_json::json!({})), Err(error(projects::ErrorCode::RegistryUnavailable)));
+    }
+
+    // Saved tasks over IPC. Store semantics are tested in tasks/records/tests.rs; these prove the boundary.
+
+    const TASK_COMMANDS: [&str; 4] = ["list_tasks", "get_task", "create_task", "update_task"];
+
+    fn task_error(code: tasks::TaskErrorCode) -> serde_json::Value {
+        serde_json::to_value(TaskError::from(code)).unwrap()
+    }
+
+    fn keys(value: &serde_json::Value) -> Vec<String> {
+        let mut keys: Vec<String> = value.as_object().unwrap().keys().cloned().collect();
+        keys.sort();
+        keys
+    }
+
+    #[test]
+    fn task_commands_are_callable_from_main_at_the_local_origin() {
+        let _guard = projects::GUARD_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        let scratch = Scratch::new("tasks-allowed");
+        let app = app_with(Some(scratch.data()), picks(&scratch.folder()));
+        let main = webview(&app, "main");
+        assert_eq!(invoke(&main, "list_tasks", serde_json::json!({})), Ok(serde_json::json!({ "schema_version": 1, "tasks": [] })));
+        assert_eq!(invoke(&main, "add_project", serde_json::json!({})).unwrap()["project"]["id"], "p1");
+
+        let created = invoke(&main, "create_task", serde_json::json!({ "project_id": "p1", "title": "Add rate limiting", "description": "Per IP." })).unwrap();
+        assert_eq!(created["outcome"], "created");
+        let task = &created["task"];
+        assert_eq!(keys(task), ["created_at_ms", "description", "id", "project", "revision", "status", "title", "updated_at_ms"]);
+        assert_eq!((task["id"].as_str(), task["status"].as_str(), task["revision"].as_u64()), (Some("t1"), Some("draft"), Some(1)));
+        assert_eq!(task["project"], serde_json::json!({ "id": "p1", "link": "linked" }), "no registration time and no path");
+        assert_eq!(invoke(&main, "get_task", serde_json::json!({ "id": "t1" })), Ok(serde_json::json!({ "outcome": "found", "task": task })));
+
+        let update = serde_json::json!({ "id": "t1", "revision": 1, "title": "Add rate limiting", "description": "Per IP.", "status": "archived" });
+        let updated = invoke(&main, "update_task", update.clone()).unwrap();
+        assert_eq!((updated["outcome"].as_str(), updated["task"]["revision"].as_u64(), updated["task"]["status"].as_str()), (Some("updated"), Some(2), Some("archived")));
+        let stale = invoke(&main, "update_task", update).unwrap();
+        assert_eq!((stale["outcome"].as_str(), &stale["task"]), (Some("conflict"), &updated["task"]));
+        let listed = invoke(&main, "list_tasks", serde_json::json!({})).unwrap();
+        assert_eq!(keys(&listed["tasks"][0]), ["created_at_ms", "id", "project", "revision", "status", "title", "updated_at_ms"], "no description in a list");
+        assert_eq!(invoke(&main, "get_task", serde_json::json!({ "id": "t2" })), Ok(serde_json::json!({ "outcome": "not_found" })));
+
+        assert!(scratch.folder().is_dir() && std::fs::read_dir(scratch.folder()).unwrap().next().is_none(), "the folder is untouched");
+        let mut names: Vec<_> = std::fs::read_dir(scratch.data()).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
+        names.sort();
+        assert_eq!(names, ["projects.json", "projects.lock", "tasks.json", "tasks.lock"]);
+    }
+
+    #[test]
+    fn task_commands_are_denied_to_other_windows_remote_origins_and_without_their_grant() {
+        for cmd in TASK_COMMANDS {
+            let other_window = rejected(call("other", cmd, LOCAL));
+            assert!(other_window.contains("not allowed"), "{cmd}: {other_window}");
+            let remote = rejected(call("main", cmd, "https://example.com/"));
+            assert!(remote.contains("not allowed"), "{cmd}: {remote}");
+            let ungranted = rejected(call_without_grant(true, cmd));
+            assert!(ungranted.contains("not allowed"), "{cmd}: {ungranted}");
+        }
+    }
+
+    // Rust validates every input; the frontend is never trusted to. Text that looks like a path is stored as text.
+    #[test]
+    fn task_inputs_are_validated_in_rust_and_a_path_is_only_ever_text() {
+        let scratch = Scratch::new("tasks-input");
+        let app = app_with(Some(scratch.data()), cancels());
+        let main = webview(&app, "main");
+        let invalid = task_error(tasks::TaskErrorCode::InvalidInput);
+        for body in [
+            serde_json::json!({ "project_id": "../projects.json", "title": "Title", "description": "" }),
+            serde_json::json!({ "project_id": "/etc", "title": "Title", "description": "" }),
+            serde_json::json!({ "project_id": "p1", "title": "", "description": "" }),
+            serde_json::json!({ "project_id": "p1", "title": "Title", "description": "a\rb" }),
+            serde_json::json!({ "project_id": "p1", "title": "x".repeat(257), "description": "" }),
+        ] {
+            assert_eq!(invoke(&main, "create_task", body.clone()), Err(invalid.clone()), "{body}");
+        }
+        for body in [
+            serde_json::json!({ "id": "t1", "revision": 1, "title": "Title", "description": "", "status": "running" }),
+            serde_json::json!({ "id": "t1", "revision": 0, "title": "Title", "description": "", "status": "draft" }),
+            serde_json::json!({ "id": "/etc/hosts", "revision": 1, "title": "Title", "description": "", "status": "draft" }),
+        ] {
+            assert_eq!(invoke(&main, "update_task", body.clone()), Err(invalid.clone()), "{body}");
+        }
+        assert_eq!(invoke(&main, "get_task", serde_json::json!({ "id": "../tasks.json" })), Err(invalid));
+        // Missing, misspelled (camelCase) or mistyped arguments never reach the command.
+        for (cmd, body) in [
+            ("create_task", serde_json::json!({ "projectId": "p1", "title": "Title", "description": "" })),
+            ("create_task", serde_json::json!({ "project_id": "p1", "title": 1, "description": "" })),
+            ("update_task", serde_json::json!({ "id": "t1", "revision": "1", "title": "Title", "description": "", "status": "draft" })),
+            ("update_task", serde_json::json!({ "id": "t1", "revision": -1, "title": "Title", "description": "", "status": "draft" })),
+            ("get_task", serde_json::json!({ "path": "/etc" })),
+        ] {
+            let message = invoke(&main, cmd, body.clone()).unwrap_err().to_string();
+            assert!(message.contains(cmd) && !message.contains("/etc"), "{body}: {message}");
+        }
+        assert!(!scratch.data().exists(), "nothing reached the store");
+        assert_eq!(
+            invoke(&main, "create_task", serde_json::json!({ "project_id": "p1", "title": "Title", "description": "" })),
+            Err(task_error(tasks::TaskErrorCode::ProjectNotFound))
+        );
+
+        // Registered (with a synthetic registry), a path-like title is just a title, and extra keys are ignored.
+        std::fs::create_dir(scratch.data()).unwrap();
+        std::fs::set_permissions(scratch.data(), std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
+        let registry = serde_json::json!({ "schema_version": 1, "next_id": 2, "projects": [{ "id": "p1", "path": "/ordelis-test-nonexistent", "dev": 1, "ino": 2, "registered_at_ms": 5 }] });
+        std::fs::write(scratch.data().join("projects.json"), serde_json::to_vec(&registry).unwrap()).unwrap();
+        let body = serde_json::json!({ "project_id": "p1", "title": "../../etc/passwd", "description": "/etc/hosts", "path": "/etc", "data_dir": "/tmp", "status": "running", "revision": 9 });
+        let created = invoke(&main, "create_task", body).unwrap();
+        assert_eq!((created["task"]["title"].as_str(), created["task"]["description"].as_str()), (Some("../../etc/passwd"), Some("/etc/hosts")));
+        assert_eq!((created["task"]["status"].as_str(), created["task"]["revision"].as_u64()), (Some("draft"), Some(1)), "status and revision are not inputs");
+    }
+
+    #[test]
+    fn an_unresolved_data_directory_makes_tasks_unavailable() {
+        let app = app_with(None, cancels());
+        let main = webview(&app, "main");
+        for (cmd, body) in [
+            ("list_tasks", serde_json::json!({})),
+            ("get_task", serde_json::json!({ "id": "t1" })),
+            ("create_task", serde_json::json!({ "project_id": "p1", "title": "Title", "description": "" })),
+            ("update_task", serde_json::json!({ "id": "t1", "revision": 1, "title": "Title", "description": "", "status": "draft" })),
+        ] {
+            assert_eq!(invoke(&main, cmd, body), Err(task_error(tasks::TaskErrorCode::TasksUnavailable)), "{cmd}");
+        }
+    }
+
+    // The two stores have separate locks: the registry keeps working while another writer holds the tasks lock.
+    #[test]
+    fn the_project_registry_keeps_working_while_the_tasks_lock_is_held() {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+        let _guard = projects::GUARD_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        let scratch = Scratch::new("tasks-lock");
+        std::fs::DirBuilder::new().mode(0o700).create(scratch.data()).unwrap();
+        let held = std::fs::OpenOptions::new().read(true).write(true).create(true).mode(0o600).open(scratch.data().join("tasks.lock")).unwrap();
+        // SAFETY: flock on a descriptor owned by `held`; a second descriptor in this process is refused like another writer.
+        assert_eq!(unsafe { libc::flock(held.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) }, 0);
+        let app = app_with(Some(scratch.data()), picks(&scratch.folder()));
+        let main = webview(&app, "main");
+        assert_eq!(invoke(&main, "add_project", serde_json::json!({})).unwrap()["outcome"], "added");
+        assert_eq!(invoke(&main, "remove_project", serde_json::json!({ "id": "p1" })), Ok(serde_json::json!({ "outcome": "removed" })));
+        assert_eq!(invoke(&main, "add_project", serde_json::json!({})).unwrap()["project"]["id"], "p2");
+        let blocked = invoke(&main, "create_task", serde_json::json!({ "project_id": "p2", "title": "Title", "description": "" }));
+        assert_eq!(blocked, Err(task_error(tasks::TaskErrorCode::TasksUnavailable)));
+        drop(held);
+        assert_eq!(invoke(&main, "create_task", serde_json::json!({ "project_id": "p2", "title": "Title", "description": "" })).unwrap()["outcome"], "created");
+    }
+
+    #[test]
+    fn a_corrupt_task_file_is_reported_over_ipc_kept_and_does_not_affect_projects() {
+        let _guard = projects::GUARD_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        let scratch = Scratch::new("tasks-corrupt");
+        let app = app_with(Some(scratch.data()), picks(&scratch.folder()));
+        let main = webview(&app, "main");
+        assert_eq!(invoke(&main, "add_project", serde_json::json!({})).unwrap()["outcome"], "added");
+        let corrupt = b"{\"schema_version\":1,\"next_id\":\"oops\"}";
+        std::fs::write(scratch.data().join("tasks.json"), corrupt).unwrap();
+        let error = Err(task_error(tasks::TaskErrorCode::TasksCorrupt));
+        assert_eq!(invoke(&main, "list_tasks", serde_json::json!({})), error);
+        assert_eq!(invoke(&main, "get_task", serde_json::json!({ "id": "t1" })), error);
+        assert_eq!(invoke(&main, "create_task", serde_json::json!({ "project_id": "p1", "title": "Title", "description": "" })), error);
+        assert_eq!(invoke(&main, "update_task", serde_json::json!({ "id": "t1", "revision": 1, "title": "Title", "description": "", "status": "draft" })), error);
+        assert_eq!(std::fs::read(scratch.data().join("tasks.json")).unwrap(), corrupt);
+        assert_eq!(invoke(&main, "list_projects", serde_json::json!({})).unwrap()["projects"].as_array().unwrap().len(), 1);
     }
 
     // A panel that stays open until the test releases it with the given outcome.
