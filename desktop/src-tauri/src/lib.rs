@@ -5,6 +5,8 @@
 // See docs/implementation/desktop-architecture.md.
 mod projects;
 mod runtime_bridge;
+#[cfg(target_os = "macos")]
+mod store;
 
 use projects::{AddOutcome, Picker, ProjectError, ProjectList, Projects, RemoveOutcome, ResetOutcome};
 use runtime_bridge::{BridgeError, ErrorCode, RuntimeStatus};

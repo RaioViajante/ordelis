@@ -3,21 +3,14 @@
 // names' comments refer to the acceptance criteria in docs/implementation/desktop-local-projects.md.
 use super::*;
 use crate::projects::ProjectError;
+use crate::store::{arm, euid, LOCK_BUDGET};
 use std::cell::RefCell;
-use std::collections::HashMap;
-use std::io::{BufRead, BufReader};
-use std::os::unix::fs::PermissionsExt;
+use std::io::{BufRead, BufReader, Read};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
 
-// Failure injection: one-shot faults armed on the calling thread only.
-
-thread_local! {
-    static FAULTS: RefCell<HashMap<Step, i32>> = RefCell::new(HashMap::new());
-}
-
-fn arm(step: Step, errno: i32) {
-    FAULTS.with(|faults| faults.borrow_mut().insert(step, errno));
-}
+// Failure injection (store::arm) arms one-shot faults on the calling thread only.
 
 thread_local! {
     static BEFORE_RECHECK: RefCell<Option<Box<dyn FnOnce()>>> = RefCell::new(None);
@@ -48,13 +41,6 @@ fn arm_after_backup_scan(change: impl FnOnce() + 'static) {
 pub(super) fn after_backup_scan() {
     if let Some(change) = AFTER_BACKUP_SCAN.with(|hook| hook.borrow_mut().take()) {
         change();
-    }
-}
-
-pub(super) fn fault(step: Step) -> std::io::Result<()> {
-    match FAULTS.with(|faults| faults.borrow_mut().remove(&step)) {
-        Some(errno) => Err(std::io::Error::from_raw_os_error(errno)),
-        None => Ok(()),
     }
 }
 
