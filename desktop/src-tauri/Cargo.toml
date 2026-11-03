@@ -1,12 +1,12 @@
 [package]
-name = "synapse-desktop"
+name = "ordelis-desktop"
 version = "0.0.0"
 description = "Ordelis desktop shell. Presents a local UI; its only runtime connection is the development-only runtime status bridge."
 edition = "2021"
 publish = false
 
 [lib]
-name = "synapse_desktop_lib"
+name = "ordelis_desktop_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]

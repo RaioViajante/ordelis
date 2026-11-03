@@ -6,7 +6,7 @@
 # These checks are evidence, not proof: see docs/implementation/desktop-runtime-bridge.md#release-isolation.
 set -euo pipefail
 
-EXPECTED_EXECUTABLE="synapse-desktop"
+EXPECTED_EXECUTABLE="ordelis-desktop"
 
 die() { echo "ERROR: $1" >&2; exit 2; }
 failures=0

@@ -31,15 +31,15 @@ cc -o "$work/killpg" "$work/killpg.c"
 
 # bundle <dir> [<executable fixture>] [<CFBundleExecutable>]
 bundle() {
-  local app="$work/$1.app" binary="${2:-}" name="${3:-synapse-desktop}"
+  local app="$work/$1.app" binary="${2:-}" name="${3:-ordelis-desktop}"
   mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
   /usr/libexec/PlistBuddy -c "Add :CFBundleExecutable string $name" "$app/Contents/Info.plist" >/dev/null
-  if [ -n "$binary" ]; then cp "$binary" "$app/Contents/MacOS/synapse-desktop"; fi
+  if [ -n "$binary" ]; then cp "$binary" "$app/Contents/MacOS/ordelis-desktop"; fi
   echo "$app"
 }
 
 expect "clean fixture passes and names the inspected executable" 0 "$(bundle clean "$work/clean")" \
-  "inspected Contents/MacOS/synapse-desktop (sha256 "
+  "inspected Contents/MacOS/ordelis-desktop (sha256 "
 
 # Layout and executable problems are inspection errors (2), never success.
 expect "missing executable" 2 "$(bundle missing)" "executable missing"
@@ -49,12 +49,14 @@ mkdir -p "$work/nocontents.app"
 expect "no Contents directory" 2 "$work/nocontents.app" "missing Contents/"
 noplist="$(bundle noplist "$work/clean")"; rm "$noplist/Contents/Info.plist"
 expect "no Info.plist" 2 "$noplist" "missing Contents/Info.plist"
-expect "unexpected CFBundleExecutable" 2 "$(bundle renamed "$work/clean" other-binary)" "expected 'synapse-desktop'"
-text="$(bundle text)"; printf '#!/bin/sh\n' > "$text/Contents/MacOS/synapse-desktop"; chmod 755 "$text/Contents/MacOS/synapse-desktop"
+expect "unexpected CFBundleExecutable" 2 "$(bundle renamed "$work/clean" other-binary)" "expected 'ordelis-desktop'"
+# The check is exact: the former executable name must not be accepted alongside the current one.
+expect "former CFBundleExecutable is rejected" 2 "$(bundle former "$work/clean" synapse-desktop)" "expected 'ordelis-desktop'"
+text="$(bundle text)"; printf '#!/bin/sh\n' > "$text/Contents/MacOS/ordelis-desktop"; chmod 755 "$text/Contents/MacOS/ordelis-desktop"
 expect "executable is not Mach-O" 2 "$text" "not a Mach-O"
-unreadable="$(bundle unreadable "$work/clean")"; chmod 000 "$unreadable/Contents/MacOS/synapse-desktop"
+unreadable="$(bundle unreadable "$work/clean")"; chmod 000 "$unreadable/Contents/MacOS/ordelis-desktop"
 expect "unreadable executable" 2 "$unreadable" "not readable"
-link="$(bundle link)"; ln -s "$work/clean" "$link/Contents/MacOS/synapse-desktop"
+link="$(bundle link)"; ln -s "$work/clean" "$link/Contents/MacOS/ordelis-desktop"
 expect "symlinked executable" 2 "$link" "symlink"
 
 # A failing inspection tool must stop the script, not read as "nothing found": a tool that fails silently,
