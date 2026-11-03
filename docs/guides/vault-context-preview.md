@@ -1,6 +1,6 @@
 # Vault context preview
 
-`mco context preview` is the first read-only Synapse increment. It selects only notes listed for an explicit project or topic ID, extracts an optional Markdown heading section, and prints deterministic JSON. Note text is reference data; it never controls tool execution. The command neither invokes providers nor writes to the vault.
+`mco context preview` is the first read-only Ordelis increment. It selects only notes listed for an explicit project or topic ID, extracts an optional Markdown heading section, and prints deterministic JSON. Note text is reference data; it never controls tool execution. The command neither invokes providers nor writes to the vault.
 
 Keep real vaults, private indexes, configuration, saved previews, and logs outside this public checkout. The paths below create a synthetic vault in a temporary directory. Run from the repository root:
 

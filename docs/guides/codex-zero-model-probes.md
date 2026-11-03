@@ -70,7 +70,7 @@ What the runner does:
 - Refuses an unsafe private state root and any overlap among state, checkout, scratch and protected roots. The ledger subdirectory is mode `0700`; its database is mode `0600`; unexpected files, symlinks, unsafe ownership or permissions, corruption, missing initialized state and unsupported schemas deny.
 - Refuses an executable located inside the checkout, a protected root, the scratch parent or the state root.
 - Creates a fresh directory with `tempfile.mkdtemp` (mode 0700, verified), re-runs `check_probe_authorization` on it (must be an empty non-symlink directory outside the checkout and protected roots) and creates `home`, `codex-home`, `tmp` and `work` inside it. The working directory, `HOME`, `CODEX_HOME`, `TMPDIR`, `TMP` and `TEMP` point there.
-- Never executes in the Synapse checkout and never lists or reads protected roots (they are only compared by `stat`).
+- Never executes in the Ordelis checkout and never lists or reads protected roots (they are only compared by `stat`).
 - Removes only the directory it created, only if its device and inode still match, and never follows a symlink. If the scratch directory was replaced, nothing is deleted (`cleanup: skipped_identity_mismatch`). If removal fails, `cleanup: failed` and `scratch_leftover` name the path for manual removal. Entries already in the scratch parent, including a stray file a command wrote there, are never deleted.
 
 What it does **not** do: a temporary directory is **not an OS security sandbox**. The probed process runs as the user and can read or write anything that user can. Path validation is point-in-time evidence; a path can change after the check. Network access is not restricted.
@@ -121,6 +121,6 @@ A completed probe shows, at most, that three help commands behaved on one execut
 
 1. A separately reviewed public CLI milestone; the controlled entry point remains library-only in this increment.
 2. An explicit user-approved run against the real binary, with the user's own installation and a reviewed private local state root, still with zero model calls.
-3. Independent isolation witnesses before any claim about filesystem, network or session behavior: an OS-level mechanism applied by Synapse, canary writes and read attempts, and network observation outside the provider process.
+3. Independent isolation witnesses before any claim about filesystem, network or session behavior: an OS-level mechanism applied by Ordelis, canary writes and read attempts, and network observation outside the provider process.
 4. Resource limits (`RLIMIT`, cgroups or equivalent) if resource budgets are to be enforced rather than only time and output.
 5. Only after all of that, a separate increment for a bounded model call with `max_model_calls > 0`.

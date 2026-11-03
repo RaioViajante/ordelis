@@ -38,8 +38,8 @@ mkdir -p "$demo_dir/repo" "$demo_dir/vault" "$demo_dir/state"
 printf '# Work\nRelevant note.\n# Other\nExcluded.\n' > "$demo_dir/vault/selected.md"
 printf 'Unrelated note.\n' > "$demo_dir/vault/unrelated.md"
 printf '%s\n' '{"projects":{"demo":[{"path":"selected.md","heading":"Work"}]},"topics":{"other":[{"path":"unrelated.md"}]}}' > "$demo_dir/index.json"
-printf '{"schema_version":1,"vault":{"root":"%s/vault","index":"%s/index.json","read_only":true},"context":{"per_note_bytes":64,"total_excerpt_bytes":128},"execution":{"mode":"read_only","hard_timeout_seconds":60,"max_parallelism":1,"max_retries":0},"state":{"root":"%s/state"}}\n' "$demo_dir" "$demo_dir" "$demo_dir" > "$demo_dir/synapse.json"
-python3 -m runtime.cli context plan --config "$demo_dir/synapse.json" --repo "$demo_dir/repo" \
+printf '{"schema_version":1,"vault":{"root":"%s/vault","index":"%s/index.json","read_only":true},"context":{"per_note_bytes":64,"total_excerpt_bytes":128},"execution":{"mode":"read_only","hard_timeout_seconds":60,"max_parallelism":1,"max_retries":0},"state":{"root":"%s/state"}}\n' "$demo_dir" "$demo_dir" "$demo_dir" > "$demo_dir/ordelis.json"
+python3 -m runtime.cli context plan --config "$demo_dir/ordelis.json" --repo "$demo_dir/repo" \
   --project demo --task 'Summarize work.' --agent pi --model synthetic-model --json
 ```
 

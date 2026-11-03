@@ -1,5 +1,7 @@
 # Desktop Sessions experience
 
+> **Formerly Synapse.** Written when the product was named Synapse; the name is kept as written. The product is now Ordelis.
+
 For [issue #30](https://github.com/RaioViajante/synapse/issues/30). Frontend-only and display-only: nothing here starts, resumes, inspects or controls a process, agent CLI, provider, worktree or credential. See [architecture](desktop-architecture.md) and [visual verification](desktop-visual-verification.md). Issue #23 (the production session-daemon readiness race) is untouched.
 
 ## Data model (`fixtures/sessions.ts`)

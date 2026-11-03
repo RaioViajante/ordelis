@@ -1,5 +1,7 @@
 # Development-only Python runtime bridge
 
+> **Formerly Synapse.** Written when the product was named Synapse; the name is kept as written. The product is now Ordelis.
+
 [Issue #36](https://github.com/RaioViajante/synapse/issues/36). The second step of the native runtime integration plan, after the [IPC authorization](desktop-architecture.md#ipc-authorization) of PR #33. The desktop Rust backend can ask one fixed question of the Python runtime, "what are you?", through one authorized command, `get_runtime_status`. **It is a development tool.** A default or release build cannot start Python. The Settings → Runtime tab ([issue #40](https://github.com/RaioViajante/synapse/issues/40)) is its only caller; see [Runtime status in Settings](#runtime-status-in-settings).
 
 This is not a sandbox, not provider authorization and not isolation from a same-user attacker. Launching a process is a security boundary even when the question is read-only, so the bridge fails closed whenever its environment, interpreter or answer cannot be trusted for this narrow contract.

@@ -1,5 +1,7 @@
 # Private cross-process authorization ledger
 
+> **Formerly Synapse.** Written when the product was named Synapse; the name is kept as written. The product is now Ordelis.
+
 Status: accepted for issue [#17](https://github.com/RaioViajante/synapse/issues/17).
 
 ## Decision
