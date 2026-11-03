@@ -6,7 +6,7 @@ use crate::projects::ProjectError;
 use crate::store::{arm, euid, LOCK_BUDGET};
 use std::cell::RefCell;
 use std::io::{BufRead, BufReader, Read};
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -336,16 +336,37 @@ fn a_leftover_temp_file_is_never_read_or_promoted() {
 
 // 2. Registry file type and owner
 
+/// Runs `call` on a thread of its own and fails unless it returns within `limit`. A call stuck opening `fifo` would
+/// otherwise hang the suite; opening the FIFO's write end releases it so the thread can end.
+fn returns_within<T: Send + 'static>(limit: Duration, fifo: &Path, call: impl FnOnce() -> T + Send + 'static) -> T {
+    let (sender, answer) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = sender.send(call());
+    });
+    answer.recv_timeout(limit).unwrap_or_else(|_| {
+        let _ = std::fs::OpenOptions::new().write(true).custom_flags(libc::O_NONBLOCK).open(fifo);
+        panic!("still blocked after {limit:?}");
+    })
+}
+
+// The bound measures the FIFO alone (issue #90). add and reset also take the registry's writer mutex, which the
+// tests that hold it for a full lock budget keep for 2 s on purpose; holding FULL_BUDGET keeps them from running
+// meanwhile, so no wait for that mutex is counted here. list takes no lock at all.
 #[test]
 fn a_fifo_registry_is_unavailable_without_blocking() {
+    let _serial = full_budget();
     let scratch = Scratch::new("fifo");
     std::fs::DirBuilder::new().mode(0o700).create(scratch.data()).unwrap();
-    mkfifo(&scratch.file(REGISTRY));
-    let started = Instant::now();
-    assert_eq!(list(&scratch.data()).unwrap_err(), ErrorCode::RegistryUnavailable);
-    assert_eq!(add(&scratch.data(), &scratch.folder("a")).unwrap_err(), ErrorCode::RegistryUnavailable);
-    assert_eq!(reset(&scratch.data()).unwrap_err(), ErrorCode::RegistryUnavailable);
-    assert!(started.elapsed() < Duration::from_secs(1), "{:?}", started.elapsed());
+    let fifo = scratch.file(REGISTRY);
+    mkfifo(&fifo);
+    let limit = Duration::from_secs(1);
+    let (data, folder) = (scratch.data(), scratch.folder("a"));
+    assert_eq!(returns_within(limit, &fifo, move || list(&data)).unwrap_err(), ErrorCode::RegistryUnavailable);
+    let data = scratch.data();
+    assert_eq!(returns_within(limit, &fifo, move || add(&data, &folder)).unwrap_err(), ErrorCode::RegistryUnavailable);
+    let data = scratch.data();
+    assert_eq!(returns_within(limit, &fifo, move || reset(&data)).unwrap_err(), ErrorCode::RegistryUnavailable);
+    assert!(std::fs::symlink_metadata(&fifo).unwrap().file_type().is_fifo(), "the FIFO is left in place");
 }
 
 #[test]
@@ -643,8 +664,11 @@ fn child_process() {
     }
 }
 
+/// A cleared environment: a runtime bridge test sets hostile process-wide variables (DYLD_INSERT_LIBRARIES among them)
+/// and never unsets them, and a child that inherited them would abort before running. The child needs only its task.
 fn spawn_child(task: &str) -> (Child, impl Iterator<Item = String>) {
     let mut child = Command::new(std::env::current_exe().unwrap())
+        .env_clear()
         .args(["--exact", CHILD_TEST, "--nocapture", "--test-threads", "1"])
         .env(CHILD_TASK, task)
         .stdin(Stdio::piped())
@@ -656,8 +680,18 @@ fn spawn_child(task: &str) -> (Child, impl Iterator<Item = String>) {
     (child, lines)
 }
 
+/// Taken by every test that holds the registry's writer mutex for a full lock budget, and by the tests whose time
+/// bounds must not include such a wait. Without it, one of these tests can wait up to 2 s for the mutex while
+/// another one holds it, and a timing assertion then measures that wait instead of what it claims to (issue #90).
+static FULL_BUDGET: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn full_budget() -> std::sync::MutexGuard<'static, ()> {
+    FULL_BUDGET.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 #[test]
 fn another_process_holding_the_lock_makes_a_mutation_unavailable_within_the_budget() {
+    let _serial = full_budget();
     let scratch = Scratch::new("lock-process");
     added(add(&scratch.data(), &scratch.folder("a")));
     let lock_file = identity(&scratch.file(LOCK));
@@ -1748,6 +1782,7 @@ fn a_failed_import_commits_nothing_lists_empty_and_the_next_launch_retries() {
 
 #[test]
 fn a_lock_held_by_another_process_fails_the_import_within_the_budget_and_a_retry_imports() {
+    let _serial = full_budget();
     let scratch = Scratch::new("import-lock-held");
     scratch.write_legacy(&legacy_bytes());
     let before = legacy_state(&scratch);
