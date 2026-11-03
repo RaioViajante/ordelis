@@ -260,6 +260,7 @@ Before I2 the registry lived under the bundle identifier `dev.raioviajante.synap
 - Only a valid version-1 registry is imported, including a valid one with no projects. Anything else (absent, corrupt, newer, untrusted, unreadable) imports nothing and creates nothing.
 - `D` takes precedence: `projects.json` in any form, or any `projects.json.corrupt-*` name, means no import. `projects.lock` and a stale `projects.json.tmp` do not count. The decisive check is made under `D`'s lock, so concurrent launches import once and an add that commits first wins.
 - The records are committed through the [write protocol](#write-protocol) with their ids and `next_id`. A failure before the rename commits nothing, and the next launch tries again.
+- Native acceptance tests of the import need OS-level isolation (a dedicated VM or a separate macOS user); environment variables such as `HOME` are not isolation. See [I2 native acceptance testing](../migration/ordelis.md#i2-native-acceptance-testing).
 
 ### IPC boundary
 
