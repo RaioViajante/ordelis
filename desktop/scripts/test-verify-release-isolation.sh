@@ -85,6 +85,13 @@ expect "unreadable file inside the bundle" 2 "$unsearchable" "grep failed"
 expect "imports _killpg" 1 "$(bundle killpg "$work/killpg")" "imports _killpg"
 marker="$(bundle marker "$work/clean")"; printf 'src/runtime_bridge/process.rs' > "$marker/Contents/Resources/blob"
 expect "bridge source marker" 1 "$marker" "runtime_bridge/process.rs"
+# Both generations of the development build variable names are rejected, each on its own.
+# (The fixture directory is numbered, not named after the variable: "PYTHON" in a path would trip the Python-file check.)
+n=0
+for variable in ORDELIS_DEV_PYTHON ORDELIS_DEV_CHECKOUT SYNAPSE_DEV_PYTHON SYNAPSE_DEV_CHECKOUT; do
+  n=$((n + 1)); named="$(bundle "buildvar-$n" "$work/clean")"; printf '%s' "$variable" > "$named/Contents/Resources/blob"
+  expect "build variable name $variable" 1 "$named" "bundle contains '$variable'"
+done
 checkout="$(cd "$here/../.." && pwd -P)"
 path="$(bundle path "$work/clean")"; printf '%s' "$checkout" > "$path/Contents/Resources/blob"
 expect "checkout path" 1 "$path" "bundle contains '$checkout'"

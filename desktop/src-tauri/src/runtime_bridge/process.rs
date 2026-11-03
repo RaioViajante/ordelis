@@ -23,9 +23,9 @@ const EXIT_UNSUPPORTED_VERSION: i32 = 78;
 const MAX_FIELD_LEN: usize = 32;
 
 #[cfg(feature = "dev-runtime")]
-const DEV_PYTHON: Option<&str> = option_env!("SYNAPSE_DEV_PYTHON");
+const DEV_PYTHON: Option<&str> = option_env!("ORDELIS_DEV_PYTHON");
 #[cfg(feature = "dev-runtime")]
-const DEV_CHECKOUT: Option<&str> = option_env!("SYNAPSE_DEV_CHECKOUT");
+const DEV_CHECKOUT: Option<&str> = option_env!("ORDELIS_DEV_CHECKOUT");
 
 pub(super) struct Launch {
     pub interpreter: PathBuf,

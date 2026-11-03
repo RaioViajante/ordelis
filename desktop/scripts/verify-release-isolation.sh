@@ -37,8 +37,10 @@ imports="$(nm -u "$exe")" || die "nm -u failed"
 [ -n "$imports" ] || die "nm -u listed no imported symbols"
 
 # 1. Development paths and bridge markers anywhere in the bundle.
-needles=("$checkout" ".dev-python" "runtime-bridge" "status.py" "SYNAPSE_DEV_PYTHON" "SYNAPSE_DEV_CHECKOUT"
-  "runtime_bridge/process.rs")
+# The SYNAPSE_DEV_* names are the former build variables. They stay on the list on purpose, next to the current
+# ORDELIS_DEV_* names, so a bundle that embeds either spelling is rejected.
+needles=("$checkout" ".dev-python" "runtime-bridge" "status.py" "ORDELIS_DEV_PYTHON" "ORDELIS_DEV_CHECKOUT"
+  "SYNAPSE_DEV_PYTHON" "SYNAPSE_DEV_CHECKOUT" "runtime_bridge/process.rs")
 if [ -f "$desktop/src-tauri/.dev-python" ]; then
   needles+=("$(tr -d '\n' < "$desktop/src-tauri/.dev-python")")
 fi

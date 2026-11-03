@@ -16,8 +16,8 @@ fn dev_runtime() {
         return;
     }
     let checkout = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().expect("checkout root");
-    println!("cargo:rustc-env=SYNAPSE_DEV_PYTHON={path}");
-    println!("cargo:rustc-env=SYNAPSE_DEV_CHECKOUT={}", checkout.display());
+    println!("cargo:rustc-env=ORDELIS_DEV_PYTHON={path}");
+    println!("cargo:rustc-env=ORDELIS_DEV_CHECKOUT={}", checkout.display());
 }
 
 fn main() {
