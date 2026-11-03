@@ -181,15 +181,17 @@ mod tests {
         result.expect_err("command must be rejected").to_string()
     }
 
-    // The project registry lives in app_data_dir, which Tauri derives from the bundle identifier and not from
-    // the product name. Renaming the product must not move it; changing the identifier moves it and needs the
-    // reviewed registry import (docs/migration/ordelis.md, I2). The path is computed here, never read or created.
+    // The project registry lives in app_data_dir, which Tauri derives from the bundle identifier. The registry kept
+    // under the former identifier is imported from that directory's sibling (docs/migration/ordelis.md, I2). The
+    // paths are computed here, never read or created.
     #[test]
-    fn product_name_is_ordelis_while_the_data_directory_still_follows_the_legacy_identifier() {
+    fn the_data_directory_follows_the_ordelis_identifier_and_the_legacy_one_is_its_sibling() {
         let app = app();
         assert_eq!(app.package_info().name, "Ordelis");
-        assert_eq!(app.config().identifier, "dev.raioviajante.synapse");
-        assert!(app.path().app_data_dir().unwrap().ends_with("dev.raioviajante.synapse"));
+        assert_eq!(app.config().identifier, "app.ordelis.desktop");
+        let data = app.path().app_data_dir().unwrap();
+        assert!(data.ends_with("app.ordelis.desktop"), "{data:?}");
+        assert_eq!(projects::legacy_data_dir(&data), Some(data.parent().unwrap().join("dev.raioviajante.synapse")));
     }
 
     #[test]
