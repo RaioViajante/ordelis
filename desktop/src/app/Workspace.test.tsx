@@ -60,12 +60,12 @@ describe("Home composer", () => {
     const user = userEvent.setup();
     renderApp();
     await user.type(draftBox(), "unfinished thought");
-    await user.selectOptions(projectSelect(), "synapse");
+    await user.selectOptions(projectSelect(), "example-project");
     await user.click(rail().getByRole("link", { name: "Settings" }));
     await screen.findByRole("heading", { level: 1, name: "Settings" });
     await user.click(rail().getByRole("link", { name: "Home" }));
     expect(draftBox()).toHaveValue("unfinished thought");
-    expect(projectSelect()).toHaveValue("synapse");
+    expect(projectSelect()).toHaveValue("example-project");
   });
 
   it("selects sample context notes, inertly, and resets them on project change", async () => {
@@ -80,7 +80,7 @@ describe("Home composer", () => {
     expect(within(group).getByRole("checkbox", { name: /Security \/ Tokens/ })).toBeChecked();
     expect(screen.getByText("1 of 5 selected")).toBeInTheDocument();
     expect(status()).toHaveTextContent("Security / Tokens added to sample context");
-    await user.selectOptions(projectSelect(), "synapse");
+    await user.selectOptions(projectSelect(), "example-project");
     expect(screen.queryByRole("group", { name: /Sample context/ })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Select context" })).toHaveAccessibleDescription(/no sample context/i);
   });
@@ -180,9 +180,9 @@ describe("Projects", () => {
     expect(await screen.findByRole("heading", { level: 2, name: "mochi-web" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /mochi-web/ })).toHaveAttribute("aria-pressed", "true");
 
-    await user.click(screen.getByRole("button", { name: /synapse/ }));
+    await user.click(screen.getByRole("button", { name: /example-project/ }));
     await user.click(rail().getByRole("link", { name: "Home" }));
-    expect(projectSelect()).toHaveValue("synapse");
+    expect(projectSelect()).toHaveValue("example-project");
   });
 
   it("shows sample repository, workspace and task details with inert paths", async () => {
