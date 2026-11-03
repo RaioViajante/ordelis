@@ -4,7 +4,7 @@
 // The registry and the panel are macOS-only; other targets answer every command with unsupported_platform.
 use serde::Serialize;
 use std::future::Future;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::{Runtime, WebviewWindow};
@@ -13,6 +13,15 @@ use tauri::{Runtime, WebviewWindow};
 mod folder;
 #[cfg(target_os = "macos")]
 mod registry;
+
+/// The app data directory's name under the former bundle identifier. The registry found there is imported once,
+/// copy-only, by `Projects::import_legacy`; the name is fixed here and never comes from the webview.
+const LEGACY_DATA_DIR: &str = "dev.raioviajante.synapse";
+
+/// The former identifier's data directory: the sibling of `data_dir` named `LEGACY_DATA_DIR`.
+pub fn legacy_data_dir(data_dir: &Path) -> Option<PathBuf> {
+    Some(data_dir.parent()?.join(LEGACY_DATA_DIR))
+}
 
 /// The only window that may open the folder panel; the capability grants the commands to it alone.
 #[cfg(target_os = "macos")]
@@ -219,6 +228,17 @@ impl Projects {
         self.data_dir.clone().ok_or(ErrorCode::RegistryUnavailable)
     }
 
+    /// The one-time, copy-only import of the former identifier's registry. Startup calls it synchronously, before
+    /// this state is managed, so no command reads or changes the registry until it has finished. Every outcome
+    /// leaves a consistent registry, and an import that could not complete is tried again at the next launch.
+    pub fn import_legacy(&self) {
+        if let Some(dir) = &self.data_dir {
+            if let Some(legacy) = legacy_data_dir(dir) {
+                let _ = registry::import(dir, &legacy);
+            }
+        }
+    }
+
     pub async fn list(&self) -> Result<ProjectList, ProjectError> {
         let dir = self.data_dir()?;
         blocking(move || registry::list(&dir)).await
@@ -273,6 +293,9 @@ async fn blocking<T: Send + 'static>(
 
 #[cfg(not(target_os = "macos"))]
 impl Projects {
+    /// The registry is macOS-only, so there is nothing to import.
+    pub fn import_legacy(&self) {}
+
     pub async fn list(&self) -> Result<ProjectList, ProjectError> {
         Err(ErrorCode::UnsupportedPlatform.into())
     }

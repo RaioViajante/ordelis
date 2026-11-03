@@ -35,6 +35,22 @@ pub(super) fn before_recheck() {
     }
 }
 
+thread_local! {
+    static AFTER_BACKUP_SCAN: RefCell<Option<Box<dyn FnOnce()>>> = RefCell::new(None);
+}
+
+/// Runs `change` on this thread once, in backup_present, after the names were read and before the directory is
+/// checked again.
+fn arm_after_backup_scan(change: impl FnOnce() + 'static) {
+    AFTER_BACKUP_SCAN.with(|hook| *hook.borrow_mut() = Some(Box::new(change)));
+}
+
+pub(super) fn after_backup_scan() {
+    if let Some(change) = AFTER_BACKUP_SCAN.with(|hook| hook.borrow_mut().take()) {
+        change();
+    }
+}
+
 pub(super) fn fault(step: Step) -> std::io::Result<()> {
     match FAULTS.with(|faults| faults.borrow_mut().remove(&step)) {
         Some(errno) => Err(std::io::Error::from_raw_os_error(errno)),
@@ -94,6 +110,20 @@ impl Scratch {
 
     fn backups(&self) -> Vec<String> {
         self.names().into_iter().filter(|n| n.starts_with(BACKUP_PREFIX)).collect()
+    }
+
+    /// The former identifier's data directory, a sibling of `data()`; not created until a fixture creates it.
+    fn legacy(&self) -> PathBuf {
+        self.0.join("legacy")
+    }
+
+    fn write_legacy(&self, contents: &[u8]) {
+        let _ = std::fs::DirBuilder::new().mode(0o700).create(self.legacy());
+        std::fs::write(self.legacy().join(REGISTRY), contents).unwrap();
+    }
+
+    fn import(&self) -> Import {
+        import(&self.data(), &self.legacy())
     }
 }
 
@@ -595,6 +625,7 @@ const CHILD_TEST: &str = "projects::registry::tests::child_process";
 // libtest may print these on the same line as its own "test ... " header.
 const LOCKED: &str = "synapse-child-locked";
 const READY: &str = "synapse-child-ready";
+const IMPORT_RESULT: &str = "synapse-child-import:";
 
 /// Not a test of its own: the body runs only in a copy of this test binary started by the tests below.
 #[test]
@@ -615,6 +646,12 @@ fn child_process() {
             for folder in lines {
                 added(add(&dir, Path::new(folder)));
             }
+        }
+        "import" => {
+            let legacy = PathBuf::from(lines.next().unwrap());
+            println!("{READY}");
+            std::io::stdin().read_line(&mut stdin).unwrap();
+            println!("{IMPORT_RESULT}{:?}", import(&dir, &legacy));
         }
         _ => unreachable!(),
     }
@@ -1325,4 +1362,532 @@ fn errors_carry_only_fixed_messages() {
             "unsupported_platform"
         ]
     );
+}
+
+// I2. One-time, copy-only import from the former identifier's data directory. `legacy()` stands in for
+// ~/Library/Application Support/dev.raioviajante.synapse and `data()` for the new app data directory; both are
+// private scratch directories.
+
+/// Everything a write could change in the legacy directory: its entries (names, types, modes, sizes, mtimes and
+/// file contents) and its own mode and mtime. `None` when it does not exist.
+fn legacy_state(scratch: &Scratch) -> Option<(Vec<String>, u32, std::time::SystemTime)> {
+    let meta = std::fs::symlink_metadata(scratch.legacy()).ok()?;
+    Some((snapshot(&scratch.legacy()), meta.mode(), meta.modified().unwrap()))
+}
+
+/// A legacy registry as an earlier build left it: written by the same code, with a removed record, so ids are
+/// p1 and p3 and next_id is 4.
+fn legacy_registry(scratch: &Scratch) -> Vec<u8> {
+    for name in ["alpha", "beta", "gamma"] {
+        added(add(&scratch.legacy(), &scratch.folder(name)));
+    }
+    assert_eq!(remove(&scratch.legacy(), "p2"), Ok(RemoveOutcome::Removed));
+    std::fs::read(scratch.legacy().join(REGISTRY)).unwrap()
+}
+
+fn json(bytes: &[u8]) -> serde_json::Value {
+    serde_json::from_slice(bytes).unwrap()
+}
+
+#[test]
+fn a_valid_legacy_registry_is_imported_once_and_left_byte_identical() {
+    let scratch = Scratch::new("import-valid");
+    let bytes = legacy_registry(&scratch);
+    let before = legacy_state(&scratch);
+
+    assert_eq!(scratch.import(), Import::Imported);
+    // Records, ids, (dev, ino), registration times and next_id are carried exactly as validated.
+    assert_eq!(json(&scratch.registry()), json(&bytes));
+    assert_eq!(scratch.registry(), bytes, "the same serializer writes the same bytes");
+    assert_eq!(ids(&scratch.data()), ["p1", "p3"]);
+    assert!(listed(&scratch.data()).iter().all(|p| p.status == Status::Available));
+    assert_eq!(scratch.names(), [REGISTRY, LOCK]);
+    assert_eq!((mode(&scratch.data()), mode(&scratch.file(REGISTRY)), mode(&scratch.file(LOCK))), (0o700, 0o600, 0o600));
+    assert_eq!(legacy_state(&scratch), before, "the legacy directory is unchanged");
+
+    // Repeated launches find the new registry and do nothing.
+    let imported = scratch.registry();
+    for _ in 0..3 {
+        assert_eq!(scratch.import(), Import::Superseded);
+    }
+    assert_eq!(scratch.registry(), imported);
+    assert_eq!(legacy_state(&scratch), before);
+    // The next registration continues from the imported next_id: no id is reused.
+    assert_eq!(added(add(&scratch.data(), &scratch.folder("delta"))).id, "p4");
+}
+
+#[test]
+fn a_valid_empty_legacy_registry_is_imported_as_an_empty_registry() {
+    let scratch = Scratch::new("import-empty");
+    scratch.write_legacy(&registry_json(5, vec![]));
+    let before = legacy_state(&scratch);
+    assert_eq!(scratch.import(), Import::Imported);
+    assert_eq!(json(&scratch.registry()), serde_json::json!({ "schema_version": 1, "next_id": 5, "projects": [] }));
+    assert_eq!(ids(&scratch.data()), Vec::<String>::new());
+    assert_eq!(legacy_state(&scratch), before);
+    // Migration is one-time: what an older build adds to the legacy registry later is not imported.
+    added(add(&scratch.legacy(), &scratch.folder("later")));
+    assert_eq!(scratch.import(), Import::Superseded);
+    assert_eq!(ids(&scratch.data()), Vec::<String>::new());
+    assert_eq!(added(add(&scratch.data(), &scratch.folder("new"))).id, "p5");
+}
+
+#[test]
+fn the_former_build_still_finds_its_registry_untouched_after_the_import() {
+    let scratch = Scratch::new("import-rollback");
+    legacy_registry(&scratch);
+    let listed_before = listed(&scratch.legacy());
+    assert_eq!(scratch.import(), Import::Imported);
+    // Rolling back means running a build with the former identifier, which reads the legacy directory.
+    assert_eq!(listed(&scratch.legacy()), listed_before);
+    // The two registries are independent from now on: neither build's changes reach the other.
+    assert_eq!(remove(&scratch.data(), "p1"), Ok(RemoveOutcome::Removed));
+    assert_eq!(ids(&scratch.legacy()), ["p1", "p3"]);
+    added(add(&scratch.legacy(), &scratch.folder("old-build")));
+    assert_eq!(ids(&scratch.data()), ["p3"]);
+}
+
+#[test]
+fn without_a_valid_legacy_registry_nothing_is_created() {
+    let mut oversized = registry_json(2, vec![record("p1", "/a", 1, 2)]);
+    oversized.resize(MAX_BYTES as usize + 1, b' ');
+    let fixtures: Vec<(&str, Option<Vec<u8>>)> = vec![
+        ("no legacy directory", None),
+        ("malformed JSON", Some(b"{\"schema_version\":1,".to_vec())),
+        ("not an object", Some(b"[]".to_vec())),
+        ("unsupported newer schema", Some(serde_json::to_vec(&serde_json::json!({ "schema_version": 2 })).unwrap())),
+        ("schema version 0", Some(serde_json::to_vec(&serde_json::json!({ "schema_version": 0, "next_id": 1, "projects": [] })).unwrap())),
+        ("unknown field", Some(serde_json::to_vec(&serde_json::json!({ "schema_version": 1, "next_id": 1, "projects": [], "extra": true })).unwrap())),
+        ("duplicate ids", Some(registry_json(3, vec![record("p1", "/a", 1, 2), record("p1", "/b", 1, 3)]))),
+        ("id at or above next_id", Some(registry_json(1, vec![record("p1", "/a", 1, 2)]))),
+        ("relative path", Some(registry_json(2, vec![record("p1", "a/b", 1, 2)]))),
+        ("over 256 KiB", Some(oversized)),
+    ];
+    for (name, contents) in fixtures {
+        let scratch = Scratch::new("import-invalid");
+        if let Some(bytes) = &contents {
+            scratch.write_legacy(bytes);
+        }
+        let before = legacy_state(&scratch);
+        assert_eq!(scratch.import(), Import::NoLegacy, "{name}");
+        assert!(!scratch.data().exists(), "{name}: the new data directory is not created");
+        assert_eq!(legacy_state(&scratch), before, "{name}: the legacy directory is unchanged");
+    }
+    // A legacy directory without a registry: only a lock, or only a backup from an earlier reset.
+    for leftover in [LOCK, "projects.json.corrupt-1791936000000"] {
+        let scratch = Scratch::new("import-leftover");
+        std::fs::DirBuilder::new().mode(0o700).create(scratch.legacy()).unwrap();
+        std::fs::write(scratch.legacy().join(leftover), b"").unwrap();
+        let before = legacy_state(&scratch);
+        assert_eq!(scratch.import(), Import::NoLegacy, "{leftover}");
+        assert!(!scratch.data().exists(), "{leftover}");
+        assert_eq!(legacy_state(&scratch), before, "{leftover}");
+    }
+}
+
+#[test]
+fn an_unsafe_legacy_registry_or_directory_is_never_followed() {
+    use std::os::unix::fs::symlink;
+    let valid = registry_json(2, vec![record("p1", "/a", 1, 2)]);
+    // A symlinked registry, a FIFO (which must not block), a directory at the registry name, and a symlinked
+    // legacy directory pointing at a valid one.
+    let cases: [(&str, &dyn Fn(&Scratch)); 4] = [
+        ("symlinked registry", &|s| {
+            std::fs::DirBuilder::new().mode(0o700).create(s.legacy()).unwrap();
+            std::fs::write(s.0.join("elsewhere.json"), &valid).unwrap();
+            symlink(s.0.join("elsewhere.json"), s.legacy().join(REGISTRY)).unwrap();
+        }),
+        ("FIFO registry", &|s| {
+            std::fs::DirBuilder::new().mode(0o700).create(s.legacy()).unwrap();
+            mkfifo(&s.legacy().join(REGISTRY));
+        }),
+        ("directory at the registry name", &|s| {
+            std::fs::DirBuilder::new().mode(0o700).create(s.legacy()).unwrap();
+            std::fs::create_dir(s.legacy().join(REGISTRY)).unwrap();
+        }),
+        ("symlinked legacy directory", &|s| {
+            std::fs::DirBuilder::new().mode(0o700).create(s.0.join("real-legacy")).unwrap();
+            std::fs::write(s.0.join("real-legacy").join(REGISTRY), &valid).unwrap();
+            symlink(s.0.join("real-legacy"), s.legacy()).unwrap();
+        }),
+    ];
+    for (name, make) in cases {
+        let scratch = Scratch::new("import-unsafe");
+        make(&scratch);
+        let before = legacy_state(&scratch);
+        let started = Instant::now();
+        assert_eq!(scratch.import(), Import::NoLegacy, "{name}");
+        assert!(started.elapsed() < Duration::from_secs(1), "{name}: never blocks");
+        assert!(!scratch.data().exists(), "{name}");
+        assert_eq!(legacy_state(&scratch), before, "{name}");
+    }
+}
+
+#[test]
+fn an_unreadable_or_over_permissive_legacy_registry_is_skipped_and_a_later_launch_imports_it() {
+    let bytes = registry_json(2, vec![record("p1", "/a", 1, 2)]);
+    // (name, break it, repair it); each break is something the user can undo, so the import is retried.
+    let cases: [(&str, u32, u32, bool); 3] = [
+        ("group-writable legacy directory", 0o770, 0o700, false),
+        ("world-writable legacy directory", 0o707, 0o700, false),
+        ("unreadable legacy registry", 0o000, 0o600, true),
+    ];
+    for (name, broken, repaired, on_file) in cases {
+        if on_file && is_root() {
+            continue;
+        }
+        let scratch = Scratch::new("import-transient");
+        scratch.write_legacy(&bytes);
+        let target = if on_file { scratch.legacy().join(REGISTRY) } else { scratch.legacy() };
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(broken)).unwrap();
+        assert_eq!(scratch.import(), Import::NoLegacy, "{name}");
+        assert!(!scratch.data().exists(), "{name}: a failed read creates nothing that could block the retry");
+        assert_eq!(mode(&target), broken, "{name}: permissions are never changed");
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(repaired)).unwrap();
+        let before = legacy_state(&scratch);
+        assert_eq!(scratch.import(), Import::Imported, "{name}: the next launch imports");
+        assert_eq!(json(&scratch.registry()), json(&bytes), "{name}");
+        assert_eq!(legacy_state(&scratch), before, "{name}");
+    }
+}
+
+#[test]
+fn an_existing_new_registry_always_takes_precedence() {
+    use std::os::unix::fs::symlink;
+    let theirs = registry_json(2, vec![record("p1", "/legacy", 1, 2)]);
+    let ours = registry_json(3, vec![record("p2", "/ours", 1, 3)]);
+    let cases: [(&str, &dyn Fn(&Scratch)); 7] = [
+        ("a registry with projects", &|s| s.write_registry(&ours)),
+        ("a valid empty registry", &|s| s.write_registry(&registry_json(1, vec![]))),
+        ("a corrupt registry", &|s| s.write_registry(CORRUPT)),
+        ("a newer registry", &|s| s.write_registry(&serde_json::to_vec(&serde_json::json!({ "schema_version": 9 })).unwrap())),
+        ("a symlinked registry", &|s| {
+            std::fs::DirBuilder::new().mode(0o700).create(s.data()).unwrap();
+            std::fs::write(s.0.join("target.json"), &ours).unwrap();
+            symlink(s.0.join("target.json"), s.file(REGISTRY)).unwrap();
+        }),
+        ("a FIFO at the registry name", &|s| {
+            std::fs::DirBuilder::new().mode(0o700).create(s.data()).unwrap();
+            mkfifo(&s.file(REGISTRY));
+        }),
+        ("a directory at the registry name", &|s| {
+            std::fs::DirBuilder::new().mode(0o700).create(s.data()).unwrap();
+            std::fs::create_dir(s.file(REGISTRY)).unwrap();
+        }),
+    ];
+    for (name, make) in cases {
+        let scratch = Scratch::new("import-precedence");
+        scratch.write_legacy(&theirs);
+        make(&scratch);
+        let (legacy, ours_before) = (legacy_state(&scratch), snapshot(&scratch.data()));
+        let started = Instant::now();
+        assert_eq!(scratch.import(), Import::Superseded, "{name}");
+        assert!(started.elapsed() < Duration::from_secs(1), "{name}: never blocks");
+        assert_eq!(snapshot(&scratch.data()), ours_before, "{name}: the new directory is unchanged");
+        assert_eq!(legacy_state(&scratch), legacy, "{name}: the legacy directory is unchanged");
+    }
+}
+
+#[test]
+fn any_corrupt_registry_backup_blocks_the_import_without_being_opened() {
+    use std::os::unix::fs::symlink;
+    let stamp = "projects.json.corrupt-1791936000000";
+    // A backup of any type counts, under the exact prefix only. The FIFO would block if it were opened and the
+    // mode-000 file would fail to read; neither is touched.
+    let cases: [(&str, &dyn Fn(&Path)); 6] = [
+        ("a backup file", &|p| std::fs::write(p, CORRUPT).unwrap()),
+        ("an unreadable backup", &|p| {
+            std::fs::write(p, CORRUPT).unwrap();
+            std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o000)).unwrap();
+        }),
+        ("a FIFO backup", &|p| mkfifo(p)),
+        ("a directory backup", &|p| std::fs::create_dir(p).unwrap()),
+        ("a dangling symlink backup", &|p| symlink("/nonexistent/ordelis-test", p).unwrap()),
+        ("a numbered backup", &|p| std::fs::write(p.with_file_name(format!("{stamp}-15")), b"").unwrap()),
+    ];
+    for (name, make) in cases {
+        let scratch = Scratch::new("import-backup");
+        scratch.write_legacy(&registry_json(2, vec![record("p1", "/a", 1, 2)]));
+        std::fs::DirBuilder::new().mode(0o700).create(scratch.data()).unwrap();
+        std::fs::write(scratch.file(LOCK), b"").unwrap();
+        make(&scratch.file(stamp));
+        let names = scratch.names();
+        let started = Instant::now();
+        assert_eq!(scratch.import(), Import::Superseded, "{name}");
+        assert!(started.elapsed() < Duration::from_secs(1), "{name}: never blocks");
+        assert_eq!(scratch.names(), names, "{name}: nothing is created, renamed or removed");
+        assert!(!scratch.file(REGISTRY).exists(), "{name}");
+        if name == "an unreadable backup" {
+            assert_eq!(mode(&scratch.file(stamp)), 0o000, "its permissions are never changed");
+        }
+    }
+}
+
+#[test]
+fn only_the_exact_backup_prefix_directly_in_the_data_directory_counts() {
+    let bytes = registry_json(2, vec![record("p1", "/a", 1, 2)]);
+    for name in ["projects.json.corrupt", "projects.json.corrupted", "old-projects.json.corrupt-1", "notes.txt"] {
+        let scratch = Scratch::new("import-not-backup");
+        scratch.write_legacy(&bytes);
+        std::fs::DirBuilder::new().mode(0o700).create(scratch.data()).unwrap();
+        std::fs::write(scratch.file(name), b"kept").unwrap();
+        assert_eq!(scratch.import(), Import::Imported, "{name}");
+        assert_eq!(std::fs::read(scratch.file(name)).unwrap(), b"kept", "{name}: never touched");
+    }
+    // The scan does not descend: a backup name inside a subdirectory is not a backup of this registry.
+    let scratch = Scratch::new("import-nested");
+    scratch.write_legacy(&bytes);
+    std::fs::DirBuilder::new().mode(0o700).create(scratch.data()).unwrap();
+    std::fs::create_dir(scratch.file("nested")).unwrap();
+    std::fs::write(scratch.file("nested").join("projects.json.corrupt-1"), b"").unwrap();
+    assert_eq!(scratch.import(), Import::Imported);
+}
+
+#[test]
+fn a_lock_only_directory_imports_including_with_a_stale_temp_file() {
+    let bytes = legacy_bytes();
+    for stale_temp in [false, true] {
+        let scratch = Scratch::new("import-lock-only");
+        scratch.write_legacy(&bytes);
+        std::fs::DirBuilder::new().mode(0o700).create(scratch.data()).unwrap();
+        std::fs::write(scratch.file(LOCK), b"").unwrap();
+        if stale_temp {
+            std::fs::write(scratch.file(TEMP), b"stale").unwrap();
+        }
+        assert_eq!(scratch.import(), Import::Imported, "stale temp: {stale_temp}");
+        assert_eq!(json(&scratch.registry()), json(&bytes));
+        assert_eq!(scratch.names(), [REGISTRY, LOCK], "the stale temp file is removed by the write path");
+    }
+}
+
+fn legacy_bytes() -> Vec<u8> {
+    registry_json(4, vec![record("p1", "/a", 1, 2), record("p3", "/b", 1, 3)])
+}
+
+#[test]
+fn each_way_of_leaving_a_lock_only_directory_still_imports() {
+    // A remove of a well-formed unknown id takes the lock (creating the directory) and changes nothing.
+    let scratch = Scratch::new("import-after-remove");
+    scratch.write_legacy(&legacy_bytes());
+    assert_eq!(remove(&scratch.data(), "p9"), Ok(RemoveOutcome::NotFound));
+    assert_eq!(scratch.names(), [LOCK]);
+    assert_eq!(scratch.import(), Import::Imported);
+    assert_eq!(ids(&scratch.data()), ["p1", "p3"]);
+
+    // An add whose commit fails before the rename, with and without a leftover temp file.
+    for (steps, leaves_temp) in [(vec![Step::TempWrite], false), (vec![Step::TempSync, Step::TempCleanup], true)] {
+        let scratch = Scratch::new("import-after-failed-add");
+        scratch.write_legacy(&legacy_bytes());
+        for step in &steps {
+            arm(*step, libc::EIO);
+        }
+        assert_eq!(add(&scratch.data(), &scratch.folder("a")).unwrap_err(), ErrorCode::RegistryUnavailable);
+        assert_eq!(scratch.file(TEMP).exists(), leaves_temp);
+        assert!(!scratch.file(REGISTRY).exists());
+        assert_eq!(scratch.import(), Import::Imported, "{steps:?}");
+        assert_eq!(scratch.names(), [REGISTRY, LOCK], "{steps:?}");
+    }
+}
+
+#[test]
+fn removals_and_resets_in_the_new_registry_are_never_undone_by_a_later_launch() {
+    let scratch = Scratch::new("import-no-restore");
+    let before = {
+        legacy_registry(&scratch);
+        legacy_state(&scratch)
+    };
+    assert_eq!(scratch.import(), Import::Imported);
+    // Removing one project, then the last one (the file stays, with an empty list), then relaunching.
+    assert_eq!(remove(&scratch.data(), "p1"), Ok(RemoveOutcome::Removed));
+    assert_eq!(scratch.import(), Import::Superseded);
+    assert_eq!(ids(&scratch.data()), ["p3"]);
+    assert_eq!(remove(&scratch.data(), "p3"), Ok(RemoveOutcome::Removed));
+    assert_eq!(scratch.import(), Import::Superseded);
+    assert_eq!(ids(&scratch.data()), Vec::<String>::new());
+    // A corrupt registry that is reset leaves only its backup; the legacy list does not come back.
+    std::fs::write(scratch.file(REGISTRY), CORRUPT).unwrap();
+    assert_eq!(reset(&scratch.data()), Ok(ResetOutcome::Reset));
+    assert!(!scratch.file(REGISTRY).exists());
+    assert_eq!(scratch.backups().len(), 1);
+    assert_eq!(scratch.import(), Import::Superseded);
+    assert_eq!(ids(&scratch.data()), Vec::<String>::new());
+    assert_eq!(legacy_state(&scratch), before);
+}
+
+#[test]
+fn a_registry_created_in_the_new_directory_first_wins_over_a_legacy_registry_that_appears_later() {
+    let scratch = Scratch::new("import-new-first");
+    assert_eq!(scratch.import(), Import::NoLegacy);
+    let ours = added(add(&scratch.data(), &scratch.folder("ours")));
+    legacy_registry(&scratch);
+    assert_eq!(scratch.import(), Import::Superseded);
+    assert_eq!(listed(&scratch.data()), [ours]);
+}
+
+#[test]
+fn a_failed_import_commits_nothing_lists_empty_and_the_next_launch_retries() {
+    for step in [Step::TempWrite, Step::TempSync, Step::Rename] {
+        let scratch = Scratch::new("import-fail");
+        scratch.write_legacy(&legacy_bytes());
+        let before = legacy_state(&scratch);
+        arm(step, libc::EIO);
+        assert_eq!(scratch.import(), Import::Failed, "{step:?}");
+        // No authoritative registry: only the lock, which is not a precedence signal.
+        assert_eq!(scratch.names(), [LOCK], "{step:?}");
+        // The first list after a failed import shows nothing partial and writes nothing.
+        assert_eq!(listed(&scratch.data()), [], "{step:?}");
+        assert_eq!(scratch.names(), [LOCK], "{step:?}");
+        assert_eq!(legacy_state(&scratch), before, "{step:?}");
+        assert_eq!(scratch.import(), Import::Imported, "{step:?}: the retry imports");
+        assert_eq!(json(&scratch.registry()), json(&legacy_bytes()), "{step:?}");
+    }
+    // A failed cleanup leaves a stale temp file, which is never read and is removed by the retry.
+    let scratch = Scratch::new("import-fail-cleanup");
+    scratch.write_legacy(&legacy_bytes());
+    arm(Step::TempSync, libc::EIO);
+    arm(Step::TempCleanup, libc::EIO);
+    assert_eq!(scratch.import(), Import::Failed);
+    assert_eq!(scratch.names(), [TEMP, LOCK]);
+    assert_eq!(listed(&scratch.data()), []);
+    assert_eq!(scratch.import(), Import::Imported);
+    assert_eq!(scratch.names(), [REGISTRY, LOCK]);
+    // A failure after the rename is reported, but the import is complete and the next launch finds it.
+    let scratch = Scratch::new("import-fail-after");
+    scratch.write_legacy(&legacy_bytes());
+    arm(Step::CommitSync, libc::EIO);
+    assert_eq!(scratch.import(), Import::Failed);
+    assert_eq!(ids(&scratch.data()), ["p1", "p3"]);
+    assert_eq!(scratch.import(), Import::Superseded);
+}
+
+#[test]
+fn a_lock_held_by_another_process_fails_the_import_within_the_budget_and_a_retry_imports() {
+    let scratch = Scratch::new("import-lock-held");
+    scratch.write_legacy(&legacy_bytes());
+    let before = legacy_state(&scratch);
+    let (mut holder, mut lines) = spawn_child(&format!("hold\n{}", scratch.data().display()));
+    assert!(lines.any(|line| line.contains(LOCKED)), "the child never took the lock");
+    let started = Instant::now();
+    assert_eq!(scratch.import(), Import::Failed);
+    let waited = started.elapsed();
+    assert!(waited >= LOCK_BUDGET && waited < Duration::from_millis(2500), "{waited:?}");
+    assert_eq!(scratch.names(), [LOCK], "nothing partial is committed");
+    assert_eq!(listed(&scratch.data()), []);
+    drop(holder.stdin.take());
+    assert!(holder.wait().unwrap().success());
+    assert_eq!(scratch.import(), Import::Imported);
+    assert_eq!(ids(&scratch.data()), ["p1", "p3"]);
+    assert_eq!(legacy_state(&scratch), before);
+}
+
+#[test]
+fn concurrent_launches_in_threads_and_processes_import_exactly_once() {
+    let scratch = Scratch::new("import-concurrent");
+    let bytes = legacy_registry(&scratch);
+    let before = legacy_state(&scratch);
+    let task = format!("import\n{}\n{}", scratch.data().display(), scratch.legacy().display());
+    let mut children: Vec<_> = (0..3).map(|_| spawn_child(&task)).collect();
+    for (_, lines) in &mut children {
+        assert!(lines.any(|line| line.contains(READY)));
+    }
+    use std::io::Write as _;
+    for (child, _) in &mut children {
+        child.stdin.as_mut().unwrap().write_all(b"go\n").unwrap();
+    }
+    let mut outcomes: Vec<String> = std::thread::scope(|threads| {
+        let handles: Vec<_> = (0..6).map(|_| threads.spawn(|| format!("{:?}", scratch.import()))).collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    for (mut child, mut lines) in children {
+        let line = lines.find(|line| line.contains(IMPORT_RESULT)).expect("the child reported its outcome");
+        outcomes.push(line[line.find(IMPORT_RESULT).unwrap() + IMPORT_RESULT.len()..].trim().to_string());
+        assert!(child.wait().unwrap().success());
+    }
+    outcomes.sort();
+    let mut expected = vec!["Superseded".to_string(); 8];
+    expected.insert(0, "Imported".to_string());
+    assert_eq!(outcomes, expected, "exactly one importer, every other one skips");
+    assert_eq!(scratch.registry(), bytes, "the legacy records once: no duplicate, no partial file");
+    assert_eq!(scratch.names(), [REGISTRY, LOCK]);
+    assert_eq!(legacy_state(&scratch), before);
+}
+
+#[test]
+fn an_import_racing_an_add_never_loses_either_registration() {
+    for round in 0..8 {
+        let scratch = Scratch::new(&format!("import-race-{round}"));
+        scratch.write_legacy(&legacy_bytes());
+        let folder = scratch.folder("added");
+        let barrier = std::sync::Barrier::new(2);
+        let (imported, project) = std::thread::scope(|threads| {
+            let importer = threads.spawn(|| {
+                barrier.wait();
+                scratch.import()
+            });
+            let adder = threads.spawn(|| {
+                barrier.wait();
+                added(add(&scratch.data(), &folder))
+            });
+            (importer.join().unwrap(), adder.join().unwrap())
+        });
+        match imported {
+            // The import committed first and the add appended to it, continuing from the legacy next_id.
+            Import::Imported => {
+                assert_eq!(project.id, "p4", "round {round}");
+                assert_eq!(ids(&scratch.data()), ["p1", "p3", "p4"], "round {round}");
+            }
+            // The add committed first; its registry takes precedence.
+            Import::Superseded => assert_eq!(listed(&scratch.data()), [project], "round {round}"),
+            other => panic!("round {round}: {other:?}"),
+        }
+    }
+}
+
+// The bounded backup scan: names only, in the app data directory only, and any doubt is "present".
+
+#[test]
+fn the_backup_scan_answers_present_for_an_untrusted_unreadable_or_replaced_directory() {
+    use std::os::unix::fs::symlink;
+    let scratch = Scratch::new("scan");
+    assert!(!backup_present(&scratch.data()), "a missing directory holds no backup");
+    std::fs::DirBuilder::new().mode(0o700).create(scratch.data()).unwrap();
+    assert!(!backup_present(&scratch.data()), "an empty trusted directory");
+    std::fs::write(scratch.file(LOCK), b"").unwrap();
+    assert!(!backup_present(&scratch.data()), "a lock-only directory");
+
+    for (name, permissions) in [("group-writable", 0o770), ("world-writable", 0o707)] {
+        std::fs::set_permissions(scratch.data(), std::fs::Permissions::from_mode(permissions)).unwrap();
+        assert!(backup_present(&scratch.data()), "{name}");
+        assert_eq!(mode(&scratch.data()), permissions, "{name}: permissions are never changed");
+    }
+    if !is_root() {
+        // Searchable but not listable: the names cannot be read, so the answer is doubt.
+        std::fs::set_permissions(scratch.data(), std::fs::Permissions::from_mode(0o300)).unwrap();
+        assert!(backup_present(&scratch.data()), "unlistable");
+    }
+    std::fs::set_permissions(scratch.data(), std::fs::Permissions::from_mode(0o700)).unwrap();
+
+    let linked = scratch.0.join("linked");
+    symlink(scratch.data(), &linked).unwrap();
+    assert!(backup_present(&linked), "a symlinked data directory is never listed");
+
+    // Replaced after its names were read: by another directory, then by a symlink back to the original.
+    let moved = scratch.0.join("moved");
+    let (data, moved_to) = (scratch.data(), moved.clone());
+    arm_after_backup_scan(move || {
+        std::fs::rename(&data, &moved_to).unwrap();
+        std::fs::DirBuilder::new().mode(0o700).create(&data).unwrap();
+    });
+    assert!(backup_present(&scratch.data()), "replaced by another directory");
+    std::fs::remove_dir(scratch.data()).unwrap();
+    std::fs::rename(&moved, scratch.data()).unwrap();
+    let (data, moved_to) = (scratch.data(), moved.clone());
+    arm_after_backup_scan(move || {
+        std::fs::rename(&data, &moved_to).unwrap();
+        symlink(&moved_to, &data).unwrap();
+    });
+    assert!(backup_present(&scratch.data()), "replaced by a symlink");
+    std::fs::remove_file(scratch.data()).unwrap();
+    std::fs::rename(&moved, scratch.data()).unwrap();
+    assert!(!backup_present(&scratch.data()), "unchanged again: no backup");
 }

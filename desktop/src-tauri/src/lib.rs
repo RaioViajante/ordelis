@@ -62,6 +62,14 @@ async fn reset_projects(projects: State<'_, Projects>) -> Result<ResetOutcome, P
     projects.reset().await
 }
 
+/// The registry state. The one-time import of the former identifier's registry runs here, synchronously and before
+/// the state is managed, so no command can read or change the registry until it has finished.
+fn projects_state(data_dir: Option<std::path::PathBuf>) -> Projects {
+    let projects = Projects::new(data_dir);
+    projects.import_legacy();
+    projects
+}
+
 // generate_context! may expand only once per crate; the tests build the app from this same context.
 fn context<R: tauri::Runtime>() -> tauri::Context<R> {
     tauri::generate_context!()
@@ -70,7 +78,7 @@ fn context<R: tauri::Runtime>() -> tauri::Context<R> {
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
-            app.manage(Projects::new(app.path().app_data_dir().ok()));
+            app.manage(projects_state(app.path().app_data_dir().ok()));
             app.manage(Picker::<tauri::Wry>::native());
             Ok(())
         })
@@ -142,7 +150,7 @@ mod tests {
 
     fn app_with(data_dir: Option<PathBuf>, picker: FakePicker) -> tauri::App<MockRuntime> {
         mock_builder()
-            .manage(Projects::new(data_dir))
+            .manage(projects_state(data_dir))
             .manage(Picker::<MockRuntime>::new(Box::new(picker)))
             .invoke_handler(tauri::generate_handler![
                 ipc_boundary_status,
@@ -173,15 +181,17 @@ mod tests {
         result.expect_err("command must be rejected").to_string()
     }
 
-    // The project registry lives in app_data_dir, which Tauri derives from the bundle identifier and not from
-    // the product name. Renaming the product must not move it; changing the identifier moves it and needs the
-    // reviewed registry import (docs/migration/ordelis.md, I2). The path is computed here, never read or created.
+    // The project registry lives in app_data_dir, which Tauri derives from the bundle identifier. The registry kept
+    // under the former identifier is imported from that directory's sibling (docs/migration/ordelis.md, I2). The
+    // paths are computed here, never read or created.
     #[test]
-    fn product_name_is_ordelis_while_the_data_directory_still_follows_the_legacy_identifier() {
+    fn the_data_directory_follows_the_ordelis_identifier_and_the_legacy_one_is_its_sibling() {
         let app = app();
         assert_eq!(app.package_info().name, "Ordelis");
-        assert_eq!(app.config().identifier, "dev.raioviajante.synapse");
-        assert!(app.path().app_data_dir().unwrap().ends_with("dev.raioviajante.synapse"));
+        assert_eq!(app.config().identifier, "app.ordelis.desktop");
+        let data = app.path().app_data_dir().unwrap();
+        assert!(data.ends_with("app.ordelis.desktop"), "{data:?}");
+        assert_eq!(projects::legacy_data_dir(&data), Some(data.parent().unwrap().join("dev.raioviajante.synapse")));
     }
 
     #[test]
@@ -542,6 +552,35 @@ mod tests {
 
     fn error(code: projects::ErrorCode) -> serde_json::Value {
         serde_json::to_value(ProjectError::from(code)).unwrap()
+    }
+
+    // The startup import through the real state constructor and command layer. The legacy directory is the scratch
+    // data directory's sibling, never the real one.
+    #[test]
+    fn a_registry_kept_under_the_former_identifier_is_listed_after_startup_and_left_unchanged() {
+        use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+        let scratch = Scratch::new("import");
+        let legacy = scratch.0.join("dev.raioviajante.synapse");
+        std::fs::DirBuilder::new().mode(0o700).create(&legacy).unwrap();
+        let folder = std::fs::symlink_metadata(scratch.folder()).unwrap();
+        let record = serde_json::json!({
+            "id": "p3", "path": scratch.folder().to_str().unwrap(), "dev": folder.dev(), "ino": folder.ino(),
+            "registered_at_ms": 1_791_936_000_000u64,
+        });
+        let bytes = serde_json::to_vec(&serde_json::json!({ "schema_version": 1, "next_id": 4, "projects": [record] })).unwrap();
+        std::fs::write(legacy.join("projects.json"), &bytes).unwrap();
+
+        let app = app_with(Some(scratch.data()), cancels());
+        let main = webview(&app, "main");
+        let listed = invoke(&main, "list_projects", serde_json::json!({})).unwrap();
+        assert_eq!(listed["projects"].as_array().unwrap().len(), 1);
+        let project = &listed["projects"][0];
+        assert_eq!((project["id"].as_str(), project["name"].as_str(), project["status"].as_str()), (Some("p3"), Some("folder"), Some("available")));
+        assert_eq!(project["registered_at_ms"], 1_791_936_000_000u64);
+        assert_eq!(std::fs::read(legacy.join("projects.json")).unwrap(), bytes, "the legacy registry is byte-identical");
+        let mut names: Vec<_> = std::fs::read_dir(&legacy).unwrap().map(|e| e.unwrap().file_name()).collect();
+        names.sort();
+        assert_eq!(names, ["projects.json"], "nothing is created in the legacy directory, not even a lock");
     }
 
     #[test]
