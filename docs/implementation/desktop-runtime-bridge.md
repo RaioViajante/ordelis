@@ -96,9 +96,9 @@ Do not change the permissions of a shared installation such as the python.org fr
 
 ### Artifact verifier
 
-`desktop/scripts/verify-release-isolation.sh <Ordelis.app>` exits 0 only after inspecting the executable that `Contents/Info.plist` names, which must be `synapse-desktop`, a regular non-symlink readable executable, and Mach-O (`lipo -archs`). It exits 2 if the bundle cannot be inspected: bad layout, missing or invalid executable, or any failure of `PlistBuddy`, `lipo`, `otool`, `nm`, `grep`, `find` or `shasum`. It exits 1 on any of these independent kinds of evidence:
+`desktop/scripts/verify-release-isolation.sh <Ordelis.app>` exits 0 only after inspecting the executable that `Contents/Info.plist` names, which must be `ordelis-desktop`, a regular non-symlink readable executable, and Mach-O (`lipo -archs`). It exits 2 if the bundle cannot be inspected: bad layout, missing or invalid executable, or any failure of `PlistBuddy`, `lipo`, `otool`, `nm`, `grep`, `find` or `shasum`. It exits 1 on any of these independent kinds of evidence:
 
-1. **Paths and markers** anywhere in the bundle: the checkout path, the configured interpreter path, `.dev-python`, `runtime-bridge`, `status.py`, `SYNAPSE_DEV_PYTHON`, `SYNAPSE_DEV_CHECKOUT` and the source path `runtime_bridge/process.rs` (present through panic locations whenever that module is compiled).
+1. **Paths and markers** anywhere in the bundle: the checkout path, the configured interpreter path, `.dev-python`, `runtime-bridge`, `status.py`, `ORDELIS_DEV_PYTHON`, `ORDELIS_DEV_CHECKOUT`, the former names `SYNAPSE_DEV_PYTHON` and `SYNAPSE_DEV_CHECKOUT` (kept on the list on purpose, so a bundle that embeds either spelling is rejected) and the source path `runtime_bridge/process.rs` (present through panic locations whenever that module is compiled).
 2. **Imported `_killpg`.** Only the bridge's cleanup code uses it. The release binary imports none, and the `dev-runtime` binary does.
 3. **Python files** of any kind.
 4. **Non-system libraries** in `otool -L`.

@@ -92,7 +92,7 @@ function provenance(crate) {
 
 function compiledFiles(crate, target, approved, work) {
   // Hashed outputs of this crate's own build script (tauri-build's embedded assets): no extension, never Rust.
-  const buildOutput = new RegExp(`^${target.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/(?:debug|release)/build/synapse-desktop-[0-9a-f]+/out/[0-9a-f]{64}$`);
+  const buildOutput = new RegExp(`^${target.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/(?:debug|release)/build/ordelis-desktop-[0-9a-f]+/out/[0-9a-f]{64}$`);
   for (const [name, flags] of Object.entries(CONFIGURATIONS)) {
     const output = join(work, `${name}.d`);
     run(CARGO, ["rustc", "--lib", "--locked", "--offline", "--quiet", ...flags, "--", `--emit=dep-info=${output}`], crate);

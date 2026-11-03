@@ -201,6 +201,7 @@ fn child_gets_a_cleared_environment_neutral_cwd_and_null_stdin() {
         ("DYLD_LIBRARY_PATH", "/tmp/hostile"),
         ("PYTHONSTARTUP", "/tmp/hostile.py"),
         ("SYNAPSE_TEST_SECRET", "canary"),
+        ("ORDELIS_TEST_SECRET", "canary"),
     ] {
         std::env::set_var(key, value);
     }
@@ -210,7 +211,7 @@ fn child_gets_a_cleared_environment_neutral_cwd_and_null_stdin() {
     let launch = Launch { interpreter: "/bin/sh".into(), args: vec!["-c".into(), script.into()], deadline: Duration::from_secs(5), max_stdout: MAX_STDOUT };
     assert!(run(&launch).is_ok());
     let env = scratch.read("env");
-    for leaked in ["hostile", "canary", "PYTHON", "DYLD_", "SYNAPSE_"] {
+    for leaked in ["hostile", "canary", "PYTHON", "DYLD_", "SYNAPSE_", "ORDELIS_"] {
         assert!(!env.contains(leaked), "{leaked} leaked into the child: {env}");
     }
     assert_eq!(scratch.read("cwd").trim(), "/");
