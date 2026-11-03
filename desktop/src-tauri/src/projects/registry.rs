@@ -9,6 +9,7 @@ use std::collections::HashSet;
 use std::fs::{DirBuilder, File, OpenOptions};
 use std::io::{ErrorKind, Read, Write};
 use std::os::fd::AsRawFd;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
@@ -180,6 +181,91 @@ fn duplicate<'a>(stored: &'a Stored, candidate: &Candidate) -> Option<&'a Record
 fn now_ms() -> Result<u64, ErrorCode> {
     let ms = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|_| Unavailable)?.as_millis();
     u64::try_from(ms).ok().filter(|ms| *ms <= MAX_SAFE_INTEGER).ok_or(Unavailable)
+}
+
+// One-time import from the former bundle identifier's data directory (see "Registry migration semantics (I2)"
+// in docs/migration/ordelis.md).
+
+/// What the import did. Every outcome leaves both directories consistent; startup continues after any of them.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum Import {
+    /// The legacy registry was committed into `dir`, records, ids and `next_id` exactly as validated.
+    Imported,
+    /// The legacy directory holds no valid version-1 registry (absent, corrupt, newer, untrusted or unreadable).
+    /// Nothing was created or changed.
+    NoLegacy,
+    /// `dir` already holds a registry or a corrupt-registry backup, which always takes precedence.
+    Superseded,
+    /// The lock or the write failed. Before the rename nothing was committed and the next launch tries again;
+    /// after it, the import is complete and the next launch finds the registry.
+    Failed,
+}
+
+/// Copy-only. `legacy` is derived in Rust from a fixed name, never from the webview; nothing in it is created,
+/// written, locked, renamed or removed. Never merges: the import is whole into a directory with no registry, or
+/// nothing.
+pub(super) fn import(dir: &Path, legacy: &Path) -> Import {
+    // 1. The read protocol creates nothing. Anything but a valid version-1 registry ends the import here, before
+    // `dir` is created or touched.
+    let Ok(Loaded::Valid(stored)) = read(legacy) else {
+        return Import::NoLegacy;
+    };
+    // 2. A fast path without the lock; not authoritative.
+    if occupied(dir) {
+        return Import::Superseded;
+    }
+    // 3. Creates `dir` if absent, exactly as every write does. This creates projects.lock, which is therefore not a
+    // precedence signal.
+    let Ok(Some(_locked)) = lock(dir, true) else {
+        return Import::Failed;
+    };
+    // 4. The decisive check, under the lock: an add or another instance's import that committed first wins.
+    if occupied(dir) {
+        return Import::Superseded;
+    }
+    // 5. The atomic write path, which also removes a stale projects.json.tmp.
+    match commit(dir, &stored) {
+        Ok(()) => Import::Imported,
+        Err(_) => Import::Failed,
+    }
+}
+
+/// The only precedence signals: projects.json in any form (a file, symlink, FIFO or directory), or any
+/// corrupt-registry backup. A lookup that fails other than with "not found" counts as present.
+fn occupied(dir: &Path) -> bool {
+    let registry = !matches!(std::fs::symlink_metadata(dir.join(REGISTRY)), Err(e) if e.kind() == ErrorKind::NotFound);
+    registry || backup_present(dir)
+}
+
+/// Criterion 21's one reviewed exception: the only directory listing in the registry module. It lists `dir`, the
+/// app data directory, and nothing else; it reads entry names only, and never opens, stats, parses, changes or
+/// removes an entry. Every doubt answers true: an untrusted directory, an entry that cannot be read, or a
+/// directory that is no longer the one that was checked once the names have been read.
+fn backup_present(dir: &Path) -> bool {
+    let before = match std::fs::symlink_metadata(dir) {
+        Err(e) if e.kind() == ErrorKind::NotFound => return false,
+        Err(_) => return true,
+        Ok(meta) => meta,
+    };
+    if trusted_dir(&before).is_err() {
+        return true;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return true;
+    };
+    for entry in entries {
+        match entry {
+            Ok(entry) if !entry.file_name().as_bytes().starts_with(BACKUP_PREFIX.as_bytes()) => {}
+            _ => return true,
+        }
+    }
+    // Test builds only: lets a test replace the directory after its names were read.
+    #[cfg(test)]
+    tests::after_backup_scan();
+    // The names must have come from the directory that was checked: still trusted, and the same (dev, ino).
+    let same = std::fs::symlink_metadata(dir)
+        .is_ok_and(|after| trusted_dir(&after).is_ok() && FileId::of(&after) == FileId::of(&before));
+    !same
 }
 
 // Validation

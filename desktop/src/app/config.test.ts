@@ -24,6 +24,11 @@ function projectSources(): Record<string, string> {
   return Object.fromEntries([...production].map((f) => [f.slice("src/".length), read(`src-tauri/${f}`)]));
 }
 
+// Criterion 21's one reviewed exception (issue #82): registry.rs may list the app data directory it was given, once,
+// in backup_present, to see whether a corrupt-registry backup exists. Exactly this call in that file is set aside
+// before the rules below; every other listing, in any file, is still a violation. Its scope is pinned below.
+const REVIEWED_LISTING = "std::fs::read_dir(dir)";
+
 // Content rules for the project registry: no listing, contents, processes, network, Git, Python or gate, and only
 // registry.rs touches files. Which files exist is not decided here; the compiler-verified list above decides it.
 function projectContentViolations(files: Record<string, string>): string[] {
@@ -39,7 +44,9 @@ function projectContentViolations(files: Record<string, string>): string[] {
   for (const [file, text] of Object.entries(files)) {
     // Code only: full-line comments may describe what the code must not do.
     const code = text.replace(/^[ \t]*\/\/.*$/gm, "");
-    const rust = code.replaceAll("spawn_blocking", "").replaceAll("tauri::async_runtime::spawn(", "");
+    // String replace: the first occurrence only.
+    const reviewed = file === "projects/registry.rs" ? code.replace(REVIEWED_LISTING, "") : code;
+    const rust = reviewed.replaceAll("spawn_blocking", "").replaceAll("tauri::async_runtime::spawn(", "");
     const forbidden = [
       /read_dir|walkdir|glob|std::process|\bCommand\b|\bspawn\b|std::net|TcpStream|UdpSocket|reqwest|hyper|tokio::net|\.plugin\(/,
       /runtime_bridge|python|\bgit\b|[Gg]ate|execute|provider|agent/,
@@ -161,13 +168,25 @@ describe("desktop trust boundary", () => {
     expect(registry.match(/rename\([^)]*\)/g)).toEqual(["rename(&temp, dir.join(REGISTRY)"]);
     expect(registry.match(/hard_link\([^)]*\)/g)).toEqual(["hard_link(registry, &backup)"]);
     expect(registry.match(/DirBuilder::new\(\)[^\n]*/g)).toEqual(["DirBuilder::new().mode(0o700).create(dir) {"]);
+    // Criterion 21's exception: one listing, of the directory backup_present was given, reading entry names only
+    // and comparing them with the fixed backup prefix. It opens, stats, reads, renames and removes no entry, and
+    // its only caller is the import's precedence check.
+    expect(registry.match(/read_dir/g)).toEqual(["read_dir"]);
+    expect(functions.filter((f) => /read_dir/.test(f[0])).map((f) => f[1])).toEqual(["backup_present"]);
+    const scan = functions.find((f) => f[1] === "backup_present")?.[0] ?? "";
+    expect(scan).toContain(REVIEWED_LISTING);
+    expect(scan).toContain("entry.file_name().as_bytes().starts_with(BACKUP_PREFIX.as_bytes())");
+    expect(scan).not.toMatch(/OpenOptions|open_\w+\(|\.metadata\(|file_type|\.path\(\)|remove_|rename|hard_link|read_to|fs::read\b/);
+    expect(registry.match(/\bbackup_present\([^)]*\)/g)).toEqual(["backup_present(dir)", "backup_present(dir: &Path)"]);
+    expect(functions.filter((f) => /\bbackup_present\(dir\)/.test(f[0])).map((f) => f[1])).toEqual(["occupied"]);
     expect(registry).toMatch(/^const REGISTRY: &str = "projects\.json";$/m);
     expect(registry).toMatch(/^const LOCK: &str = "projects\.lock";$/m);
     expect(registry).toMatch(/^const TEMP: &str = "projects\.json\.tmp";$/m);
     expect(registry).toMatch(/^const BACKUP_PREFIX: &str = "projects\.json\.corrupt-";$/m);
     // Failure injection and the pre-commit test hook are compiled out of production builds.
     expect(registry).toMatch(/#\[cfg\(not\(test\)\)\]\nfn fault\(_: Step\) -> std::io::Result<\(\)> \{\n {4}Ok\(\(\)\)\n\}/);
-    expect(registry.match(/tests::\w+\(/g)).toEqual(["tests::before_recheck(", "tests::fault("]);
+    expect(registry.match(/tests::\w+\(/g)).toEqual(["tests::before_recheck(", "tests::after_backup_scan(", "tests::fault("]);
+    expect(registry).toMatch(/ {4}#\[cfg\(test\)\]\n {4}tests::after_backup_scan\(\);\n/);
     expect(registry).toMatch(/ {4}#\[cfg\(test\)\]\n {4}tests::before_recheck\(\);\n {4}folder::recheck\(&candidate\)\?;/);
     // The registry and the panel are macOS-only; other targets answer unsupported_platform.
     const projects = read("src-tauri/src/projects.rs");
@@ -190,6 +209,14 @@ describe("desktop trust boundary", () => {
       "aliased import": { ...actual, "projects/registry.rs": actual["projects/registry.rs"].replace("use std::collections::HashSet;", "use std::collections::HashSet;\nuse std::fs::OpenOptions as Opener;") },
       "network": add("projects.rs", 'fn j() { let _ = std::net::TcpStream::connect("127.0.0.1:1"); }'),
       "reading contents": add("projects/folder.rs", "fn k(p: &Path) { let _ = std::fs::read_to_string(p); }"),
+      // The reviewed listing is exempt once, in registry.rs, with that exact argument; nothing else is.
+      "a second listing in the registry": add("projects/registry.rs", "fn l(dir: &Path) { let _ = std::fs::read_dir(dir); }"),
+      "the reviewed listing of another directory": {
+        ...actual,
+        "projects/registry.rs": actual["projects/registry.rs"].replace(REVIEWED_LISTING, "std::fs::read_dir(dir.parent().unwrap())"),
+      },
+      "the reviewed listing outside the registry": add("projects/folder.rs", "fn m(dir: &Path) { let _ = std::fs::read_dir(dir); }"),
+      "a listing through Path in the registry": add("projects/registry.rs", "fn n(dir: &Path) { let _ = dir.read_dir(); }"),
     };
     for (const [name, files] of Object.entries(bypasses)) {
       expect(projectContentViolations(files), name).not.toEqual([]);
