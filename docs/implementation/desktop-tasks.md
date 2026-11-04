@@ -71,7 +71,9 @@ A correct use compiles in the same harness.
 
 ## Project link
 
-When a task is created, Rust reads the registry, finds the requested ID and copies its `registered_at_ms`. An ID that is not registered is `project_not_found`, and an unreadable registry is `project_unavailable`. A registered project whose folder is missing or changed is accepted, because a task never touches its folder.
+When a task is created, the caller names the registration the user chose by both halves of its identity: `project_id` and `expected_registered_at_ms` ([#98](https://github.com/RaioViajante/ordelis/issues/98)). Rust reads the registry and accepts the request only if that exact pair is registered, and the task saves that pair. If the pair is not registered, the answer is `project_not_found`, whether the ID is unknown or now names a different registration after `reset_projects`. Another registration is never substituted. An unreadable registry is `project_unavailable`. A registered project whose folder is missing or changed is accepted, because a task never touches its folder.
+
+**Between the check and the write.** The registry is read through the read protocol before the tasks lock is taken, and its own lock is never taken, so the registry can change before the task is committed. The saved identity is always the pair that was checked. Such a change can therefore only make the new task `removed` or `replaced`, never linked to the registration that took the ID. The `created` response computes the link from the registry as it is after the commit, so the change is reported rather than hidden. Holding the registry lock across the task write would close the window, but it would hold both locks, which the stores' independence (above) rules out. A test changes the registry at exactly that point.
 
 On every read the link is computed, never stored:
 
@@ -91,7 +93,8 @@ All four are declared in the app manifest, granted to window `main` only, run th
 ```text
 list_tasks()                                          → { schema_version: 1, tasks: TaskSummary[] }
 get_task({ id })                                      → { outcome: "found", task: Task } | { outcome: "not_found" }
-create_task({ project_id, title, description })       → { outcome: "created", task: Task }
+create_task({ project_id, expected_registered_at_ms, title, description })
+                                                      → { outcome: "created", task: Task }
 update_task({ id, revision, title, description, status })
                                                       → { outcome: "updated", task } | { outcome: "conflict", task } | { outcome: "not_found" }
 
@@ -101,10 +104,13 @@ errors      = invalid_input | project_not_found | project_unavailable | tasks_fu
               | tasks_newer_version | tasks_unavailable | unsupported_platform
 ```
 
-- **Keys** are snake_case, as documented (`create_task` declares `rename_all = "snake_case"`, so `projectId` is not accepted).
+- **Keys** are snake_case, as documented (`create_task` declares `rename_all = "snake_case"`, so `projectId` and `expectedRegisteredAtMs` are not accepted).
 - **Validation.** Rust validates every input before any file is touched; the frontend is never trusted to. A missing or mistyped argument is rejected by Tauri before the command runs, with Tauri's own message, which names the command and the key. Extra keys are ignored, and a path-like title is just text.
 - **`list_tasks`** leaves out descriptions. It and `get_task` never write and take no lock.
 - **`create_task`** always creates a `draft` at revision 1; the status and revision are not inputs.
+  - `expected_registered_at_ms` is required. It is the `registered_at_ms` that `list_projects` returned for the chosen project.
+  - Tauri rejects a negative, fractional or non-numeric value before the command runs. A value above 2^53 − 1 is `invalid_input`.
+  - A pair that is not registered is `project_not_found`, with the fixed message "The project is not registered, or its registration changed." Nothing is created.
 - **`update_task`** replaces the title, description and status (`draft` or `archived`), but only at the current `revision`.
   - Any other revision is `conflict`, which writes nothing and returns the current task.
   - A successful update increments the revision, even when nothing changed.
@@ -131,6 +137,7 @@ errors      = invalid_input | project_not_found | project_unavailable | tasks_fu
 - ID and count limits;
 - project links: linked, removed, replaced after a registry reset, and unknown;
 - the registry requirement;
+- creation only for the registration the caller chose: an ID reused after a reset is refused, the exact pair is saved, and a registry change after the check only detaches the new task;
 - updates, conflicts between independent readers, input validation, and a clock that goes back;
 - corrupt and newer files kept;
 - symlinked, FIFO and directory files, an untrusted or symlinked directory, a foreign owner, and the temp name never redirecting a write;
@@ -190,13 +197,16 @@ Tasks is `⌘2` in the sidebar, and New Task opens `#/tasks/new`.
 
 ## Home, project pages and the sidebar
 
-[Issue #98](https://github.com/RaioViajante/ordelis/issues/98) (D3.1d) connects the rest of the desktop to the same saved tasks. No command, permission or stored field was added; the only native change is `registered_at_ms` in the responses (above).
+[Issue #98](https://github.com/RaioViajante/ordelis/issues/98) (D3.1d) connects the rest of the desktop to the same saved tasks. No command, permission or stored field was added. The native changes are `registered_at_ms` in the responses and the required `expected_registered_at_ms` on `create_task` (above).
 
 - **One composer.** Home's composer and New task (`#/tasks/new`) edit one in-memory draft held by `TasksProvider`: a project registration (`{ id, registered_at_ms }`), a title and a description.
   - `useComposer` (`src/app/useComposer.ts`) gives both pages the same checks (Rust's, in UTF-8 bytes, never cutting text), the same reasons Save task is unavailable, and the same save through the provider's single write path.
   - A second click, or a click on the other page, never reaches Rust while a save is in flight.
-  - A successful save clears the draft once and opens the new task, unless the user has already moved to another page; then they stay where they are and the live region says the task was saved.
+  - The save sends the chosen registration's `registered_at_ms`. If Rust answers `project_not_found`, the project list is read again. A stale registration is then no longer offered, and the user chooses again; the text is kept.
+  - A successful save opens the new task, unless the user has already moved to another page. In that case they stay where they are, and the live region says the task was saved.
+  - A successful save clears the draft only if it is still the draft that was saved. Every edit makes a new draft object, so text changed after the save began is never cleared by that save's answer.
   - A failed save keeps every character.
+  - While a save is in flight, every page freezes the draft: fields are read-only, and the picker, Discard and New task in this project are unavailable. The provider also refuses to discard during a save, so a draft being written is never reported as discarded.
 - **Leaving and discarding.**
   - New task's secondary link is **Back to Tasks**, which leaves the draft as it is.
   - **Discard draft…**, on both pages, appears once there is text and asks for confirmation (Cancel has focus, Escape cancels).
@@ -206,4 +216,4 @@ Tasks is `⌘2` in the sidebar, and New Task opens `#/tasks/new`.
 - **Project pages.** A registered project shows a Tasks section with its drafts and archived tasks and their counts, and **New task in this project**, which puts that registration into the shared draft (keeping any text already written) and opens New task. The project is checked again before saving: a registration that was removed, or whose ID now names another folder, is no longer selected, and Save task asks for a project. Sample projects cannot hold saved tasks; their button is disabled with that reason.
 - **Sidebar.** Tasks and each registered project show a quiet number of saved drafts, with an accessible ", N drafts". It is not an attention badge, and there is no number while tasks are loading or can't be read, so a failure never reads as zero. `⌘1`–`⌘7` are unchanged and there is no `⌘N`.
 - **Sample draft preview retired.** Home's sample composer, its sample context picker, Context's **Preview task** and `#/preview` were removed: a sample selection or a sample project never reaches a saved task. The labelled sample task previews (`#/task/<id>`) and Context's sample selection remain.
-- **Tests.** `Tasks.test.tsx` adds creating from Home and finding the task under Tasks, Home, its project and the sidebar; Enter in the title; the shared draft and its single clearing; one request across both pages and no navigation after the user moved on; limits and failures keeping the text; Back to Tasks and confirmed discard; counts that exclude archived, removed and replaced tasks and follow archive and restore; project preselection and re-checking; a reused ID never taking over a draft; listing again after a project change; and corrupt storage leaving every count blank. `Workspace.test.tsx` covers the composer in a browser preview, where nothing can be saved. Ten of eleven mutations were caught. The survivor removes the composer's own in-flight check, which the provider's shared request still enforces (one `create_task`), as a provider test pins.
+- **Tests.** `Tasks.test.tsx` adds creating from Home and finding the task under Tasks, Home, its project and the sidebar; Enter in the title; the shared draft and its single clearing; one request across both pages and no navigation after the user moved on; limits and failures keeping the text; Back to Tasks and confirmed discard; counts that exclude archived, removed and replaced tasks and follow archive and restore; project preselection and re-checking; a reused ID never taking over a draft; a registration that changed after it was chosen being refused, with the list read again; a draft changed during a save surviving that save's answer; discard refused during a save; listing again after a project change; and corrupt storage leaving every count blank. `Workspace.test.tsx` covers the composer in a browser preview, where nothing can be saved. Ten of eleven mutations were caught. The survivor removes the composer's own in-flight check, which the provider's shared request still enforces (one `create_task`), as a provider test pins.
