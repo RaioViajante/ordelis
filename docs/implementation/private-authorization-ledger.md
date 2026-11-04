@@ -111,7 +111,11 @@ this increment.
 ## Concurrency and durability guarantees
 
 - Another process's transient rollback journal is normal. Journal inspection tolerates one that disappears,
-  and no directory check runs after a commit, so a recorded consumption is never reported as a failure because
+  including one whose unlink is in progress: `lstat` can then still find the name but report no links left
+  (observed on Linux ext4 and macOS APFS, issue #44). Such a journal must otherwise pass every check (a regular
+  file owned by the effective user with mode `0600`); one with a second link, or that is a symlink, another file
+  type, foreign-owned or broader than `0600`, is refused. The same state on the database or the marker is refused.
+  No directory check runs after a commit, so a recorded consumption is never reported as a failure because
   of a peer's journal (an earlier revision could spend an identity yet deny the run, or reject a still-unspent one).
 - A process killed mid-transaction leaves nothing consumed; SQLite rolls back a hot journal on the next open.
   A process killed after commit leaves the identity spent.
