@@ -23,7 +23,7 @@ export type TaskListError = TaskErrorCode | "unreadable";
 // The UI words every code itself, so no native text is shown. None of these contains task text.
 const ERROR_TEXT: Record<TaskListError, string> = {
   invalid_input: "Ordelis refused those task details. Nothing was saved.",
-  project_not_found: "That project is no longer registered. Choose another project; nothing was saved.",
+  project_not_found: "That project is no longer registered, or its registration changed. Choose the project again; nothing was saved.",
   project_unavailable: "The project list can't be read right now, so the task can't be linked to a project. Nothing was saved.",
   tasks_full: "The task list is full (500 tasks). Nothing was saved.",
   tasks_corrupt:
@@ -77,11 +77,12 @@ interface TaskState {
   saving: boolean;
   reload: () => Promise<void>;
   get: (id: string) => Promise<GetResult>;
-  create: (input: NewTask) => Promise<CreateResult>;
+  /** `from` is the draft being saved; it is cleared on success only if it is still the current draft. */
+  create: (input: NewTask, from: ComposerDraft) => Promise<CreateResult>;
   update: (change: TaskChange) => Promise<UpdateResult>;
   draft: ComposerDraft;
   setDraft: (draft: ComposerDraft) => void;
-  /** Empties the draft. Only called after the user confirmed it. */
+  /** Empties the draft. Only called after the user confirmed it; does nothing while a save is in flight. */
   discardDraft: () => void;
   edits: Record<string, TaskEdit>;
   /** `null` drops the edits of that task, after a save or when the user discards them. */
@@ -149,6 +150,8 @@ export function TasksProvider({ children }: { children: ReactNode }) {
   }, [registrations, desktop, reload]);
 
   const discardDraft = useCallback(() => {
+    // The draft may be the one being saved: discarding it now would claim it is gone while it is being written.
+    if (inflight.current) return;
     setDraft(EMPTY_DRAFT);
     announce("Draft discarded.");
   }, [announce]);
@@ -173,10 +176,11 @@ export function TasksProvider({ children }: { children: ReactNode }) {
   );
 
   const create = useCallback(
-    (input: NewTask) =>
+    (input: NewTask, from: ComposerDraft) =>
       mutate(() => createTask(input)).then((result) => {
         if (result.kind === "created") {
-          setDraft(EMPTY_DRAFT);
+          // Every edit makes a new draft object, so a draft changed since this save began is newer and is kept.
+          setDraft((current) => (current === from ? EMPTY_DRAFT : current));
           announce("Task saved as a draft. Nothing was started.");
         }
         return result;

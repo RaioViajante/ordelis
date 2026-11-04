@@ -79,7 +79,8 @@ function native() {
       return found ? { outcome: "found", task: full(found) } : { outcome: "not_found" };
     }
     if (cmd === "create_task") {
-      const registered = projects.find((p) => p.id === args.project_id);
+      // As Rust checks it (#98): the registration the caller chose, by id and registration time, or nothing.
+      const registered = projects.find((p) => p.id === args.project_id && at(p) === args.expected_registered_at_ms);
       if (!registered) return Promise.reject(failure("project_not_found"));
       clock += 1000;
       const task: TaskRec = {
@@ -167,16 +168,21 @@ describe("task adapter", () => {
     });
     expect(await listTasks()).toEqual({ kind: "preview" });
     expect(await getTask("t1")).toEqual({ kind: "preview" });
-    expect(await createTask({ projectId: "p1", title: "Title", description: "" })).toEqual({ kind: "preview" });
+    expect(await createTask({ projectId: "p1", registeredAtMs: 1, title: "Title", description: "" })).toEqual({ kind: "preview" });
     expect(await updateTask({ id: "t1", revision: 1, title: "Title", description: "", status: "draft" })).toEqual({ kind: "preview" });
     expect(calls).toEqual([]);
   });
 
   it("sends exactly the reviewed arguments, in snake_case, and never a path", async () => {
     native();
-    const created = await createTask({ projectId: "p1", title: "Add rate limiting", description: "Per IP.\nKeep /health." });
+    const created = await createTask({ projectId: "p1", registeredAtMs: 1, title: "Add rate limiting", description: "Per IP.\nKeep /health." });
     expect(created.kind).toBe("created");
-    expect(lastArgs("create_task")).toEqual({ project_id: "p1", title: "Add rate limiting", description: "Per IP.\nKeep /health." });
+    expect(lastArgs("create_task")).toEqual({
+      project_id: "p1",
+      expected_registered_at_ms: 1,
+      title: "Add rate limiting",
+      description: "Per IP.\nKeep /health.",
+    });
     await getTask("t1");
     expect(lastArgs("get_task")).toEqual({ id: "t1" });
     await updateTask({ id: "t1", revision: 1, title: "Add rate limiting", description: "", status: "archived" });
@@ -189,13 +195,17 @@ describe("task adapter", () => {
     const invalid = { kind: "error", code: "invalid_input" };
     for (const id of ["", "t0", "T1", "p1", "../tasks.json", "/etc/hosts"]) expect(await getTask(id)).toEqual(invalid);
     for (const input of [
-      { projectId: "../projects.json", title: "Title", description: "" },
-      { projectId: "p1", title: "", description: "" },
-      { projectId: "p1", title: " Title", description: "" },
-      { projectId: "p1", title: "é".repeat(129), description: "" },
-      { projectId: "p1", title: "Tab\there", description: "" },
-      { projectId: "p1", title: "Title", description: "a\rb" },
-      { projectId: "p1", title: "Title", description: "x".repeat(4096 - 2 - 5 + 1) },
+      { projectId: "../projects.json", registeredAtMs: 1, title: "Title", description: "" },
+      { projectId: "p1", registeredAtMs: -1, title: "Title", description: "" },
+      { projectId: "p1", registeredAtMs: 1.5, title: "Title", description: "" },
+      { projectId: "p1", registeredAtMs: Number.MAX_SAFE_INTEGER + 1, title: "Title", description: "" },
+      { projectId: "p1", registeredAtMs: "1" as unknown as number, title: "Title", description: "" },
+      { projectId: "p1", registeredAtMs: 1, title: "", description: "" },
+      { projectId: "p1", registeredAtMs: 1, title: " Title", description: "" },
+      { projectId: "p1", registeredAtMs: 1, title: "é".repeat(129), description: "" },
+      { projectId: "p1", registeredAtMs: 1, title: "Tab\there", description: "" },
+      { projectId: "p1", registeredAtMs: 1, title: "Title", description: "a\rb" },
+      { projectId: "p1", registeredAtMs: 1, title: "Title", description: "x".repeat(4096 - 2 - 5 + 1) },
     ]) {
       expect(await createTask(input), JSON.stringify(input)).toEqual(invalid);
     }
@@ -418,7 +428,12 @@ describe("New task", () => {
     await user.click(main().getByRole("button", { name: "Save task" }));
     expect(await main().findByRole("heading", { level: 1, name: "Add rate limiting" })).toBeInTheDocument();
     expect(window.location.hash).toBe("#/tasks/t1");
-    expect(lastArgs("create_task")).toEqual({ project_id: "p1", title: "Add rate limiting", description: "Per IP.\nKeep the health check." });
+    expect(lastArgs("create_task")).toEqual({
+      project_id: "p1",
+      expected_registered_at_ms: 1,
+      title: "Add rate limiting",
+      description: "Per IP.\nKeep the health check.",
+    });
     expect(count("create_task")).toBe(1);
     unmount();
 
@@ -486,16 +501,83 @@ describe("New task", () => {
       </SampleDataProvider>,
     );
     await waitFor(() => expect(state!.loading).toBe(false));
-    const input = { projectId: "p1", title: "Once", description: "" };
+    const input = { projectId: "p1", registeredAtMs: 1, title: "Once", description: "" };
     let first!: Promise<unknown>, second!: Promise<unknown>;
     act(() => {
-      first = state!.create(input);
-      second = state!.create(input);
+      first = state!.create(input, state!.draft);
+      second = state!.create(input, state!.draft);
     });
     expect(count("create_task")).toBe(1);
     await act(async () => holdCreate!.forEach((release) => release(undefined)));
     expect(await first).toEqual(await second);
     expect(tasks).toHaveLength(1);
+  });
+
+  // Issue #98: the provider clears only the draft it saved. Every page freezes the draft while a save is in flight, but
+  // that freeze is not what protects newer text: a draft changed before the answer arrives is kept.
+  function probe() {
+    let state: ReturnType<typeof useTasks> | null = null;
+    function Probe() {
+      state = useTasks();
+      return null;
+    }
+    render(
+      <SampleDataProvider initial={false}>
+        <WorkspaceProvider>
+          <RegistryProvider>
+            <TasksProvider>
+              <Probe />
+            </TasksProvider>
+          </RegistryProvider>
+        </WorkspaceProvider>
+      </SampleDataProvider>,
+    );
+    return () => state!;
+  }
+
+  it("never clears a draft that changed while its save was in flight", async () => {
+    native();
+    holdCreate = [];
+    const state = probe();
+    await waitFor(() => expect(state().loading).toBe(false));
+    const saved = { project: { id: "p1", registered_at_ms: 1 }, title: "First", description: "" };
+    act(() => state().setDraft(saved));
+    let pending!: Promise<unknown>;
+    act(() => {
+      pending = state().create({ projectId: "p1", registeredAtMs: 1, title: "First", description: "" }, state().draft);
+    });
+    const newer = { project: { id: "p1", registered_at_ms: 1 }, title: "Second idea", description: "typed meanwhile" };
+    act(() => state().setDraft(newer));
+    await act(async () => holdCreate!.forEach((release) => release(undefined)));
+    expect(await pending).toMatchObject({ kind: "created" });
+    expect(state().draft).toEqual(newer);
+    expect(tasks.map((t) => t.title)).toEqual(["First"]);
+  });
+
+  it("does not discard a draft while it is being saved, whether the save succeeds or fails", async () => {
+    native();
+    holdCreate = [];
+    const state = probe();
+    await waitFor(() => expect(state().loading).toBe(false));
+    const draft = { project: { id: "p1", registered_at_ms: 1 }, title: "Keep", description: "" };
+    const input = { projectId: "p1", registeredAtMs: 1, title: "Keep", description: "" };
+    act(() => state().setDraft(draft));
+    act(() => void state().create(input, state().draft));
+    act(() => state().discardDraft());
+    expect(state().draft).toEqual(draft);
+    await act(async () => holdCreate!.forEach((release) => release(undefined)));
+    expect(state().draft.title).toBe(""); // saved, so the draft it came from is cleared
+    expect(tasks.map((t) => t.title)).toEqual(["Keep"]);
+
+    holdCreate = null;
+    taskFailure = "tasks_unavailable";
+    act(() => state().setDraft(draft));
+    await act(async () => {
+      const failed = state().create(input, state().draft);
+      state().discardDraft();
+      await failed;
+    });
+    expect(state().draft).toEqual(draft);
   });
 
   it("keeps everything typed when saving fails", async () => {
@@ -505,7 +587,9 @@ describe("New task", () => {
     await fill(user, "Will fail", "Details");
     projects = []; // removed meanwhile, as another window could
     await user.click(main().getByRole("button", { name: "Save task" }));
-    expect(await main().findByRole("alert")).toHaveTextContent("no longer registered");
+    expect(await main().findByText(/no longer registered/)).toBeInTheDocument();
+    // The project list is read again, so the vanished project is no longer shown as chosen.
+    expect(await main().findByText("Choose the project this task belongs to.")).toBeInTheDocument();
     expect(main().getByRole("textbox", { name: /Title/ })).toHaveValue("Will fail");
     expect(main().getByRole("textbox", { name: /Description/ })).toHaveValue("Details");
   });
@@ -721,7 +805,7 @@ describe("Home composer", () => {
 
     expect(await main().findByRole("heading", { level: 1, name: "Rate limit the API" })).toBeInTheDocument();
     expect(calls.filter((c) => c.cmd === "create_task").map((c) => c.args)).toEqual([
-      { project_id: "p1", title: "Rate limit the API", description: "Per IP.\nKeep /health exempt." },
+      { project_id: "p1", expected_registered_at_ms: 1, title: "Rate limit the API", description: "Per IP.\nKeep /health exempt." },
     ]);
     expect(screen.getByRole("status")).toHaveTextContent("Task saved as a draft. Nothing was started.");
     expect(rail().getByRole("link", { name: /^Tasks, 1 draft$/ })).toBeInTheDocument();
@@ -919,6 +1003,36 @@ describe("project pages and counts", () => {
     await user.click(again.getByRole("button", { name: "Save task" }));
     expect(again.getByRole("alert")).toHaveTextContent("Choose the project this task belongs to.");
     expect(count("create_task")).toBe(0);
+  });
+
+  // Issue #98: the interface still lists the registration the user chose, but another instance has reset the registry
+  // and p1 now names another folder. Rust receives the chosen registration time and refuses; nothing is attached to
+  // the new p1, the text stays, and the project list is read again so the stale choice is no longer offered.
+  it("refuses to save for a registration that changed after the user chose it, and offers the current list", async () => {
+    const user = userEvent.setup();
+    native();
+    renderApp("#/home", false);
+    const home = () => within(screen.getByRole("form", { name: "New task" }));
+    await screen.findByRole("option", { name: "atlas-api" });
+    await user.selectOptions(home().getByRole("combobox", { name: "Project" }), "atlas-api");
+    await user.type(home().getByRole("textbox", { name: /^Title/ }), "Meant for atlas-api");
+    projects = [{ id: "p1", name: "other-folder", registered_at_ms: 2 }]; // not yet seen by this window
+    const listed = count("list_projects");
+    await user.click(home().getByRole("button", { name: "Save task" }));
+
+    expect(await main().findByText(/its registration changed/)).toBeInTheDocument();
+    expect(lastArgs("create_task")).toMatchObject({ project_id: "p1", expected_registered_at_ms: 1 });
+    expect(tasks).toEqual([]);
+    expect(home().getByRole("textbox", { name: /^Title/ })).toHaveValue("Meant for atlas-api");
+    expect(count("list_projects")).toBe(listed + 1);
+    await screen.findByRole("option", { name: "other-folder" });
+    expect(home().getByRole("combobox", { name: "Project" })).toHaveValue("");
+
+    // Chosen again, knowingly, the new registration is the one saved.
+    await user.selectOptions(home().getByRole("combobox", { name: "Project" }), "other-folder");
+    await user.click(home().getByRole("button", { name: "Save task" }));
+    await main().findByRole("heading", { level: 1, name: "Meant for atlas-api" });
+    expect(tasks.map((t) => t.project)).toEqual([{ id: "p1", registered_at_ms: 2 }]);
   });
 
   it("lists the tasks again when the project list changes, so a removed project reads as removed", async () => {

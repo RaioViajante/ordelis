@@ -1,8 +1,9 @@
 // The UI's adapter for saved tasks (issue #96). It is the only module that names or invokes the task commands, whose
 // contracts are in docs/implementation/desktop-tasks.md: list_tasks takes nothing, get_task takes a task id,
-// create_task takes a registration id and text, update_task takes a task id, a revision, text and a status. None
-// takes a path. Every answer is checked against that contract before the UI may show it, input Rust would refuse is
-// never sent, and the native message text is never shown: the UI words each error code itself.
+// create_task takes the chosen registration (its id and registration time) and text, update_task takes a task id, a
+// revision, text and a status. None takes a path. Every answer is checked against that contract before the UI may
+// show it, input Rust would refuse is never sent, and the native message text is never shown: the UI words each error
+// code itself.
 import { invoke, isTauri } from "@tauri-apps/api/core";
 
 export const TASK_ERROR_CODES = [
@@ -49,6 +50,8 @@ export type UpdateResult = { kind: "updated"; task: Task } | { kind: "conflict";
 
 export interface NewTask {
   projectId: string;
+  /** The chosen registration's time. Rust refuses the task if the id now names a different registration (#98). */
+  registeredAtMs: number;
   title: string;
   description: string;
 }
@@ -125,9 +128,9 @@ export function getTask(id: string): Promise<GetResult> {
 
 export function createTask(input: NewTask): Promise<CreateResult> {
   if (!inDesktop()) return Promise.resolve(PREVIEW);
-  const { projectId, title, description } = input;
-  if (!PROJECT_ID.test(projectId) || textProblem(title, description)) return Promise.resolve(INVALID);
-  return invoke("create_task", { project_id: projectId, title, description }).then(readCreate, readError);
+  const { projectId, registeredAtMs, title, description } = input;
+  if (!PROJECT_ID.test(projectId) || !time(registeredAtMs) || textProblem(title, description)) return Promise.resolve(INVALID);
+  return invoke("create_task", { project_id: projectId, expected_registered_at_ms: registeredAtMs, title, description }).then(readCreate, readError);
 }
 
 export function updateTask(change: TaskChange): Promise<UpdateResult> {

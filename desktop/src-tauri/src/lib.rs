@@ -78,11 +78,17 @@ async fn get_task(id: String, tasks: State<'_, Tasks>) -> Result<GetOutcome, Tas
     tasks.get(id).await
 }
 
-/// Text and a registration id only: Rust reads the project's identity from the registry and never touches its folder.
-/// Saving a task starts nothing.
+/// Text and the registration the user chose (its id and registration time), never a path. Rust checks that exact
+/// registration in the registry and never touches its folder. Saving a task starts nothing.
 #[tauri::command(rename_all = "snake_case")]
-async fn create_task(project_id: String, title: String, description: String, tasks: State<'_, Tasks>) -> Result<CreateOutcome, TaskError> {
-    tasks.create(project_id, title, description).await
+async fn create_task(
+    project_id: String,
+    expected_registered_at_ms: u64,
+    title: String,
+    description: String,
+    tasks: State<'_, Tasks>,
+) -> Result<CreateOutcome, TaskError> {
+    tasks.create(project_id, expected_registered_at_ms, title, description).await
 }
 
 /// Writes only if `revision` is the task's current one; the project identity cannot be changed.
@@ -782,14 +788,15 @@ mod tests {
         assert_eq!(invoke(&main, "list_tasks", serde_json::json!({})), Ok(serde_json::json!({ "schema_version": 1, "tasks": [] })));
         let added = invoke(&main, "add_project", serde_json::json!({})).unwrap();
         assert_eq!(added["project"]["id"], "p1");
+        let registered_at_ms = &added["project"]["registered_at_ms"];
+        assert!(registered_at_ms.is_u64());
 
-        let created = invoke(&main, "create_task", serde_json::json!({ "project_id": "p1", "title": "Add rate limiting", "description": "Per IP." })).unwrap();
+        let body = serde_json::json!({ "project_id": "p1", "expected_registered_at_ms": registered_at_ms, "title": "Add rate limiting", "description": "Per IP." });
+        let created = invoke(&main, "create_task", body).unwrap();
         assert_eq!(created["outcome"], "created");
         let task = &created["task"];
         assert_eq!(keys(task), ["created_at_ms", "description", "id", "project", "revision", "status", "title", "updated_at_ms"]);
         assert_eq!((task["id"].as_str(), task["status"].as_str(), task["revision"].as_u64()), (Some("t1"), Some("draft"), Some(1)));
-        let registered_at_ms = &added["project"]["registered_at_ms"];
-        assert!(registered_at_ms.is_u64());
         assert_eq!(
             task["project"],
             serde_json::json!({ "id": "p1", "registered_at_ms": registered_at_ms, "link": "linked" }),
@@ -832,11 +839,13 @@ mod tests {
         let main = webview(&app, "main");
         let invalid = task_error(tasks::TaskErrorCode::InvalidInput);
         for body in [
-            serde_json::json!({ "project_id": "../projects.json", "title": "Title", "description": "" }),
-            serde_json::json!({ "project_id": "/etc", "title": "Title", "description": "" }),
-            serde_json::json!({ "project_id": "p1", "title": "", "description": "" }),
-            serde_json::json!({ "project_id": "p1", "title": "Title", "description": "a\rb" }),
-            serde_json::json!({ "project_id": "p1", "title": "x".repeat(257), "description": "" }),
+            serde_json::json!({ "project_id": "../projects.json", "expected_registered_at_ms": 5, "title": "Title", "description": "" }),
+            serde_json::json!({ "project_id": "/etc", "expected_registered_at_ms": 5, "title": "Title", "description": "" }),
+            serde_json::json!({ "project_id": "p1", "expected_registered_at_ms": 5, "title": "", "description": "" }),
+            serde_json::json!({ "project_id": "p1", "expected_registered_at_ms": 5, "title": "Title", "description": "a\rb" }),
+            serde_json::json!({ "project_id": "p1", "expected_registered_at_ms": 5, "title": "x".repeat(257), "description": "" }),
+            // A registration time no registry can hold (above 2^53 - 1).
+            serde_json::json!({ "project_id": "p1", "expected_registered_at_ms": 9_007_199_254_740_992u64, "title": "Title", "description": "" }),
         ] {
             assert_eq!(invoke(&main, "create_task", body.clone()), Err(invalid.clone()), "{body}");
         }
@@ -850,8 +859,13 @@ mod tests {
         assert_eq!(invoke(&main, "get_task", serde_json::json!({ "id": "../tasks.json" })), Err(invalid));
         // Missing, misspelled (camelCase) or mistyped arguments never reach the command.
         for (cmd, body) in [
-            ("create_task", serde_json::json!({ "projectId": "p1", "title": "Title", "description": "" })),
-            ("create_task", serde_json::json!({ "project_id": "p1", "title": 1, "description": "" })),
+            ("create_task", serde_json::json!({ "projectId": "p1", "expected_registered_at_ms": 5, "title": "Title", "description": "" })),
+            ("create_task", serde_json::json!({ "project_id": "p1", "expectedRegisteredAtMs": 5, "title": "Title", "description": "" })),
+            ("create_task", serde_json::json!({ "project_id": "p1", "title": "Title", "description": "" })),
+            ("create_task", serde_json::json!({ "project_id": "p1", "expected_registered_at_ms": "5", "title": "Title", "description": "" })),
+            ("create_task", serde_json::json!({ "project_id": "p1", "expected_registered_at_ms": -5, "title": "Title", "description": "" })),
+            ("create_task", serde_json::json!({ "project_id": "p1", "expected_registered_at_ms": 5.5, "title": "Title", "description": "" })),
+            ("create_task", serde_json::json!({ "project_id": "p1", "expected_registered_at_ms": 5, "title": 1, "description": "" })),
             ("update_task", serde_json::json!({ "id": "t1", "revision": "1", "title": "Title", "description": "", "status": "draft" })),
             ("update_task", serde_json::json!({ "id": "t1", "revision": -1, "title": "Title", "description": "", "status": "draft" })),
             ("get_task", serde_json::json!({ "path": "/etc" })),
@@ -861,7 +875,7 @@ mod tests {
         }
         assert!(!scratch.data().exists(), "nothing reached the store");
         assert_eq!(
-            invoke(&main, "create_task", serde_json::json!({ "project_id": "p1", "title": "Title", "description": "" })),
+            invoke(&main, "create_task", serde_json::json!({ "project_id": "p1", "expected_registered_at_ms": 5, "title": "Title", "description": "" })),
             Err(task_error(tasks::TaskErrorCode::ProjectNotFound))
         );
 
@@ -870,7 +884,13 @@ mod tests {
         std::fs::set_permissions(scratch.data(), std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
         let registry = serde_json::json!({ "schema_version": 1, "next_id": 2, "projects": [{ "id": "p1", "path": "/ordelis-test-nonexistent", "dev": 1, "ino": 2, "registered_at_ms": 5 }] });
         std::fs::write(scratch.data().join("projects.json"), serde_json::to_vec(&registry).unwrap()).unwrap();
-        let body = serde_json::json!({ "project_id": "p1", "title": "../../etc/passwd", "description": "/etc/hosts", "path": "/etc", "data_dir": "/tmp", "status": "running", "revision": 9 });
+        // p1 under another registration time (issue #98): the registration the caller chose is not this one.
+        for expected in [4, 6] {
+            let body = serde_json::json!({ "project_id": "p1", "expected_registered_at_ms": expected, "title": "Title", "description": "" });
+            assert_eq!(invoke(&main, "create_task", body), Err(task_error(tasks::TaskErrorCode::ProjectNotFound)), "{expected}");
+        }
+        assert!(!scratch.data().join("tasks.json").exists(), "a mismatched registration creates nothing");
+        let body = serde_json::json!({ "project_id": "p1", "expected_registered_at_ms": 5, "title": "../../etc/passwd", "description": "/etc/hosts", "path": "/etc", "data_dir": "/tmp", "status": "running", "revision": 9 });
         let created = invoke(&main, "create_task", body).unwrap();
         assert_eq!((created["task"]["title"].as_str(), created["task"]["description"].as_str()), (Some("../../etc/passwd"), Some("/etc/hosts")));
         assert_eq!((created["task"]["status"].as_str(), created["task"]["revision"].as_u64()), (Some("draft"), Some(1)), "status and revision are not inputs");
@@ -883,7 +903,7 @@ mod tests {
         for (cmd, body) in [
             ("list_tasks", serde_json::json!({})),
             ("get_task", serde_json::json!({ "id": "t1" })),
-            ("create_task", serde_json::json!({ "project_id": "p1", "title": "Title", "description": "" })),
+            ("create_task", serde_json::json!({ "project_id": "p1", "expected_registered_at_ms": 5, "title": "Title", "description": "" })),
             ("update_task", serde_json::json!({ "id": "t1", "revision": 1, "title": "Title", "description": "", "status": "draft" })),
         ] {
             assert_eq!(invoke(&main, cmd, body), Err(task_error(tasks::TaskErrorCode::TasksUnavailable)), "{cmd}");
@@ -905,11 +925,13 @@ mod tests {
         let main = webview(&app, "main");
         assert_eq!(invoke(&main, "add_project", serde_json::json!({})).unwrap()["outcome"], "added");
         assert_eq!(invoke(&main, "remove_project", serde_json::json!({ "id": "p1" })), Ok(serde_json::json!({ "outcome": "removed" })));
-        assert_eq!(invoke(&main, "add_project", serde_json::json!({})).unwrap()["project"]["id"], "p2");
-        let blocked = invoke(&main, "create_task", serde_json::json!({ "project_id": "p2", "title": "Title", "description": "" }));
+        let p2 = invoke(&main, "add_project", serde_json::json!({})).unwrap()["project"].clone();
+        assert_eq!(p2["id"], "p2");
+        let body = serde_json::json!({ "project_id": "p2", "expected_registered_at_ms": p2["registered_at_ms"], "title": "Title", "description": "" });
+        let blocked = invoke(&main, "create_task", body.clone());
         assert_eq!(blocked, Err(task_error(tasks::TaskErrorCode::TasksUnavailable)));
         drop(held);
-        assert_eq!(invoke(&main, "create_task", serde_json::json!({ "project_id": "p2", "title": "Title", "description": "" })).unwrap()["outcome"], "created");
+        assert_eq!(invoke(&main, "create_task", body).unwrap()["outcome"], "created");
     }
 
     #[test]
@@ -918,13 +940,15 @@ mod tests {
         let scratch = Scratch::new("tasks-corrupt");
         let app = app_with(Some(scratch.data()), picks(&scratch.folder()));
         let main = webview(&app, "main");
-        assert_eq!(invoke(&main, "add_project", serde_json::json!({})).unwrap()["outcome"], "added");
+        let added = invoke(&main, "add_project", serde_json::json!({})).unwrap();
+        assert_eq!(added["outcome"], "added");
         let corrupt = b"{\"schema_version\":1,\"next_id\":\"oops\"}";
         std::fs::write(scratch.data().join("tasks.json"), corrupt).unwrap();
         let error = Err(task_error(tasks::TaskErrorCode::TasksCorrupt));
         assert_eq!(invoke(&main, "list_tasks", serde_json::json!({})), error);
         assert_eq!(invoke(&main, "get_task", serde_json::json!({ "id": "t1" })), error);
-        assert_eq!(invoke(&main, "create_task", serde_json::json!({ "project_id": "p1", "title": "Title", "description": "" })), error);
+        let body = serde_json::json!({ "project_id": "p1", "expected_registered_at_ms": added["project"]["registered_at_ms"], "title": "Title", "description": "" });
+        assert_eq!(invoke(&main, "create_task", body), error);
         assert_eq!(invoke(&main, "update_task", serde_json::json!({ "id": "t1", "revision": 1, "title": "Title", "description": "", "status": "draft" })), error);
         assert_eq!(std::fs::read(scratch.data().join("tasks.json")).unwrap(), corrupt);
         assert_eq!(invoke(&main, "list_projects", serde_json::json!({})).unwrap()["projects"].as_array().unwrap().len(), 1);

@@ -56,7 +56,10 @@ export function useComposer(go: Go) {
     setAttempted(true);
     setFailure(null);
     if (blocked || problem || !project) return;
-    const result = await tasks.create({ projectId: project.id, title, description: draft.description });
+    const input = { projectId: project.id, registeredAtMs: project.registered_at_ms, title, description: draft.description };
+    const result = await tasks.create(input, draft);
+    // The project list the user chose from is out of date: read it again, so the stale registration is not offered.
+    if (result.kind === "error" && result.code === "project_not_found") void registry.reload();
     if (!mounted.current) return;
     if (result.kind === "created") {
       setAttempted(false);
