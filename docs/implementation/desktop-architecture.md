@@ -39,7 +39,7 @@ desktop/
 
 ## Navigation and keyboard
 
-The rail is a `<nav>` of links with accessible names and `aria-current`. `⌘/Ctrl + 1…6` switch pages. After a navigation focus moves to the page (`<main tabindex="-1">`). Settings tabs follow the ARIA tab pattern (arrow keys). Layout holds down to the 760 px minimum: multi-column grids collapse at 1100, 1000 and 900 px, and the wide tables scroll horizontally inside their own container.
+The rail is a `<nav>` of links with accessible names and `aria-current`. `⌘/Ctrl + 1…7` switch pages in sidebar order (Home, Tasks, Sessions, Projects, Context, Agents, Settings). After a navigation focus moves to the page (`<main tabindex="-1">`). Settings tabs follow the ARIA tab pattern (arrow keys). Layout holds down to the 760 px minimum: multi-column grids collapse at 1100, 1000 and 900 px, and the wide tables scroll horizontally inside their own container.
 
 ## Interaction state (issue #26)
 
@@ -61,14 +61,15 @@ All sample data is in `src/fixtures/mock.ts`, is on by default for layout review
 
 ```text
  macOS user ── Ordelis.app (Rust, tauri 2, no plugins, one boundary-check command, one development-only status command,
-                  │          four local project registration commands, four saved-task commands with no
-                  │          frontend caller yet)
+                  │          four local project registration commands, four saved-task commands)
                   │  custom protocol serves bundled dist/ only
                   ▼
-              WKWebView: React UI ── one IPC call: get_runtime_status (Settings → Runtime) ── (no network, no files, no process)
+              WKWebView: React UI ── IPC only through three adapters: runtimeStatus.ts (get_runtime_status),
+                                     projects.ts (list/add/remove_project) and tasks.ts (the four task commands)
+                                     ── (no network, no files, no process)
 ```
 
-- **Capabilities.** `capabilities/default.json` grants the `main` window exactly ten permissions, `allow-ipc-boundary-status`, `allow-get-runtime-status`, the four [local project registration](desktop-local-projects.md) grants (`allow-list-projects`, `allow-add-project`, `allow-remove-project`, `allow-reset-projects`) and the four [saved-task](desktop-tasks.md) grants (`allow-list-tasks`, `allow-get-task`, `allow-create-task`, `allow-update-task`), and nothing else: no shell, filesystem, dialog, network, opener or core plugin permission, and no `remote` origin. `withGlobalTauri` is off. The frontend depends on `@tauri-apps/api` (pinned to the Rust `tauri` crate's version) only so that `src/app/runtimeStatus.ts` can call `get_runtime_status`; no other module imports it and `config.test.ts` enforces that ([details](desktop-runtime-bridge.md#runtime-status-in-settings)). `ipc_boundary_status` exists to prove the boundary, not to be used; see [IPC authorization](#ipc-authorization).
+- **Capabilities.** `capabilities/default.json` grants the `main` window exactly ten permissions, `allow-ipc-boundary-status`, `allow-get-runtime-status`, the four [local project registration](desktop-local-projects.md) grants (`allow-list-projects`, `allow-add-project`, `allow-remove-project`, `allow-reset-projects`) and the four [saved-task](desktop-tasks.md) grants (`allow-list-tasks`, `allow-get-task`, `allow-create-task`, `allow-update-task`), and nothing else: no shell, filesystem, dialog, network, opener or core plugin permission, and no `remote` origin. `withGlobalTauri` is off. The frontend depends on `@tauri-apps/api` (pinned to the Rust `tauri` crate's version) only through three reviewed adapters: `src/app/runtimeStatus.ts` ([details](desktop-runtime-bridge.md#runtime-status-in-settings)), `src/app/projects.ts` ([local projects](desktop-local-projects.md#ipc-boundary)) and `src/app/tasks.ts` ([saved tasks](desktop-tasks.md#interface)). No other module imports it or names a command, and `config.test.ts` and `frontend-boundary.test.ts` enforce that, pinning each adapter's call sites. `ipc_boundary_status` exists to prove the boundary, not to be used; see [IPC authorization](#ipc-authorization).
 - **CSP.** `default-src 'self'` with `connect-src ipc: http://ipc.localhost` (Tauri's own IPC alias, unused), `img-src 'self' data:`, `font-src 'self'`, `style-src 'self'`, `object-src 'none'`, `frame-src 'none'`, `base-uri 'none'`, `form-action 'none'`. No remote host, no `unsafe-eval` and no `unsafe-inline` in production. The UI therefore sets no inline `style` attributes. Only the development CSP allows the Vite websocket and inline styles.
 - **No remote content.** Fonts are bundled; there are no CDN links, analytics or remote images. A test fails if a remote URL appears in the sources or if the Tauri configuration gains a permission, plugin or command beyond the ten reviewed commands.
 - **Untrusted data.** Nothing from disk, a provider or the vault reaches the UI in this increment. When it does, it must be treated as untrusted text (the vault excerpts rule in the [MVP plan](synapse-mvp-plan.md) applies) and rendered as text, never as HTML.

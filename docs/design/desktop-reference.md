@@ -56,7 +56,7 @@ Brand colors (Sage, Forest, Sand, Stone, Charcoal) and state colors are separate
 
 A fixed 236 px sidebar and a scrolling page. From the top: the lowercase `ordelis` wordmark, **New Task**, **Search**, then Home, Tasks, Sessions, Projects, Context and Agents, a Projects section, Settings, and the workspace footer. Narrower than 900 px the sidebar keeps its structure and shows icons only (the window minimum is 760 px).
 
-Navigation shortcuts follow the sidebar order: `⌘1` Home, `⌘2` Sessions, `⌘3` Projects, `⌘4` Context, `⌘5` Agents, `⌘6` Settings (Ctrl on other platforms). Tasks, New Task and Search are disabled and have no shortcut; the export's `⌘N`, `⌘K` and `⌘,` are not implemented. Focus moves to the page after a shortcut or a link. The order lives in `ROUTES` in `desktop/src/app/routes.ts`, which the Settings list also reads.
+Navigation shortcuts follow the sidebar order: `⌘1` Home, `⌘2` Tasks, `⌘3` Sessions, `⌘4` Projects, `⌘5` Context, `⌘6` Agents, `⌘7` Settings (Ctrl on other platforms; Tasks took `⌘2` in [#96](https://github.com/RaioViajante/ordelis/issues/96), as decided in #86). New Task opens the New task page and has no shortcut. Search is disabled; the export's `⌘N`, `⌘K` and `⌘,` are not implemented. Focus moves to the page after a shortcut or a link. The order lives in `ROUTES` in `desktop/src/app/routes.ts`, which the Settings list also reads.
 
 The visible product name is Ordelis (window title, page title, sidebar wordmark, interface copy, the macOS bundle name `Ordelis.app`, native messages). The technical identity followed in the identity migration ([I1 and I2](../migration/ordelis.md#pr-roadmap)): the crate, package and executable are `ordelis-desktop`, and the bundle identifier is `app.ordelis.desktop`, whose data directory holds the project registry. The former identifier's data directory is only read, once, to import that registry.
 
@@ -66,13 +66,23 @@ The export also draws macOS window controls and a top bar with an agent summary 
 
 | Screen | State |
 | --- | --- |
-| Foundations, Components | Tokens, sidebar, buttons, fields, switch, focus ring, count badge and disabled-with-reason controls are implemented. Status pills, chips, tabs, avatars and the diff and terminal styles are not |
+| Foundations, Components | Tokens, sidebar, buttons, fields, switch, focus ring, count badge and disabled-with-reason controls are implemented, and so are the muted status pill, its glyphs, the segmented switch and the step header used by saved tasks. Chips, tabs, avatars and the diff and terminal styles are not |
 | Home (light and dark) | Appearance follows the system. The layout is still the legacy sample page, not the export's composer |
-| First launch, New task (both), Task detail, Execution, Terminal, Review, Product states, Dialogs | Not implemented. Where the app has an equivalent sample page it only picks up the new tokens |
+| New task (prepare) | Implemented for saved tasks (`#/tasks/new`): the step header with Prepare current and the later steps marked not available, Project, Title and Description, **Save task** as the one filled action and **Draft plan** disabled with its reason, and an honest "What happens next" panel. See the deviations below |
+| Task detail | Implemented for saved tasks (`#/tasks/<id>`): breadcrumb, title with its status pill, the description as plain text, the project link and dates, Edit, Archive and Restore. The Plan, Activity, Changes, Terminal and Context tabs and the Agents, Limits and Usage inspector are not drawn: none of them exists |
+| Product states | The task lifecycle row and pill for Draft, used by the Tasks list (`#/tasks`), plus loading, empty and error states that say what is true. The other lifecycle states belong to execution and are not shown |
+| First launch, New task (review plan and approve), Execution, Terminal, Review, Dialogs | Not implemented. Where the app has an equivalent sample page it only picks up the new tokens |
 | Projects | Real local folders (add, list, status, confirmed removal) on the legacy layout, with the sample projects in a separate labelled group. Not yet rebuilt to the export, which shows repository, worktree and task data that does not exist |
 | Sessions, Context, Agents, Settings | Legacy sample pages with the new tokens. Their layouts have not been rebuilt to the export |
 
-New Task, Search and Tasks appear in the sidebar but are disabled with a stated reason, because task planning, search and a task list do not exist. Sample data stays labelled as sample data.
+Search appears in the sidebar but is disabled with a stated reason, because search does not exist. Tasks and New Task are real (saved tasks only); the Tasks entry carries no sample count. Sample data stays labelled as sample data, and sample tasks appear only in Home's labelled sample section.
+
+Deliberate deviations for saved tasks ([#96](https://github.com/RaioViajante/ordelis/issues/96)):
+
+- **A Title field** is added to the Composer board, which has only Goal (approved in #86). Goal becomes Description.
+- **Archived** is a state the boards do not draw. It uses the same muted pill as Draft, with a box glyph instead of the dashed circle.
+- **No execution surfaces.** The Composer's Start from, worktree, Context, Agents and default policy controls, and Task detail's tabs and inspector, are omitted rather than drawn over sample data.
+- **The Drafts and Archived switch** uses the board's segmented control as two toggle buttons (`aria-pressed`).
 
 ## Legacy aliases
 
