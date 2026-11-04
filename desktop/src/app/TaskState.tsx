@@ -14,6 +14,7 @@ import {
   type TextProblem,
   type UpdateResult,
 } from "./tasks";
+import { useRegistry } from "./Registry";
 import { useWorkspace } from "./Workspace";
 
 /** Why the list could not be read. "unreadable" is an answer outside the Rust contract. */
@@ -22,7 +23,7 @@ export type TaskListError = TaskErrorCode | "unreadable";
 // The UI words every code itself, so no native text is shown. None of these contains task text.
 const ERROR_TEXT: Record<TaskListError, string> = {
   invalid_input: "Ordelis refused those task details. Nothing was saved.",
-  project_not_found: "That project is no longer registered. Choose another project; nothing was saved.",
+  project_not_found: "That project is no longer registered, or its registration changed. Choose the project again; nothing was saved.",
   project_unavailable: "The project list can't be read right now, so the task can't be linked to a project. Nothing was saved.",
   tasks_full: "The task list is full (500 tasks). Nothing was saved.",
   tasks_corrupt:
@@ -44,13 +45,17 @@ const PROBLEM_TEXT: Record<TextProblem, string> = {
 };
 export const problemText = (problem: TextProblem) => PROBLEM_TEXT[problem];
 
-/** What the composer holds while the user writes. In memory only: it survives moving around, not a restart. */
+/**
+ * What the composer holds while the user writes, shared by Home and New task. In memory only: it survives moving
+ * around the app, not a restart. The project is kept as a registration (id and registration time), so a draft never
+ * moves to a different registration that later reuses the id.
+ */
 export interface ComposerDraft {
-  projectId: string;
+  project: { id: string; registered_at_ms: number } | null;
   title: string;
   description: string;
 }
-const EMPTY_DRAFT: ComposerDraft = { projectId: "", title: "", description: "" };
+const EMPTY_DRAFT: ComposerDraft = { project: null, title: "", description: "" };
 
 /** Unsaved edits of one task, with the revision they started from. In memory only, like the composer draft. */
 export interface TaskEdit {
@@ -72,10 +77,13 @@ interface TaskState {
   saving: boolean;
   reload: () => Promise<void>;
   get: (id: string) => Promise<GetResult>;
-  create: (input: NewTask) => Promise<CreateResult>;
+  /** `from` is the draft being saved; it is cleared on success only if it is still the current draft. */
+  create: (input: NewTask, from: ComposerDraft) => Promise<CreateResult>;
   update: (change: TaskChange) => Promise<UpdateResult>;
   draft: ComposerDraft;
   setDraft: (draft: ComposerDraft) => void;
+  /** Empties the draft. Only called after the user confirmed it; does nothing while a save is in flight. */
+  discardDraft: () => void;
   edits: Record<string, TaskEdit>;
   /** `null` drops the edits of that task, after a save or when the user discards them. */
   setEdit: (id: string, edit: TaskEdit | null) => void;
@@ -83,10 +91,12 @@ interface TaskState {
 
 const TaskContext = createContext<TaskState | null>(null);
 
-// The Tasks list, New task and task detail read the same state. Rust owns persistence: nothing here is written
-// anywhere, and the list is read again after every change, including a conflict.
+// Home, the Tasks list, New task, task detail, project pages and the sidebar read the same state. Rust owns
+// persistence: nothing here is written anywhere, and the list is read again after every change, including a conflict,
+// and whenever the project list changes, since each task's link is computed against it.
 export function TasksProvider({ children }: { children: ReactNode }) {
   const { announce } = useWorkspace();
+  const registry = useRegistry();
   const [desktop] = useState(inDesktop);
   const [list, setList] = useState<{ loading: boolean; tasks: TaskSummary[]; error: TaskListError | null }>({
     loading: desktop,
@@ -128,6 +138,24 @@ export function TasksProvider({ children }: { children: ReactNode }) {
     };
   }, [desktop, reload]);
 
+  // A project added or removed changes the links Rust computes, so the tasks are listed again. The first project list
+  // changes nothing in Rust, so it does not count as a change.
+  const registrations = registry.loading ? null : registry.projects.map((p) => `${p.id}@${p.registered_at_ms}`).join(" ");
+  const seen = useRef<string | null>(null);
+  useEffect(() => {
+    if (registrations === null || seen.current === registrations) return;
+    const first = seen.current === null;
+    seen.current = registrations;
+    if (desktop && !first) void reload();
+  }, [registrations, desktop, reload]);
+
+  const discardDraft = useCallback(() => {
+    // The draft may be the one being saved: discarding it now would claim it is gone while it is being written.
+    if (inflight.current) return;
+    setDraft(EMPTY_DRAFT);
+    announce("Draft discarded.");
+  }, [announce]);
+
   const mutate = useCallback(
     <T extends CreateResult | UpdateResult>(work: () => Promise<T>): Promise<T> => {
       if (inflight.current) return inflight.current as Promise<T>;
@@ -148,10 +176,11 @@ export function TasksProvider({ children }: { children: ReactNode }) {
   );
 
   const create = useCallback(
-    (input: NewTask) =>
+    (input: NewTask, from: ComposerDraft) =>
       mutate(() => createTask(input)).then((result) => {
         if (result.kind === "created") {
-          setDraft(EMPTY_DRAFT);
+          // Every edit makes a new draft object, so a draft changed since this save began is newer and is kept.
+          setDraft((current) => (current === from ? EMPTY_DRAFT : current));
           announce("Task saved as a draft. Nothing was started.");
         }
         return result;
@@ -182,10 +211,11 @@ export function TasksProvider({ children }: { children: ReactNode }) {
       update,
       draft,
       setDraft,
+      discardDraft,
       edits,
       setEdit,
     }),
-    [desktop, list, saving, reload, create, update, draft, edits, setEdit],
+    [desktop, list, saving, reload, create, update, draft, discardDraft, edits, setEdit],
   );
   return <TaskContext.Provider value={value}>{children}</TaskContext.Provider>;
 }

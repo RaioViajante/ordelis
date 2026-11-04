@@ -42,6 +42,8 @@ function native() {
       const answer = rawList ?? { schema_version: 1, projects: registry.map((p) => ({ ...p })) };
       return holdList ? new Promise((resolve) => holdList!.push(() => resolve(answer))) : answer;
     }
+    // The task store is empty here; the task flows are covered in Tasks.test.tsx.
+    if (cmd === "list_tasks") return { schema_version: 1, tasks: [] };
     if (cmd === "add_project") {
       if (panel) return Promise.reject(failure("selection_in_progress"));
       return new Promise((resolve, reject) => {
@@ -435,7 +437,7 @@ describe("Projects page", () => {
     native();
     registry.push({ ...folder("<img src=x onerror=alert(1)>"), path_display: "~/עברית/<b>x</b>" });
     renderApp();
-    const heading = await main().findByRole("heading", { level: 2 });
+    const heading = await main().findByRole("heading", { level: 2, name: /onerror/ });
     expect(heading).toHaveTextContent("<img src=x onerror=alert(1)>");
     expect(heading).toHaveAttribute("dir", "auto");
     expect(document.querySelector("main img, main b")).toBeNull();
@@ -528,7 +530,8 @@ describe("Home, sidebar and persistence", () => {
     expect(sidebar().queryByRole("link", { name: "atlas-api" })).not.toBeInTheDocument();
     await user.click(within(sample).getByRole("button", { name: /atlas-api/ }));
     expect(await main().findByRole("heading", { level: 2, name: "atlas-api" })).toBeInTheDocument();
-    expect(main().getByRole("button", { name: "Draft task here" })).toBeInTheDocument();
+    // A sample project cannot hold a saved task.
+    expect(main().getByRole("button", { name: "New task in this project" })).toHaveAttribute("aria-disabled", "true");
     expect(sidebar().getByRole("link", { name: "real-one" })).not.toHaveAttribute("aria-current");
     // Home: sample tasks stay labelled as sample, next to the real folders.
     await user.click(sidebar().getByRole("link", { name: "Home" }));

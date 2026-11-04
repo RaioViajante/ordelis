@@ -60,8 +60,8 @@ Orchestration decides *what* and *when*. It does not run processes, and it does 
 
 - *Working, command line, added since the fork.* [`mco context plan`](../guides/private-execution-plan.md) builds one deterministic, non-dispatching plan from a task, selected context and policy. It marks settings it cannot verify as unknown and blocks on required unknowns. It has one step, not stages.
 - *Working, inherited CLI.* Coordination by explicit user choice: `--chain` runs agents in sequence passing complete earlier answers through files; `--divide` splits scope between agents; `--debate` and `--synthesize` add read-only stages. These arrange prompts and scope. They do not plan, and they have no approval step. See the [workflow guide](../guides/workflows.md).
-- *Working, desktop (native acceptance pending).* Saved tasks: in the Tasks page, a task with a title and description is created for a registered project, kept in the app data directory, and edited, archived or restored. A saved task is a draft or archived; it holds no plan, stage or permission and starts nothing. It is tested against the Rust store and, in the interface, against a mocked native layer; it has not yet been run in the packaged app. See [saved tasks](../implementation/desktop-tasks.md).
-- *Prototype.* A task composer and a task preview in the desktop, over sample data.
+- *Working, desktop (native acceptance pending).* Saved tasks: from Home's composer or New task, a task with a title and description is created for a registered project, kept in the app data directory, and edited, archived or restored. A saved task is a draft or archived; it holds no plan, stage or permission and starts nothing. It is tested against the Rust store and, in the interface, against a mocked native layer; it has not yet been run in the packaged app. See [saved tasks](../implementation/desktop-tasks.md).
+- *Prototype.* Read-only previews of sample tasks in the desktop.
 - *Not present.* Plan generation, decomposition, dependency handling, replanning, approval.
 
 ## Open questions

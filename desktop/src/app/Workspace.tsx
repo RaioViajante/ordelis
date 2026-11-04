@@ -10,9 +10,6 @@ interface WorkspaceState {
   /** The selected sample session's id; null when nothing is selected or sample data is off. */
   session: string | null;
   selectSession: (id: string | null) => void;
-  draft: string;
-  setDraft: (text: string) => void;
-  clearDraft: () => void;
   /** Sample entries that can be selected now: the project's notes and history, minus anything unavailable. */
   selectable: ContextEntry[];
   /** Ids of the selected sample context entries. Inert: nothing is read or sent anywhere. */
@@ -38,7 +35,6 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const { on, revision } = useSampleData();
   const [selection, setSelection] = useState({ revision, name: MOCK_PROJECTS[0].name as string | null });
   const [sessionSel, setSessionSel] = useState({ revision, id: "b71c" as string | null });
-  const [draft, setDraftText] = useState("");
   const [contextSelection, setContextSelection] = useState({ revision, ids: [] as string[] });
   const [historyOffered, setHistoryOfferedState] = useState(true);
   const [announcement, setAnnouncement] = useState({ id: 0, text: "" });
@@ -80,11 +76,6 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     [session, revision, announce],
   );
 
-  const clearDraft = useCallback(() => {
-    setDraftText("");
-    announce("Draft cleared");
-  }, [announce]);
-
   const toggleContext = useCallback(
     (id: string) => {
       const entry = selectable.find((e) => e.id === id);
@@ -115,10 +106,10 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
 
   const value = useMemo(
     () => ({
-      project, selectProject, session, selectSession, draft, setDraft: setDraftText, clearDraft, selectable, contextIds, contextEntries,
+      project, selectProject, session, selectSession, selectable, contextIds, contextEntries,
       toggleContext, clearContext, historyOffered, setHistoryOffered, announcement, announce,
     }),
-    [project, selectProject, session, selectSession, draft, clearDraft, selectable, contextIds, contextEntries, toggleContext, clearContext, historyOffered, setHistoryOffered, announcement, announce],
+    [project, selectProject, session, selectSession, selectable, contextIds, contextEntries, toggleContext, clearContext, historyOffered, setHistoryOffered, announcement, announce],
   );
   return <WorkspaceContext.Provider value={value}>{children}</WorkspaceContext.Provider>;
 }

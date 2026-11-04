@@ -8,7 +8,7 @@ import { Projects } from "../pages/Projects";
 import { Sessions } from "../pages/Sessions";
 import { SessionDetail } from "../pages/SessionDetail";
 import { Settings } from "../pages/Settings";
-import { DraftPreview, TaskPreview } from "../pages/Preview";
+import { TaskPreview } from "../pages/Preview";
 import { TaskDetail } from "../pages/TaskDetail";
 import { TaskNew } from "../pages/TaskNew";
 import { Tasks } from "../pages/Tasks";
@@ -19,11 +19,10 @@ import { railRoute, ROUTES } from "./routes";
 import { useRoute } from "./useRoute";
 import { useWorkspace, WorkspaceProvider } from "./Workspace";
 
-const SAMPLE_ROUTES = ["home", "projects", "sessions", "context", "task", "preview"];
-const PAGE_LABELS = { task: "Task preview", preview: "Task preview" };
+const SAMPLE_ROUTES = ["home", "projects", "sessions", "context", "task"];
 
 function pageLabel(route: string, param: string | undefined): string | undefined {
-  if (route === "task" || route === "preview") return PAGE_LABELS[route];
+  if (route === "task") return "Task preview";
   if (route === "tasks" && param) return param === "new" ? "New task" : "Task";
   return ROUTES.find((r) => r.id === route)?.label;
 }
@@ -80,9 +79,8 @@ function ShellFrame() {
           {route === "tasks" && (loc.param === "new" ? <TaskNew go={go} /> : loc.param ? <TaskDetail key={loc.param} id={loc.param} /> : <Tasks />)}
           {route === "projects" && <Projects param={loc.param} go={go} />}
           {route === "task" && <TaskPreview id={loc.param} go={go} />}
-          {route === "preview" && <DraftPreview go={go} />}
           {route === "sessions" && (loc.param ? <SessionDetail id={loc.param} go={go} /> : <Sessions />)}
-          {route === "context" && <Context go={go} />}
+          {route === "context" && <Context />}
           {route === "agents" && <Agents />}
           {route === "settings" && <Settings />}
         </div>

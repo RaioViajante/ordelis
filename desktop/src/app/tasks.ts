@@ -1,8 +1,9 @@
 // The UI's adapter for saved tasks (issue #96). It is the only module that names or invokes the task commands, whose
 // contracts are in docs/implementation/desktop-tasks.md: list_tasks takes nothing, get_task takes a task id,
-// create_task takes a registration id and text, update_task takes a task id, a revision, text and a status. None
-// takes a path. Every answer is checked against that contract before the UI may show it, input Rust would refuse is
-// never sent, and the native message text is never shown: the UI words each error code itself.
+// create_task takes the chosen registration (its id and registration time) and text, update_task takes a task id, a
+// revision, text and a status. None takes a path. Every answer is checked against that contract before the UI may
+// show it, input Rust would refuse is never sent, and the native message text is never shown: the UI words each error
+// code itself.
 import { invoke, isTauri } from "@tauri-apps/api/core";
 
 export const TASK_ERROR_CODES = [
@@ -25,12 +26,13 @@ export type TaskStatus = (typeof TASK_STATUSES)[number];
 export const LINKS = ["linked", "removed", "replaced", "unknown"] as const;
 export type ProjectLink = (typeof LINKS)[number];
 
-// Mirrors TaskSummary and Task in src-tauri/src/tasks.rs. The registration time stays in Rust.
+// Mirrors TaskSummary and Task in src-tauri/src/tasks.rs. `project` is the registration the task was saved for (its
+// id and registration time, never a path) and how it relates to the registry now.
 export interface TaskSummary {
   id: string;
   title: string;
   status: TaskStatus;
-  project: { id: string; link: ProjectLink };
+  project: { id: string; registered_at_ms: number; link: ProjectLink };
   created_at_ms: number;
   updated_at_ms: number;
   revision: number;
@@ -48,6 +50,8 @@ export type UpdateResult = { kind: "updated"; task: Task } | { kind: "conflict";
 
 export interface NewTask {
   projectId: string;
+  /** The chosen registration's time. Rust refuses the task if the id now names a different registration (#98). */
+  registeredAtMs: number;
   title: string;
   description: string;
 }
@@ -84,6 +88,14 @@ export function textProblem(title: string, description: string): TextProblem | n
   return null;
 }
 
+/**
+ * Whether a task belongs to this registration: the same id and registration time, and Rust found that registration
+ * when it listed the task. A task saved for an earlier registration with the same id is never counted here.
+ */
+export function belongsTo(task: TaskSummary, project: { id: string; registered_at_ms: number }): boolean {
+  return task.project.link === "linked" && task.project.id === project.id && task.project.registered_at_ms === project.registered_at_ms;
+}
+
 export function inDesktop(): boolean {
   return isTauri();
 }
@@ -116,9 +128,9 @@ export function getTask(id: string): Promise<GetResult> {
 
 export function createTask(input: NewTask): Promise<CreateResult> {
   if (!inDesktop()) return Promise.resolve(PREVIEW);
-  const { projectId, title, description } = input;
-  if (!PROJECT_ID.test(projectId) || textProblem(title, description)) return Promise.resolve(INVALID);
-  return invoke("create_task", { project_id: projectId, title, description }).then(readCreate, readError);
+  const { projectId, registeredAtMs, title, description } = input;
+  if (!PROJECT_ID.test(projectId) || !time(registeredAtMs) || textProblem(title, description)) return Promise.resolve(INVALID);
+  return invoke("create_task", { project_id: projectId, expected_registered_at_ms: registeredAtMs, title, description }).then(readCreate, readError);
 }
 
 export function updateTask(change: TaskChange): Promise<UpdateResult> {
@@ -154,9 +166,10 @@ function readSummaryFields(raw: Obj): boolean {
     title.length > 0 &&
     bytes(title) <= MAX_TITLE_BYTES &&
     TASK_STATUSES.some((s) => s === status) &&
-    exact(project, ["id", "link"]) &&
+    exact(project, ["id", "registered_at_ms", "link"]) &&
     typeof project.id === "string" &&
     PROJECT_ID.test(project.id) &&
+    time(project.registered_at_ms) &&
     LINKS.some((l) => l === project.link) &&
     time(created_at_ms) &&
     time(updated_at_ms) &&

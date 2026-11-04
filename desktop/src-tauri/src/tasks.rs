@@ -35,7 +35,7 @@ impl From<TaskErrorCode> for TaskError {
     fn from(code: TaskErrorCode) -> Self {
         let message = match code {
             TaskErrorCode::InvalidInput => "The task details are not valid.",
-            TaskErrorCode::ProjectNotFound => "The project is not registered.",
+            TaskErrorCode::ProjectNotFound => "The project is not registered, or its registration changed.",
             TaskErrorCode::ProjectUnavailable => "The project list is unavailable.",
             TaskErrorCode::TasksFull => "The task list is full.",
             TaskErrorCode::TasksCorrupt => "The task list could not be read. The file was kept unchanged.",
@@ -74,10 +74,13 @@ pub enum Link {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ProjectLink {
     id: String,
+    /// The saved registration time, so the interface can match a task to a registration by both halves of its
+    /// identity (issue #98). It is a number the project list already shows, never a path.
+    registered_at_ms: u64,
     link: Link,
 }
 
-/// What a list shows of a task: everything but its description. The registration time stays in Rust.
+/// What a list shows of a task: everything but its description.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct TaskSummary {
@@ -159,9 +162,15 @@ impl Tasks {
         blocking(move || records::get(&dir, &id)).await
     }
 
-    pub async fn create(&self, project_id: String, title: String, description: String) -> Result<CreateOutcome, TaskError> {
+    pub async fn create(
+        &self,
+        project_id: String,
+        expected_registered_at_ms: u64,
+        title: String,
+        description: String,
+    ) -> Result<CreateOutcome, TaskError> {
         let dir = self.data_dir()?;
-        blocking(move || records::create(&dir, &project_id, &title, &description)).await
+        blocking(move || records::create(&dir, &project_id, expected_registered_at_ms, &title, &description)).await
     }
 
     pub async fn update(
@@ -198,7 +207,13 @@ impl Tasks {
         Err(TaskErrorCode::UnsupportedPlatform.into())
     }
 
-    pub async fn create(&self, _project_id: String, _title: String, _description: String) -> Result<CreateOutcome, TaskError> {
+    pub async fn create(
+        &self,
+        _project_id: String,
+        _expected_registered_at_ms: u64,
+        _title: String,
+        _description: String,
+    ) -> Result<CreateOutcome, TaskError> {
         Err(TaskErrorCode::UnsupportedPlatform.into())
     }
 

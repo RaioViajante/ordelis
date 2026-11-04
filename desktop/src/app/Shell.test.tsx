@@ -191,7 +191,7 @@ describe("controls", () => {
     const add = await screen.findByRole("button", { name: "Add a folder…" });
     expect(add).toHaveAttribute("aria-disabled", "true");
     expect(add).toHaveAccessibleDescription(/needs the desktop app/i);
-    expect(screen.getByRole("button", { name: "Draft task here" })).not.toHaveAttribute("aria-disabled");
+    expect(screen.getByRole("button", { name: "New task in this project" })).toHaveAccessibleDescription(/Saved tasks belong to your own folders/);
   });
 
   it("every disabled button on every page has a stated reason", async () => {

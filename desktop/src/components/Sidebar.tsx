@@ -1,22 +1,39 @@
 import { NAV_ICONS, PLUS_ICON, SEARCH_ICON } from "./icons";
+import { draftsText, useTaskCounts } from "./TaskBits";
 import { Button } from "./ui";
 import { useRegistry } from "../app/Registry";
 import { hrefFor, ROUTES, type Location, type RouteId } from "../app/routes";
 
 const label = (id: RouteId) => ROUTES.find((r) => r.id === id)!.label;
 
-function NavLink({ id, current }: { id: RouteId; current: RouteId | undefined }) {
+/** A quiet number of saved drafts, never an attention badge: a draft is not waiting on anyone. */
+function Drafts({ n }: { n: number | undefined }) {
+  if (!n) return null;
+  return (
+    <>
+      <span className="nav__n" aria-hidden="true">
+        {n}
+      </span>
+      <span className="sr">, {draftsText(n)}</span>
+    </>
+  );
+}
+
+function NavLink({ id, current, drafts }: { id: RouteId; current: RouteId | undefined; drafts?: number }) {
   const on = current === id;
   return (
     <a className={`nav${on ? " is-on" : ""}`} href={hrefFor(id)} aria-current={on ? "page" : undefined} data-tip={label(id)}>
       {NAV_ICONS[id]}
       <span className="nav__label">{label(id)}</span>
+      <Drafts n={drafts} />
     </a>
   );
 }
 
 export function Sidebar({ loc, current }: { loc: Location; current: RouteId | undefined }) {
   const { desktop, loading, projects } = useRegistry();
+  // Null while tasks are loading or unreadable: then no count is shown rather than a zero.
+  const counts = useTaskCounts();
 
   return (
     <nav className="side" aria-label="Main">
@@ -38,7 +55,7 @@ export function Sidebar({ loc, current }: { loc: Location; current: RouteId | un
       </Button>
 
       {ROUTES.filter((r) => r.id !== "settings").map((r) => (
-        <NavLink key={r.id} id={r.id} current={current} />
+        <NavLink key={r.id} id={r.id} current={current} drafts={r.id === "tasks" ? counts?.().drafts : undefined} />
       ))}
 
       <div className="side__projects">
@@ -53,6 +70,7 @@ export function Sidebar({ loc, current }: { loc: Location; current: RouteId | un
                 {p.name}
               </span>
               {p.status !== "available" && <span className="sr">, needs attention</span>}
+              <Drafts n={counts?.(p).drafts} />
             </a>
           );
         })}

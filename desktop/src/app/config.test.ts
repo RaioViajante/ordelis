@@ -155,7 +155,9 @@ describe("desktop trust boundary", () => {
     // The task commands take text, ids and a revision, never a path; create_task keeps the documented snake_case keys.
     expect(rust).toMatch(/async fn list_tasks\(tasks: State<'_, Tasks>\)/);
     expect(rust).toMatch(/async fn get_task\(id: String, tasks: State<'_, Tasks>\)/);
-    expect(rust).toMatch(/#\[tauri::command\(rename_all = "snake_case"\)\]\nasync fn create_task\(project_id: String, title: String, description: String, tasks: State<'_, Tasks>\)/);
+    expect(rust).toMatch(
+      /#\[tauri::command\(rename_all = "snake_case"\)\]\nasync fn create_task\(\s*project_id: String,\s*expected_registered_at_ms: u64,\s*title: String,\s*description: String,\s*tasks: State<'_, Tasks>,\s*\)/,
+    );
     expect(rust).toMatch(/async fn update_task\(\s*id: String,\s*revision: u64,\s*title: String,\s*description: String,\s*status: String,\s*tasks: State<'_, Tasks>,\s*\)/);
     const bridge = read("src-tauri/src/runtime_bridge.rs");
     expect(bridge).not.toMatch(/Command::|std::process|std::fs|std::env/);
@@ -390,7 +392,8 @@ describe("desktop trust boundary", () => {
   });
 
   // Issue #96: the task adapter is the only module that names a task command. No call takes a path: list_tasks takes
-  // nothing, get_task a task id, create_task a registration id and text, update_task an id, revision, text and status.
+  // nothing, get_task a task id, create_task a registration (id and registration time) and text, update_task an id,
+  // revision, text and status.
   it("names the task commands in one module only, with the reviewed arguments and no path", () => {
     const sources: string[] = [];
     const walk = (dir: string) => {
@@ -412,7 +415,7 @@ describe("desktop trust boundary", () => {
     expect(code.match(/\binvoke\(/g)).toHaveLength(4);
     expect(code).toMatch(/\binvoke\("list_tasks"\)/);
     expect(code).toMatch(/\binvoke\("get_task", \{ id \}\)/);
-    expect(code).toMatch(/\binvoke\("create_task", \{ project_id: projectId, title, description \}\)/);
+    expect(code).toMatch(/\binvoke\("create_task", \{ project_id: projectId, expected_registered_at_ms: registeredAtMs, title, description \}\)/);
     expect(code).toMatch(/\binvoke\("update_task", \{ id, revision, title, description, status \}\)/);
     expect(code).not.toMatch(/\b(?:list_projects|add_project|remove_project|reset_projects|get_runtime_status)\b/);
     expect(code).not.toMatch(/export[^\n]*\binvoke\b(?!\()|export \{|export \*/);

@@ -11,9 +11,9 @@ export const ROUTES = [
 
 export type RouteId = (typeof ROUTES)[number]["id"];
 
-/** A page. `task` and `preview` are sub-pages that are not primary destinations. */
+/** A page. `task` (a sample task preview) is a sub-page that is not a primary destination. */
 export interface Location {
-  page: RouteId | "task" | "preview";
+  page: RouteId | "task";
   /** Registration id or sample project name for `projects`, session id for `sessions`, `new` or a saved task id for
    * `tasks`, sample task id for `task`. */
   param?: string;
@@ -30,7 +30,7 @@ export function parseHash(hash: string): Location {
       param = raw;
     }
   }
-  if (id === "task" || id === "preview") return { page: id, param };
+  if (id === "task") return { page: id, param };
   const route = ROUTES.find((r) => r.id === id)?.id ?? "home";
   return { page: route, param: route === "projects" || route === "sessions" || route === "tasks" ? param : undefined };
 }
@@ -42,5 +42,5 @@ export function hrefFor(page: Location["page"], param?: string): string {
 /** The rail destination to mark as current; sub-pages belong to the page that opens them. */
 export function railRoute(loc: Location): RouteId | undefined {
   if (loc.page === "task") return undefined;
-  return loc.page === "preview" ? "home" : loc.page;
+  return loc.page;
 }

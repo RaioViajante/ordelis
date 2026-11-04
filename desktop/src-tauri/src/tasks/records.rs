@@ -90,7 +90,11 @@ impl Record {
             id: self.id.clone(),
             title: self.title.clone(),
             status: self.status,
-            project: ProjectLink { id: self.project.id.clone(), link: link(&self.project, registered) },
+            project: ProjectLink {
+                id: self.project.id.clone(),
+                registered_at_ms: self.project.registered_at_ms,
+                link: link(&self.project, registered),
+            },
             created_at_ms: self.created_at_ms,
             updated_at_ms: self.updated_at_ms,
             revision: self.revision,
@@ -137,12 +141,28 @@ pub(super) fn get(dir: &Path, id: &str) -> Result<GetOutcome, TaskErrorCode> {
 
 /// Everything is validated before any file is touched. The registry is read before the tasks lock is taken, and the
 /// registry's own lock is never taken, so the two locks are never held together.
-pub(super) fn create(dir: &Path, project_id: &str, title: &str, description: &str) -> Result<CreateOutcome, TaskErrorCode> {
-    if id_number('p', project_id).is_none() || !valid_text(title, description) {
+///
+/// The caller names the registration it chose, by id and registration time (issue #98). It must be in the registry
+/// snapshot read here, and that exact pair is what the task saves. Another registration that reuses the id after a
+/// reset is never substituted: the request is refused as `project_not_found`. If the registry changes after this
+/// read, the saved task can only become detached (`removed` or `replaced`), never linked to another registration.
+pub(super) fn create(
+    dir: &Path,
+    project_id: &str,
+    expected_registered_at_ms: u64,
+    title: &str,
+    description: &str,
+) -> Result<CreateOutcome, TaskErrorCode> {
+    if id_number('p', project_id).is_none() || expected_registered_at_ms > MAX_SAFE_INTEGER || !valid_text(title, description) {
         return Err(InvalidInput);
     }
     let registered = crate::projects::registrations(dir).ok_or(ProjectUnavailable)?;
-    let registered_at_ms = registered.iter().find(|(id, _)| id == project_id).map(|(_, at)| *at).ok_or(ProjectNotFound)?;
+    if !registered.iter().any(|(id, at)| id == project_id && *at == expected_registered_at_ms) {
+        return Err(ProjectNotFound);
+    }
+    // Test builds only: lets a test change the registry between this check and taking the tasks lock.
+    #[cfg(test)]
+    tests::after_project_check();
     let locked = lock(dir, true)?.ok_or(Unavailable)?;
     let mut stored = load(dir)?;
     // The task count is checked in commit, like the registry's record count.
@@ -152,7 +172,7 @@ pub(super) fn create(dir: &Path, project_id: &str, title: &str, description: &st
     let now = now_ms()?;
     let record = Record {
         id: format!("t{}", stored.next_id),
-        project: ProjectRef { id: project_id.to_string(), registered_at_ms },
+        project: ProjectRef { id: project_id.to_string(), registered_at_ms: expected_registered_at_ms },
         title: title.to_string(),
         description: description.to_string(),
         status: Status::Draft,
@@ -163,7 +183,8 @@ pub(super) fn create(dir: &Path, project_id: &str, title: &str, description: &st
     stored.next_id += 1;
     stored.tasks.push(record.clone());
     commit(&locked, &stored)?;
-    Ok(CreateOutcome::Created { task: record.task(&Some(registered)) })
+    // The link is computed from the registry as it is now, so a change made since the check is reported, not hidden.
+    Ok(CreateOutcome::Created { task: record.task(&crate::projects::registrations(dir)) })
 }
 
 /// Replaces the title, description and status of the task at `revision`. Any other revision is a conflict that
