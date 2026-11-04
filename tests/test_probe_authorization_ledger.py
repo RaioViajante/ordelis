@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import stat
 import subprocess
 import sys
 import tempfile
@@ -244,6 +245,89 @@ class PeerJournalTests(LedgerCase):
 
         with patch.object(ledger, "_private_file", side_effect=peer_finishes):
             ledger.consume_authorization(**self.values())
+
+    def lstat_reporting(self, target: Path, **fields):
+        """Patches os.lstat so that `target` reports the given st_mode, st_nlink and st_uid; other paths are real."""
+        real = os.lstat
+        index = {"st_mode": 0, "st_nlink": 3, "st_uid": 4}
+
+        def fake(path, *args, **kwargs):
+            found = real(path, *args, **kwargs)
+            if Path(path) != target:
+                return found
+            values = list(found[:10])
+            for name, value in fields.items():
+                values[index[name]] = value
+            return os.stat_result(values)
+
+        return patch.object(ledger.os, "lstat", side_effect=fake)
+
+    def assert_refused_without_spending(self, reason: str) -> dict[str, object]:
+        values = self.values()
+        with self.assertRaisesRegex(ledger.LedgerError, f"^{reason}$"):
+            ledger.consume_authorization(**values)
+        return values
+
+    # Issue #44: a peer committing in journal_mode=DELETE unlinks its journal. While the unlink is in progress, lstat
+    # can still find the name and report st_nlink == 0 (observed on Linux ext4 and macOS APFS). That journal is going
+    # away, exactly like one that has already vanished.
+    def test_peer_journal_whose_unlink_is_in_progress_is_not_an_error(self) -> None:
+        self.consume()
+        self.journal().touch(mode=0o600)
+        values = self.values()
+        with self.lstat_reporting(self.journal(), st_nlink=0):
+            ledger.consume_authorization(**values)
+        self.journal().unlink(missing_ok=True)  # our own commit reuses and removes the journal name
+        with self.assertRaisesRegex(ledger.LedgerError, "authorization_reused"):
+            ledger.consume_authorization(**values)
+
+    def test_an_unsafe_peer_journal_is_still_refused_and_spends_nothing(self) -> None:
+        self.consume()
+        journal = self.journal()
+        elsewhere = self.root / "elsewhere"
+
+        def hard_link() -> None:
+            journal.touch(mode=0o600)
+            os.link(journal, elsewhere)
+
+        def symlink() -> None:
+            elsewhere.touch(mode=0o600)
+            journal.symlink_to(elsewhere)
+
+        def broad_mode() -> None:
+            journal.touch(mode=0o600)
+            journal.chmod(0o644)
+
+        cases = {"a second link": hard_link, "a symlink": symlink, "mode 0644": broad_mode,
+                 "a FIFO": lambda: os.mkfifo(journal, 0o600)}
+        for name, plant in cases.items():
+            with self.subTest(name):
+                plant()
+                values = self.assert_refused_without_spending("authorization_ledger_journal_unsafe")
+                for path in (journal, elsewhere):
+                    if os.path.lexists(path):
+                        path.unlink()
+                ledger.consume_authorization(**values)  # nothing was spent by the refused attempt
+
+    def test_a_journal_without_links_is_refused_when_anything_else_is_wrong(self) -> None:
+        self.consume()
+        self.journal().touch(mode=0o600)
+        for name, fields in {
+            "mode 0644": {"st_mode": stat.S_IFREG | 0o644},
+            "a foreign owner": {"st_uid": os.geteuid() + 1},
+            "a FIFO": {"st_mode": stat.S_IFIFO | 0o600},
+            "a symlink": {"st_mode": stat.S_IFLNK | 0o600},
+        }.items():
+            with self.subTest(name), self.lstat_reporting(self.journal(), st_nlink=0, **fields):
+                self.assert_refused_without_spending("authorization_ledger_journal_unsafe")
+
+    def test_a_database_or_marker_without_links_is_still_refused(self) -> None:
+        self.consume()
+        database = ledger.database_path(self.state)
+        marker = database.with_name(ledger._INITIALIZED_NAME)
+        for path, reason in ((database, "authorization_ledger_unsafe"), (marker, "authorization_ledger_marker_unsafe")):
+            with self.subTest(path.name), self.lstat_reporting(path, st_nlink=0):
+                self.assert_refused_without_spending(reason)
 
     def test_connection_requests_full_synchronous_and_fullfsync_durability(self) -> None:
         self.consume()

@@ -70,11 +70,21 @@ def _private_directory(path: Path, label: str) -> os.stat_result:
     return found
 
 
+class _Unlinking(Exception):
+    """Cause of an `_unsafe` result for a file that is private but has no links left: its unlink is in progress."""
+
+
 def _private_file(path: Path, label: str) -> os.stat_result:
     try:
         found = os.lstat(path)
     except OSError as exc:
         _fail(f"{label}_unavailable", exc)
+    # While a file is being unlinked, lstat can still find its name yet report st_nlink == 0 (issue #44). That is
+    # unsafe for every caller too; the cause only lets the peer-journal check recognize a journal that is going away.
+    # Judged from this one lstat result alone: S_ISREG already excludes a symlink.
+    if (found.st_nlink == 0 and stat.S_ISREG(found.st_mode)
+            and found.st_uid == os.geteuid() and stat.S_IMODE(found.st_mode) == 0o600):
+        _fail(f"{label}_unsafe", _Unlinking())
     if not stat.S_ISREG(found.st_mode) or path.is_symlink() or found.st_nlink != 1:
         _fail(f"{label}_unsafe")
     if found.st_uid != os.geteuid() or stat.S_IMODE(found.st_mode) != 0o600:
@@ -329,8 +339,9 @@ def _operate(*, state_root: str, authorization_id: str, specification_sha256: st
             try:
                 _private_file(journal, "authorization_ledger_journal")
             except LedgerError as exc:
-                # A peer finishing its own transaction removes its journal; only a vanished journal is benign.
-                if not isinstance(exc.__cause__, FileNotFoundError):
+                # A peer finishing its own transaction removes its journal. Only a journal that has vanished, or is
+                # private but already without links because its unlink is in progress, is benign.
+                if not isinstance(exc.__cause__, (FileNotFoundError, _Unlinking)):
                     raise
         connection = _connect(database)
         if _INITIALIZED_NAME not in entries:
