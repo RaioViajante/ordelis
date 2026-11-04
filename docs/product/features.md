@@ -39,9 +39,9 @@ Nothing here is a release commitment, a delivery date or a version number.
 
 **Today**
 
-- *Prototype.* Home (with a task composer), Projects, Sessions and Context show invented sample data and say so. The Agents page lists agent CLIs but runs no check, so every capability reads "unknown". In Settings, the Runtime tab shows the runtime's answer to one fixed identity query in development builds, and an "unavailable" state in release builds. Pages switch with `⌘` or Ctrl plus 1 to 7: the interface accepts either key on every system and shows both labels, and does not detect the operating system. The Context page searches sample notes. The interface is dark only.
+- *Prototype.* Home's sample sections, Projects, Sessions and Context show invented sample data and say so. The Agents page lists agent CLIs but runs no check, so every capability reads "unknown". In Settings, the Runtime tab shows the runtime's answer to one fixed identity query in development builds, and an "unavailable" state in release builds. Pages switch with `⌘` or Ctrl plus 1 to 7: the interface accepts either key on every system and shows both labels, and does not detect the operating system. The Context page searches sample notes. Appearance follows the system's light or dark setting.
 - *Foundation.* A Rust registry that lets the user pick a folder through a native panel and remembers it, with list, add, remove and reset commands. macOS only. Projects, Home and the sidebar call it through one typed adapter ([#74](https://github.com/RaioViajante/ordelis/issues/74)); removal asks for confirmation, and the interface has no reset. The full flow in the real app is not yet verified. See [local project registration](../implementation/desktop-local-projects.md).
-- *Planned.* Git awareness, real task history, project configuration, light theme, and Windows and Linux conventions.
+- *Planned.* Git awareness, real task history, project configuration, and Windows and Linux conventions.
 
 **Constraints, security and open questions**
 
@@ -82,8 +82,8 @@ Providers do not expose the same capabilities. Ordelis does not assume they do.
 
 **Today**
 
-- *Working, desktop (native acceptance pending).* Saved tasks: Tasks, New task and the task detail create, list, edit, archive and restore a task with a title and description for a registered project, kept on this Mac. A saved task is a draft or archived and starts nothing; Draft plan stays disabled. Tested against the Rust store and, in the interface, against a mocked native layer. See [saved tasks](../implementation/desktop-tasks.md#interface).
-- *Prototype.* Home's task composer and a task preview page. "Preview task" changes nothing.
+- *Working, desktop (native acceptance pending).* Saved tasks: Home's composer, Tasks, New task and the task detail create, list, edit, archive and restore a task with a title and description for a registered project, kept on this Mac. Home lists recent drafts, each registered project lists its tasks, and the sidebar counts drafts. A saved task is a draft or archived and starts nothing; Draft plan stays disabled. Tested against the Rust store and, in the interface, against a mocked native layer. See [saved tasks](../implementation/desktop-tasks.md#interface).
+- *Prototype.* Read-only previews of sample tasks.
 - *Working, command line, added since the fork.* `mco context plan` produces one deterministic, private, non-dispatching plan from a task, selected context and policy, and reports unknown settings as unknown. It is not stage decomposition. See the [guide](../guides/private-execution-plan.md).
 - *Planned.* Everything else in this group.
 

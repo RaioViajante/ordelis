@@ -67,15 +67,15 @@ The export also draws macOS window controls and a top bar with an agent summary 
 | Screen | State |
 | --- | --- |
 | Foundations, Components | Tokens, sidebar, buttons, fields, switch, focus ring, count badge and disabled-with-reason controls are implemented, and so are the muted status pill, its glyphs, the segmented switch and the step header used by saved tasks. Chips, tabs, avatars and the diff and terminal styles are not |
-| Home (light and dark) | Appearance follows the system. The layout is still the legacy sample page, not the export's composer |
+| Home (light and dark) | Appearance follows the system. The composer saves a real task ([#98](https://github.com/RaioViajante/ordelis/issues/98)): Title and Description inside the composer card, then the project picker, Context and Draft plan disabled with their reasons, and **Save task** as the filled action. Below it, recent saved drafts (the board's lifecycle rows), Recent projects with draft counts, and the labelled sample sections. The greeting line, Start from, the agent and coordinator controls, Needs you, In progress and Today are not drawn: none has real data |
 | New task (prepare) | Implemented for saved tasks (`#/tasks/new`): the step header with Prepare current and the later steps marked not available, Project, Title and Description, **Save task** as the one filled action and **Draft plan** disabled with its reason, and an honest "What happens next" panel. See the deviations below |
 | Task detail | Implemented for saved tasks (`#/tasks/<id>`): breadcrumb, title with its status pill, the description as plain text, the project link and dates, Edit, Archive and Restore. The Plan, Activity, Changes, Terminal and Context tabs and the Agents, Limits and Usage inspector are not drawn: none of them exists |
 | Product states | The task lifecycle row and pill for Draft, used by the Tasks list (`#/tasks`), plus loading, empty and error states that say what is true. The other lifecycle states belong to execution and are not shown |
 | First launch, New task (review plan and approve), Execution, Terminal, Review, Dialogs | Not implemented. Where the app has an equivalent sample page it only picks up the new tokens |
-| Projects | Real local folders (add, list, status, confirmed removal) on the legacy layout, with the sample projects in a separate labelled group. Not yet rebuilt to the export, which shows repository, worktree and task data that does not exist |
+| Projects | Real local folders (add, list, status, confirmed removal) on the legacy layout, with the sample projects in a separate labelled group. A registered project shows its saved tasks with draft and archived counts and **New task in this project** (#98). Not yet rebuilt to the export, whose repository, worktree, context and activity data does not exist |
 | Sessions, Context, Agents, Settings | Legacy sample pages with the new tokens. Their layouts have not been rebuilt to the export |
 
-Search appears in the sidebar but is disabled with a stated reason, because search does not exist. Tasks and New Task are real (saved tasks only); the Tasks entry carries no sample count. Sample data stays labelled as sample data, and sample tasks appear only in Home's labelled sample section.
+Search appears in the sidebar but is disabled with a stated reason, because search does not exist. Tasks and New Task are real (saved tasks only). Tasks and each registered project carry a quiet count of saved drafts instead of the export's attention badge, and no count while tasks are loading or can't be read. Sample data stays labelled as sample data, and sample tasks appear only in Home's labelled sample section.
 
 Deliberate deviations for saved tasks ([#96](https://github.com/RaioViajante/ordelis/issues/96)):
 
@@ -83,6 +83,12 @@ Deliberate deviations for saved tasks ([#96](https://github.com/RaioViajante/ord
 - **Archived** is a state the boards do not draw. It uses the same muted pill as Draft, with a box glyph instead of the dashed circle.
 - **No execution surfaces.** The Composer's Start from, worktree, Context, Agents and default policy controls, and Task detail's tabs and inspector, are omitted rather than drawn over sample data.
 - **The Drafts and Archived switch** uses the board's segmented control as two toggle buttons (`aria-pressed`).
+
+Deliberate deviations for Home and projects ([#98](https://github.com/RaioViajante/ordelis/issues/98)):
+
+- **The Home composer has Title and Description fields,** with their byte counts, where the board has one goal field, and **Save task** is its filled action; Draft plan is shown disabled.
+- **Draft counts are quiet numbers,** not the board's attention badges, because a draft is not waiting on anyone.
+- **Recent drafts take the place of In progress.** Needs you and Today are omitted rather than filled with invented activity.
 
 ## Legacy aliases
 

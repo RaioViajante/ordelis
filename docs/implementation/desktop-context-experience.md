@@ -18,7 +18,7 @@ All entries live in `fixtures/mock.ts` (`MOCK_CONTEXT_ENTRIES`), are invented, c
 
 ## State
 
-`WorkspaceProvider` owns `contextIds`, `contextEntries`, `selectable`, `historyOffered`, `toggleContext` and `clearContext`. Home, Context and the draft Preview all read these, so there is one selection. The stored ids are always resolved against what is selectable *now* (sample data on, current project, history setting), so a stale id cannot surface. A project change clears the selection, hiding sample data invalidates it through the existing revision counter, and the draft is never touched. The search text and which excerpts are open are local to the Context page and are not shared or kept. Nothing is persisted.
+`WorkspaceProvider` owns `contextIds`, `contextEntries`, `selectable`, `historyOffered`, `toggleContext` and `clearContext`. Context reads these (Home's sample picker and the draft Preview were retired in [#98](https://github.com/RaioViajante/ordelis/issues/98)), so there is one selection. The stored ids are always resolved against what is selectable *now* (sample data on, current project, history setting), so a stale id cannot surface. A project change clears the selection, and hiding sample data invalidates it through the existing revision counter. The search text and which excerpts are open are local to the Context page and are not shared or kept. Nothing is persisted.
 
 ## Budget semantics (`app/contextBudget.ts`)
 
@@ -34,7 +34,7 @@ Counts are taken over the **shown excerpt**, which is what a selection would con
 
 Search ANDs whitespace-separated terms over title, location and text, case-insensitively, within the selected project. Results are grouped by source. Each row has a checkbox (notes and history), an `aria-expanded` "Excerpt / Close" toggle that opens the excerpt inline with provenance and counts, and a visible reason when it cannot be selected. Selection changes use the existing single polite `role="status"` region; the result count is a separate `aria-live="polite"` line. Empty states: sample data hidden, no project, no sample context for the project, and no results.
 
-Draft Preview lists the selected entries with estimated counts, states "estimated, not measured", and says that previewing does not dispatch a task and does not authorize access to a vault or a provider.
+The Selection panel lists the count of selected entries with estimated totals and states "estimated, not measured". It offers no task preview: a sample selection never reaches a saved task.
 
 ## Not done
 

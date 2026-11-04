@@ -1,6 +1,6 @@
 # Saved tasks (native store and commands)
 
-**Status:** implemented and tested; not yet verified in the packaged app. The Rust store and its four commands ([issue #89](https://github.com/RaioViajante/ordelis/issues/89)) are used by the Tasks interface ([issue #96](https://github.com/RaioViajante/ordelis/issues/96)), whose tests run against a mocked native layer. The approved design is [issue #86](https://github.com/RaioViajante/ordelis/issues/86) (D3.1), and the storage protocol it reuses is the [project registry's](desktop-local-projects.md#storage).
+**Status:** implemented and tested; not yet verified in the packaged app. The Rust store and its four commands ([issue #89](https://github.com/RaioViajante/ordelis/issues/89)) are used by the Tasks interface ([issue #96](https://github.com/RaioViajante/ordelis/issues/96)) and by Home's composer, the project pages and the sidebar ([issue #98](https://github.com/RaioViajante/ordelis/issues/98)), whose tests run against a mocked native layer. The approved design is [issue #86](https://github.com/RaioViajante/ordelis/issues/86) (D3.1), and the storage protocol it reuses is the [project registry's](desktop-local-projects.md#storage).
 **Scope:** what a saved task is, how it is stored and validated, the native commands, how a task stays tied to its project, and the interface that uses them.
 **Related:** [Local project registration](desktop-local-projects.md) · [Desktop architecture](desktop-architecture.md#ipc-authorization) · [Orchestration](../architecture/orchestration.md)
 
@@ -82,7 +82,7 @@ On every read the link is computed, never stored:
 | `replaced` | The ID names a registration with a different time. Only possible after `reset_projects` restarted IDs at `p1` |
 | `unknown` | The registry is corrupt, newer or unavailable |
 
-A task is never rebound. Removing a project leaves its tasks unchanged and `removed`. Re-adding the folder gives it a new ID, and a reused ID shows `replaced`. The registry's registration time travels only between Rust modules; responses carry only `{ id, link }`. Two registrations made in the same millisecond under a reused ID after a reset would be indistinguishable; that is the one residual case.
+A task is never rebound. Removing a project leaves its tasks unchanged and `removed`. Re-adding the folder gives it a new ID, and a reused ID shows `replaced`. Responses carry the saved identity and the computed link, `{ id, registered_at_ms, link }`, so the interface can match a task to a registration by both halves of its identity ([#98](https://github.com/RaioViajante/ordelis/issues/98); before that, responses carried only `{ id, link }`). The registration time is a number the project list already shows, never a path, and the stored schema did not change. Two registrations made in the same millisecond under a reused ID after a reset would be indistinguishable; that is the one residual case.
 
 ## Native commands
 
@@ -95,7 +95,7 @@ create_task({ project_id, title, description })       → { outcome: "created", 
 update_task({ id, revision, title, description, status })
                                                       → { outcome: "updated", task } | { outcome: "conflict", task } | { outcome: "not_found" }
 
-TaskSummary = { id, title, status, project: { id, link }, created_at_ms, updated_at_ms, revision }
+TaskSummary = { id, title, status, project: { id, registered_at_ms, link }, created_at_ms, updated_at_ms, revision }
 Task        = TaskSummary & { description }
 errors      = invalid_input | project_not_found | project_unavailable | tasks_full | tasks_corrupt
               | tasks_newer_version | tasks_unavailable | unsupported_platform
@@ -170,7 +170,7 @@ Tasks is `⌘2` in the sidebar, and New Task opens `#/tasks/new`.
   - It is read again after every create and update, conflicts included.
   - Only one change runs at a time, and a repeated submission shares the request in flight.
   - A failed list is an error state, never an empty list and never the previous list.
-  - In memory only, the composer's draft and each task's unsaved edits (with the revision they started from) survive moving around the app, but not a restart.
+  - In memory only, the composer's draft (shared by Home and New task, see below) and each task's unsaved edits (with the revision they started from) survive moving around the app, but not a restart.
 - **Text.** Titles and descriptions are rendered as text nodes only, with `dir="auto"` and `unicode-bidi: isolate`, and descriptions keep their line breaks (`white-space: pre-wrap`). There is no HTML or Markdown rendering and no automatic links. Task text is never logged. Limits are checked and explained before saving, never cut: a title is trimmed of surrounding spaces and nothing else.
 - **Conflicts.** An edit saves with the revision it started from. On `conflict` nothing is written and the latest saved version is shown, while the user's edits stay open beside it. The user can then save them over the newer version deliberately (with its revision), or discard them. Archive and Restore get the same treatment.
 - **Project links.** The registered project's name is shown while the link is `linked`; otherwise "Project removed", "Project changed" or "Project unavailable", with an explanation on the detail page. A task is never rebound, and no folder is read to work this out.
@@ -187,3 +187,23 @@ Tasks is `⌘2` in the sidebar, and New Task opens `#/tasks/new`.
   - the absence of execution states.
 
   Eight mutations of these behaviors were each caught.
+
+## Home, project pages and the sidebar
+
+[Issue #98](https://github.com/RaioViajante/ordelis/issues/98) (D3.1d) connects the rest of the desktop to the same saved tasks. No command, permission or stored field was added; the only native change is `registered_at_ms` in the responses (above).
+
+- **One composer.** Home's composer and New task (`#/tasks/new`) edit one in-memory draft held by `TasksProvider`: a project registration (`{ id, registered_at_ms }`), a title and a description.
+  - `useComposer` (`src/app/useComposer.ts`) gives both pages the same checks (Rust's, in UTF-8 bytes, never cutting text), the same reasons Save task is unavailable, and the same save through the provider's single write path.
+  - A second click, or a click on the other page, never reaches Rust while a save is in flight.
+  - A successful save clears the draft once and opens the new task, unless the user has already moved to another page; then they stay where they are and the live region says the task was saved.
+  - A failed save keeps every character.
+- **Leaving and discarding.**
+  - New task's secondary link is **Back to Tasks**, which leaves the draft as it is.
+  - **Discard draft…**, on both pages, appears once there is text and asks for confirmation (Cancel has focus, Escape cancels).
+  - The pages say the draft is shared, stays while moving around Ordelis, and is not kept when Ordelis quits.
+- **Home.** The composer (Title, Description, the project picker, Context and Draft plan disabled with their reasons, **Save task**), then the five most recently updated drafts with All tasks, then Recent projects with their draft counts. Loading, empty and error states say what is true; a task file that can't be read is an error with Try again, never an empty list.
+- **Ownership.** A task belongs to a registration only when the ID and `registered_at_ms` both match and Rust reported it `linked` (`belongsTo` in `tasks.ts`). A task saved for a removed registration, or for an earlier one whose ID was reused after a reset, counts under no project; it stays in Tasks with its link label. The list is read again whenever the project list changes, because each link is computed against it. No folder is read to count anything.
+- **Project pages.** A registered project shows a Tasks section with its drafts and archived tasks and their counts, and **New task in this project**, which puts that registration into the shared draft (keeping any text already written) and opens New task. The project is checked again before saving: a registration that was removed, or whose ID now names another folder, is no longer selected, and Save task asks for a project. Sample projects cannot hold saved tasks; their button is disabled with that reason.
+- **Sidebar.** Tasks and each registered project show a quiet number of saved drafts, with an accessible ", N drafts". It is not an attention badge, and there is no number while tasks are loading or can't be read, so a failure never reads as zero. `⌘1`–`⌘7` are unchanged and there is no `⌘N`.
+- **Sample draft preview retired.** Home's sample composer, its sample context picker, Context's **Preview task** and `#/preview` were removed: a sample selection or a sample project never reaches a saved task. The labelled sample task previews (`#/task/<id>`) and Context's sample selection remain.
+- **Tests.** `Tasks.test.tsx` adds creating from Home and finding the task under Tasks, Home, its project and the sidebar; Enter in the title; the shared draft and its single clearing; one request across both pages and no navigation after the user moved on; limits and failures keeping the text; Back to Tasks and confirmed discard; counts that exclude archived, removed and replaced tasks and follow archive and restore; project preselection and re-checking; a reused ID never taking over a draft; listing again after a project change; and corrupt storage leaving every count blank. `Workspace.test.tsx` covers the composer in a browser preview, where nothing can be saved. Ten of eleven mutations were caught. The survivor removes the composer's own in-flight check, which the provider's shared request still enforces (one `create_task`), as a provider test pins.
