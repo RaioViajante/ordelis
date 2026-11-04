@@ -135,44 +135,28 @@ describe("Context selection", () => {
   });
 });
 
-describe("Home, Context and Preview stay in sync", () => {
-  it("carries a Home selection into Context and a Context selection back to Home", async () => {
+describe("Context selection across pages", () => {
+  it("keeps a selection while the user moves around the app", async () => {
     const user = userEvent.setup();
     renderApp();
-    await user.click(screen.getByRole("button", { name: "Select context" }));
-    await user.click(screen.getByRole("checkbox", { name: /Security \/ Tokens/ }));
-    await openContext(user);
-    expect(pick("Security / Tokens")).toBeChecked();
-    await user.click(pick("Journal / October 2"));
-    await user.click(rail().getByRole("link", { name: "Home" }));
-    expect(screen.getByText("2 of 5 selected")).toBeInTheDocument();
-  });
-
-  it("shows the selection in the draft preview and says previewing authorizes nothing", async () => {
-    const user = userEvent.setup();
-    renderApp();
-    await user.type(screen.getByRole("textbox", { name: "Describe the task" }), "move auth");
     await openContext(user);
     await user.click(pick("Security / Tokens"));
-    await user.click(screen.getByRole("button", { name: "Preview task" }));
-    await screen.findByRole("heading", { level: 1, name: "Task preview" });
-    const list = screen.getByRole("list", { name: "Selected sample context" });
-    expect(within(list).getByText("Security / Tokens")).toBeInTheDocument();
-    expect(screen.getByText(/does not dispatch a task and does not authorize access to a vault or a provider/)).toBeInTheDocument();
-    expect(screen.getByText(/estimated, not measured/)).toBeInTheDocument();
-
-    await user.click(screen.getByRole("link", { name: "Change in Context" }));
-    expect(await screen.findByRole("heading", { level: 1, name: "Context" })).toBeInTheDocument();
+    await user.click(rail().getByRole("link", { name: "Home" }));
+    await openContext(user);
     expect(pick("Security / Tokens")).toBeChecked();
+    expect(screen.getByText("1 sample entry selected")).toBeInTheDocument();
   });
 
-  it("disables Preview task in Context until there is a draft, with the reason", async () => {
+  it("offers no task preview: a sample selection never reaches a saved task (#98)", async () => {
     const user = userEvent.setup();
     renderApp();
     await openContext(user);
-    const preview = screen.getByRole("button", { name: "Preview task" });
-    expect(preview).toHaveAttribute("aria-disabled", "true");
-    expect(preview).toHaveAccessibleDescription("Describe the task on Home first.");
+    await user.click(pick("Security / Tokens"));
+    expect(screen.queryByRole("button", { name: "Preview task" })).not.toBeInTheDocument();
+    expect(screen.getByText("sample · preview only")).toBeInTheDocument();
+    // The old draft preview route is gone; it opens Home.
+    window.location.hash = "#/preview";
+    expect(await screen.findByRole("heading", { level: 1, name: "What should we work on?" })).toBeInTheDocument();
   });
 
   it("clears the selection when the project changes, and not just in the view", async () => {
@@ -188,10 +172,9 @@ describe("Home, Context and Preview stay in sync", () => {
 });
 
 describe("sample mode off", () => {
-  it("hides the sample context, offers a way back and keeps the draft", async () => {
+  it("hides the sample context and offers a way back", async () => {
     const user = userEvent.setup();
     renderApp();
-    await user.type(screen.getByRole("textbox", { name: "Describe the task" }), "keep me");
     await openContext(user);
     await user.click(pick("Security / Tokens"));
     await user.click(screen.getByRole("button", { name: "Hide sample data" }));
@@ -201,8 +184,6 @@ describe("sample mode off", () => {
     await user.click(screen.getByRole("button", { name: "Show sample data" }));
     await user.selectOptions(screen.getByRole("combobox", { name: "Project" }), "atlas-api");
     expect(pick("Security / Tokens")).not.toBeChecked();
-    await user.click(rail().getByRole("link", { name: "Home" }));
-    expect(screen.getByRole("textbox", { name: "Describe the task" })).toHaveValue("keep me");
   });
 
   it("is empty when sample data starts hidden", async () => {

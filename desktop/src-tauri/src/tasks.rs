@@ -74,10 +74,13 @@ pub enum Link {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ProjectLink {
     id: String,
+    /// The saved registration time, so the interface can match a task to a registration by both halves of its
+    /// identity (issue #98). It is a number the project list already shows, never a path.
+    registered_at_ms: u64,
     link: Link,
 }
 
-/// What a list shows of a task: everything but its description. The registration time stays in Rust.
+/// What a list shows of a task: everything but its description.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct TaskSummary {

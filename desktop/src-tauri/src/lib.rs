@@ -780,14 +780,21 @@ mod tests {
         let app = app_with(Some(scratch.data()), picks(&scratch.folder()));
         let main = webview(&app, "main");
         assert_eq!(invoke(&main, "list_tasks", serde_json::json!({})), Ok(serde_json::json!({ "schema_version": 1, "tasks": [] })));
-        assert_eq!(invoke(&main, "add_project", serde_json::json!({})).unwrap()["project"]["id"], "p1");
+        let added = invoke(&main, "add_project", serde_json::json!({})).unwrap();
+        assert_eq!(added["project"]["id"], "p1");
 
         let created = invoke(&main, "create_task", serde_json::json!({ "project_id": "p1", "title": "Add rate limiting", "description": "Per IP." })).unwrap();
         assert_eq!(created["outcome"], "created");
         let task = &created["task"];
         assert_eq!(keys(task), ["created_at_ms", "description", "id", "project", "revision", "status", "title", "updated_at_ms"]);
         assert_eq!((task["id"].as_str(), task["status"].as_str(), task["revision"].as_u64()), (Some("t1"), Some("draft"), Some(1)));
-        assert_eq!(task["project"], serde_json::json!({ "id": "p1", "link": "linked" }), "no registration time and no path");
+        let registered_at_ms = &added["project"]["registered_at_ms"];
+        assert!(registered_at_ms.is_u64());
+        assert_eq!(
+            task["project"],
+            serde_json::json!({ "id": "p1", "registered_at_ms": registered_at_ms, "link": "linked" }),
+            "the registration's identity and no path"
+        );
         assert_eq!(invoke(&main, "get_task", serde_json::json!({ "id": "t1" })), Ok(serde_json::json!({ "outcome": "found", "task": task })));
 
         let update = serde_json::json!({ "id": "t1", "revision": 1, "title": "Add rate limiting", "description": "Per IP.", "status": "archived" });

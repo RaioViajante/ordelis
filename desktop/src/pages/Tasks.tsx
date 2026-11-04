@@ -1,15 +1,15 @@
 import { useState } from "react";
 import { taskErrorText, useTasks } from "../app/TaskState";
 import { hrefFor } from "../app/routes";
-import type { TaskStatus, TaskSummary } from "../app/tasks";
-import { TaskStatusPill, useProjectLabel, when } from "../components/TaskBits";
+import type { TaskStatus } from "../app/tasks";
+import { byUpdated, TaskRow } from "../components/TaskBits";
 import { Button, Empty } from "../components/ui";
 
 // Saved tasks only (issue #96). Sample tasks stay in Home's labelled sample section and are never listed here.
 export function Tasks() {
   const { desktop, loading, tasks, listError, reload } = useTasks();
   const [view, setView] = useState<TaskStatus>("draft");
-  const shown = tasks.filter((t) => t.status === view).sort((a, b) => b.updated_at_ms - a.updated_at_ms);
+  const shown = tasks.filter((t) => t.status === view).sort(byUpdated);
   const count = (status: TaskStatus) => tasks.filter((t) => t.status === status).length;
 
   return (
@@ -82,27 +82,5 @@ export function Tasks() {
         </section>
       )}
     </div>
-  );
-}
-
-function TaskRow({ task }: { task: TaskSummary }) {
-  const project = useProjectLabel(task.project);
-  return (
-    <li>
-      <a className="trow" href={hrefFor("tasks", task.id)}>
-        <i className={`g ${task.status === "draft" ? "g-wait" : "g-arch"} trow__g`} aria-hidden="true" />
-        <span className="trow__t bidi" dir="auto">
-          {task.title}
-        </span>
-        <span className={`trow__p meta${project.problem ? " trow__p--warn" : ""}`}>
-          <span className="bidi" dir="auto">
-            {project.text}
-          </span>
-          {" · "}
-          <span>updated {when(task.updated_at_ms)}</span>
-        </span>
-        <TaskStatusPill status={task.status} />
-      </a>
-    </li>
   );
 }

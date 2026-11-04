@@ -159,7 +159,7 @@ fn a_created_task_is_a_draft_at_revision_1_and_is_read_back_from_disk() {
     let task = created(create(&scratch.data(), "p1", "Add rate limiting", "Per IP.\nKeep the health check exempt."));
     assert_eq!((task.summary.id.as_str(), task.summary.status, task.summary.revision), ("t1", Status::Draft, 1));
     assert_eq!(task.summary.created_at_ms, task.summary.updated_at_ms);
-    assert_eq!(task.summary.project, ProjectLink { id: "p1".into(), link: Link::Linked });
+    assert_eq!(task.summary.project, ProjectLink { id: "p1".into(), registered_at_ms: 100, link: Link::Linked });
     assert_eq!(task.description, "Per IP.\nKeep the health check exempt.");
 
     // Nothing is cached: every call reads the file again, as after a restart.
@@ -191,9 +191,9 @@ fn the_saved_file_holds_exactly_the_approved_fields_and_no_folder_information() 
     assert_eq!(record["project"], json!({ "id": "p1", "registered_at_ms": 100 }));
     let text = String::from_utf8(scratch.tasks()).unwrap();
     assert!(!text.contains("ordelis-test-nonexistent"), "no registry path is copied into a task");
-    // The response never carries the registration time either.
+    // The response carries the saved identity and the link computed now, and nothing about the folder.
     let response = serde_json::to_value(found(&scratch.data(), "t1")).unwrap();
-    assert_eq!(response["project"], json!({ "id": "p1", "link": "linked" }));
+    assert_eq!(response["project"], json!({ "id": "p1", "registered_at_ms": 100, "link": "linked" }));
 }
 
 #[test]
@@ -440,7 +440,7 @@ fn project_links_are_linked_removed_replaced_or_unknown_and_never_rebound() {
     // The registry was reset and p1 was given to a different folder: the old task is not rebound to it.
     scratch.register(&[("p1", 300)]);
     assert_eq!(links(&scratch.data()), at(Link::Replaced, Link::Removed));
-    assert_eq!(found(&scratch.data(), "t1").summary.project, ProjectLink { id: "p1".into(), link: Link::Replaced });
+    assert_eq!(found(&scratch.data(), "t1").summary.project, ProjectLink { id: "p1".into(), registered_at_ms: 100, link: Link::Replaced });
     // An update keeps the original identity, so the task stays replaced.
     let task = updated(update(&scratch.data(), "t1", 1, "First", "", "archived"));
     assert_eq!(task.summary.project.link, Link::Replaced);
@@ -485,7 +485,7 @@ fn a_task_can_be_read_updated_archived_and_restored_after_its_project_is_removed
     let archived = updated(update(&scratch.data(), "t1", 1, "Title", "Body", "archived"));
     let restored = updated(update(&scratch.data(), "t1", 2, "Title", "Body", "draft"));
     assert_eq!((archived.summary.status, restored.summary.status), (Status::Archived, Status::Draft));
-    assert_eq!(restored.summary.project, ProjectLink { id: "p1".into(), link: Link::Removed });
+    assert_eq!(restored.summary.project, ProjectLink { id: "p1".into(), registered_at_ms: 100, link: Link::Removed });
 }
 
 // 4. Updates and revisions

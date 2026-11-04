@@ -25,12 +25,13 @@ export type TaskStatus = (typeof TASK_STATUSES)[number];
 export const LINKS = ["linked", "removed", "replaced", "unknown"] as const;
 export type ProjectLink = (typeof LINKS)[number];
 
-// Mirrors TaskSummary and Task in src-tauri/src/tasks.rs. The registration time stays in Rust.
+// Mirrors TaskSummary and Task in src-tauri/src/tasks.rs. `project` is the registration the task was saved for (its
+// id and registration time, never a path) and how it relates to the registry now.
 export interface TaskSummary {
   id: string;
   title: string;
   status: TaskStatus;
-  project: { id: string; link: ProjectLink };
+  project: { id: string; registered_at_ms: number; link: ProjectLink };
   created_at_ms: number;
   updated_at_ms: number;
   revision: number;
@@ -82,6 +83,14 @@ export function textProblem(title: string, description: string): TextProblem | n
   if (hasControl(description, "\n\t")) return "description_control";
   if (bytes(title) + 2 + bytes(description) > MAX_TEXT_BYTES) return "too_long";
   return null;
+}
+
+/**
+ * Whether a task belongs to this registration: the same id and registration time, and Rust found that registration
+ * when it listed the task. A task saved for an earlier registration with the same id is never counted here.
+ */
+export function belongsTo(task: TaskSummary, project: { id: string; registered_at_ms: number }): boolean {
+  return task.project.link === "linked" && task.project.id === project.id && task.project.registered_at_ms === project.registered_at_ms;
 }
 
 export function inDesktop(): boolean {
@@ -154,9 +163,10 @@ function readSummaryFields(raw: Obj): boolean {
     title.length > 0 &&
     bytes(title) <= MAX_TITLE_BYTES &&
     TASK_STATUSES.some((s) => s === status) &&
-    exact(project, ["id", "link"]) &&
+    exact(project, ["id", "registered_at_ms", "link"]) &&
     typeof project.id === "string" &&
     PROJECT_ID.test(project.id) &&
+    time(project.registered_at_ms) &&
     LINKS.some((l) => l === project.link) &&
     time(created_at_ms) &&
     time(updated_at_ms) &&

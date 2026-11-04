@@ -90,7 +90,11 @@ impl Record {
             id: self.id.clone(),
             title: self.title.clone(),
             status: self.status,
-            project: ProjectLink { id: self.project.id.clone(), link: link(&self.project, registered) },
+            project: ProjectLink {
+                id: self.project.id.clone(),
+                registered_at_ms: self.project.registered_at_ms,
+                link: link(&self.project, registered),
+            },
             created_at_ms: self.created_at_ms,
             updated_at_ms: self.updated_at_ms,
             revision: self.revision,

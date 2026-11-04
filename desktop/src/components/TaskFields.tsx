@@ -1,5 +1,6 @@
-// Title and description fields for New task and Edit (issue #96). Limits are Rust's, counted in UTF-8 bytes, and the
-// text is never cut: a problem is explained and the user decides what to change.
+// Title and description fields for Home's composer, New task and Edit (issues #96 and #98). Limits are Rust's, counted
+// in UTF-8 bytes, and the text is never cut: a problem is explained and the user decides what to change. The composer
+// variant sits inside Home's composer card, so the description has no card of its own.
 import { useId } from "react";
 import { problemText } from "../app/TaskState";
 import { bytes, MAX_TEXT_BYTES, MAX_TITLE_BYTES, type TextProblem } from "../app/tasks";
@@ -14,6 +15,7 @@ export function TaskFields({
   onDescription,
   problem,
   readOnly,
+  variant = "page",
 }: {
   title: string;
   description: string;
@@ -22,6 +24,7 @@ export function TaskFields({
   /** Shown once the user has tried to save. */
   problem: TextProblem | null;
   readOnly?: boolean;
+  variant?: "page" | "composer";
 }) {
   const id = useId();
   const titleBytes = bytes(title.trim());
@@ -30,10 +33,26 @@ export function TaskFields({
   const room = MAX_TEXT_BYTES - 2;
   const titleProblem = problem && TITLE_PROBLEMS.includes(problem) ? problem : null;
   const textProblem = problem && !TITLE_PROBLEMS.includes(problem) ? problem : null;
+  const composer = variant === "composer";
+  const textarea = (
+    <textarea
+      id={`${id}-description`}
+      className={composer ? "ask__description" : "tk-description"}
+      dir="auto"
+      rows={composer ? 3 : 6}
+      value={description}
+      readOnly={readOnly}
+      onChange={(e) => onDescription(e.target.value)}
+      placeholder={composer ? "Describe the outcome and any constraints…" : undefined}
+      aria-invalid={textProblem ? true : undefined}
+      aria-describedby={textProblem ? `${id}-description-problem` : composer ? undefined : `${id}-description-help`}
+      spellCheck
+    />
+  );
 
   return (
     <>
-      <div className="tk-field">
+      <div className={composer ? "tk-field ask__field" : "tk-field"}>
         <label className="lb" htmlFor={`${id}-title`}>
           Title
           <span className={`cap${titleBytes > MAX_TITLE_BYTES ? " cap--warn" : ""}`}>
@@ -42,9 +61,10 @@ export function TaskFields({
         </label>
         <input
           id={`${id}-title`}
-          className="field tk-title"
+          className={composer ? "ask__title" : "field tk-title"}
           dir="auto"
           value={title}
+          placeholder={composer ? "What should be done?" : undefined}
           readOnly={readOnly}
           onChange={(e) => onTitle(e.target.value)}
           aria-invalid={titleProblem ? true : undefined}
@@ -58,32 +78,19 @@ export function TaskFields({
           </p>
         )}
       </div>
-      <div className="tk-field">
+      <div className={composer ? "tk-field ask__field" : "tk-field"}>
         <label className="lb" htmlFor={`${id}-description`}>
           Description
           <span className={`cap${total > room ? " cap--warn" : ""}`}>
             {fmt(total)} / {fmt(room)} bytes with the title
           </span>
         </label>
-        <div className="card tk-card">
-          <textarea
-            id={`${id}-description`}
-            className="tk-description"
-            dir="auto"
-            rows={6}
-            value={description}
-            readOnly={readOnly}
-            onChange={(e) => onDescription(e.target.value)}
-            aria-invalid={textProblem ? true : undefined}
-            aria-describedby={textProblem ? `${id}-description-problem` : `${id}-description-help`}
-            spellCheck
-          />
-        </div>
+        {composer ? textarea : <div className="card tk-card">{textarea}</div>}
         {textProblem ? (
           <p id={`${id}-description-problem`} className="tk-problem" role="alert">
             {problemText(textProblem)}
           </p>
-        ) : (
+        ) : composer ? null : (
           <p id={`${id}-description-help`} className="cap">
             Describe the outcome and any constraints. It is saved as you wrote it, line breaks included.
           </p>

@@ -1,6 +1,5 @@
 import { useState } from "react";
 import { countText, EXAMPLE_BUDGET_EST_TOKENS, EXCERPT_LIMIT_CHARS, excerptOf, fmt, sumCounts } from "../app/contextBudget";
-import { type Location } from "../app/routes";
 import { useSampleData } from "../app/SampleData";
 import { useWorkspace } from "../app/Workspace";
 import { entriesFor, isSelectable, MOCK_PROJECTS, SOURCE_LABEL, type ContextEntry, type ContextSource } from "../fixtures/mock";
@@ -26,10 +25,10 @@ function matches(e: ContextEntry, query: string) {
     .every((term) => hay.includes(term));
 }
 
-export function Context({ go }: { go: (page: Location["page"], param?: string) => void }) {
+export function Context() {
   const { on, setOn } = useSampleData();
   const {
-    project, selectProject, draft, selectable, contextEntries, toggleContext, clearContext, historyOffered, setHistoryOffered,
+    project, selectProject, selectable, contextEntries, toggleContext, clearContext, historyOffered, setHistoryOffered,
   } = useWorkspace();
   const [query, setQuery] = useState("");
   const [open, setOpen] = useState<string[]>([]);
@@ -38,13 +37,6 @@ export function Context({ go }: { go: (page: Location["page"], param?: string) =
   const shown = entries.filter((e) => (historyOffered || e.source !== "history") && matches(e, query));
   const total = sumCounts(contextEntries.map((e) => countText(excerptOf(e.text).shown)));
   const count = (s: ContextSource) => entries.filter((e) => e.source === s).length;
-  const blocker = !on
-    ? "Sample data is hidden."
-    : !project
-      ? "Choose a project first."
-      : !draft.trim()
-        ? "Describe the task on Home first."
-        : undefined;
 
   return (
     <div className="col col--1300">
@@ -278,9 +270,6 @@ export function Context({ go }: { go: (page: Location["page"], param?: string) =
                   reason={contextEntries.length ? undefined : "Nothing is selected."}
                 >
                   Clear selection
-                </Button>
-                <Button small variant="go" reason={blocker} onClick={() => go("preview")}>
-                  Preview task
                 </Button>
               </div>
             </section>

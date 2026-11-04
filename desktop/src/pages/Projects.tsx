@@ -3,9 +3,12 @@ import { ConfirmDialog } from "../components/ConfirmDialog";
 import { describeRemove, errorText, useAddFolder, useRegistry } from "../app/Registry";
 import type { Project, ProjectStatus } from "../app/projects";
 import { useSampleData } from "../app/SampleData";
+import { taskErrorText, useTasks } from "../app/TaskState";
 import { hrefFor, type Location } from "../app/routes";
+import { belongsTo } from "../app/tasks";
 import { useWorkspace } from "../app/Workspace";
 import { findProject, MOCK_PROJECTS, type MockProject } from "../fixtures/mock";
+import { byUpdated, draftsText, TaskRow, useTaskCounts } from "../components/TaskBits";
 import { Button, Empty, Evidence, SecHead } from "../components/ui";
 
 type Go = (page: Location["page"], param?: string) => void;
@@ -184,9 +187,10 @@ export function Projects({ param, go }: { param?: string; go: Go }) {
               blocked={reg.adding || reg.removing !== null || reg.listError !== null}
               removeRef={removeRef}
               onRemove={() => setConfirming(curReg)}
+              go={go}
             />
           ) : curSample ? (
-            <SampleDetail cur={curSample} go={go} />
+            <SampleDetail cur={curSample} />
           ) : (
             <Empty title="No project selected" why="choose one from the list to see its details">
               Pick a folder or a sample project on the left.
@@ -225,13 +229,24 @@ function RegisteredDetail({
   blocked,
   removeRef,
   onRemove,
+  go,
 }: {
   p: Project;
   removing: boolean;
   blocked: boolean;
   removeRef: React.RefObject<HTMLButtonElement | null>;
   onRemove: () => void;
+  go: Go;
 }) {
+  const tasks = useTasks();
+  const { announce } = useWorkspace();
+  // Preselects this registration in the shared draft; the text already written is kept, and New task checks the
+  // project again before saving.
+  function newTaskHere() {
+    tasks.setDraft({ ...tasks.draft, project: { id: p.id, registered_at_ms: p.registered_at_ms } });
+    announce(`New task in ${p.name}.`);
+    go("tasks", "new");
+  }
   return (
     <section className="flex min-w-0 flex-col gap-8" aria-label={`${p.name} details`}>
       <div className="flex flex-wrap items-baseline gap-4">
@@ -239,6 +254,9 @@ function RegisteredDetail({
           {p.name}
         </h2>
         <span className="sp" />
+        <Button small variant="go" onClick={newTaskHere} reason={tasks.saving ? "Saving…" : undefined}>
+          New task in this project
+        </Button>
         <button
           type="button"
           ref={removeRef}
@@ -264,6 +282,7 @@ function RegisteredDetail({
         <dd className="!font-sans">{registeredDate(p.registered_at_ms)}</dd>
       </dl>
       {p.status !== "available" && <p className="notice">{STATUS_HELP[p.status]}</p>}
+      <ProjectTasks p={p} />
       <p className="hint max-w-[640px]">
         Registered only. Ordelis has not read this folder, and Git, terminals and agents are not connected to it. Removing the
         entry never deletes or changes anything inside the folder.
@@ -272,15 +291,66 @@ function RegisteredDetail({
   );
 }
 
-function SampleDetail({ cur, go }: { cur: MockProject; go: Go }) {
+// The tasks saved for this registration: same id and registration time, and linked when Rust listed them. Tasks saved
+// for a removed or earlier registration with this id are not shown or counted here (they stay under Tasks).
+function ProjectTasks({ p }: { p: Project }) {
+  const { tasks, listError, loading, reload } = useTasks();
+  const counts = useTaskCounts();
+  const mine = tasks.filter((t) => belongsTo(t, p)).sort(byUpdated);
+  const drafts = mine.filter((t) => t.status === "draft");
+  const archived = mine.filter((t) => t.status === "archived");
+  const c = counts?.(p);
+  return (
+    <section aria-labelledby={`${p.id}-tasks`} className="flex flex-col gap-3">
+      <SecHead
+        title={<span id={`${p.id}-tasks`}>Tasks</span>}
+        meta={c ? `${draftsText(c.drafts)}${c.archived ? ` · ${c.archived} archived` : ""}` : undefined}
+      />
+      {listError ? (
+        <div className="notice" role="alert">
+          <p>{taskErrorText(listError)}</p>
+          <span className="sp" />
+          <Button small onClick={() => void reload()}>
+            Try again
+          </Button>
+        </div>
+      ) : loading ? (
+        <p className="meta" role="status">
+          Loading tasks…
+        </p>
+      ) : mine.length === 0 ? (
+        <p className="meta">No tasks saved for this project yet.</p>
+      ) : (
+        <>
+          {drafts.length > 0 && (
+            <ul className="tlist card" aria-label={`Drafts in ${p.name}`}>
+              {drafts.map((t) => (
+                <TaskRow key={t.id} task={t} inProject />
+              ))}
+            </ul>
+          )}
+          {archived.length > 0 && (
+            <ul className="tlist card" aria-label={`Archived tasks in ${p.name}`}>
+              {archived.map((t) => (
+                <TaskRow key={t.id} task={t} inProject />
+              ))}
+            </ul>
+          )}
+        </>
+      )}
+    </section>
+  );
+}
+
+function SampleDetail({ cur }: { cur: MockProject }) {
   return (
     <section className="flex min-w-0 flex-col gap-8">
       <div className="flex flex-wrap items-baseline gap-4">
         <h2 className="h2-lg">{cur.name}</h2>
         <span className="mono meta">{cur.path}</span>
         <span className="sp" />
-        <Button small variant="go" onClick={() => go("home")}>
-          Draft task here
+        <Button small variant="go" reason="Saved tasks belong to your own folders. Add a folder to write a task for it.">
+          New task in this project
         </Button>
       </div>
 

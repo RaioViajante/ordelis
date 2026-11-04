@@ -929,6 +929,48 @@
     gap: 10px;
     margin-left: auto;
   }
+  /* The composer's fields (issue #98): small labels with their byte counts, then the text. */
+  .ask__field {
+    padding: 12px 16px 0;
+  }
+  .ask__field .lb {
+    margin-bottom: 4px;
+  }
+  .ask__title {
+    display: block;
+    width: 100%;
+    border: 0;
+    background: transparent;
+    color: var(--ink1);
+    font: 500 17px/26px var(--font-sans);
+  }
+  .ask .ask__description {
+    min-height: 84px;
+    padding: 0 0 12px;
+    font: 400 15px/24px var(--font-sans);
+  }
+  .ask__title::placeholder,
+  .ask .ask__description::placeholder {
+    color: var(--ink3);
+  }
+  .ask__title:focus-visible,
+  .ask .ask__description:focus-visible {
+    outline: none;
+  }
+  .ask__field:focus-within .lb {
+    color: var(--ink1);
+  }
+  /* The text fields draw no outline of their own, so the card shows the focus ring while one of them has focus. */
+  .ask:has(.ask__field :focus-visible) {
+    outline: 2px solid var(--brand);
+    outline-offset: 2px;
+  }
+  .ask__problems:empty {
+    display: none;
+  }
+  .ask__problems {
+    padding: 0 16px 10px;
+  }
   .wait {
     display: flex;
     gap: 14px;
@@ -1537,25 +1579,6 @@
   a.task:focus-visible {
     outline: 2px solid var(--brand);
     outline-offset: -2px;
-  }
-  .ctx-pick {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    margin: 0;
-    padding: 10px 14px 12px;
-    border: 0;
-    border-top: 1px solid var(--line-100);
-  }
-  .ctx-pick label {
-    display: flex;
-    gap: 10px;
-    align-items: center;
-    padding: 6px 0;
-    font-size: 15px;
-  }
-  .ctx-pick input {
-    accent-color: var(--pri);
   }
   .ctx-proj {
     display: flex;

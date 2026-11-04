@@ -14,107 +14,81 @@ function renderApp(sample = true) {
 }
 
 const rail = () => within(screen.getByRole("navigation", { name: "Main" }));
-const draftBox = () => screen.getByRole("textbox", { name: "Describe the task" });
+const home = () => within(screen.getByRole("form", { name: "New task" }));
+const titleBox = () => home().getByRole("textbox", { name: /^Title/ });
+const descriptionBox = () => home().getByRole("textbox", { name: /^Description/ });
 const projectSelect = () => screen.getByRole("combobox", { name: "Project" });
 const status = () => screen.getByRole("status");
 
-describe("Home composer", () => {
-  it("selects a project and announces it", async () => {
-    const user = userEvent.setup();
+// These run as a browser preview: no native layer, so nothing can be saved. Saving is covered in Tasks.test.tsx.
+describe("Home composer in a browser preview", () => {
+  it("is the real task composer, and cannot save or start anything here", async () => {
     renderApp();
-    expect(projectSelect()).toHaveValue("atlas-api");
-    await user.selectOptions(projectSelect(), "mochi-web");
-    expect(projectSelect()).toHaveValue("mochi-web");
-    expect(status()).toHaveTextContent("Project mochi-web selected");
+    expect(screen.getByRole("heading", { level: 1, name: "What should we work on?" })).toBeInTheDocument();
+    expect(projectSelect()).toBeDisabled();
+    expect(projectSelect()).toHaveDisplayValue("No projects in the browser preview");
+    const save = home().getByRole("button", { name: "Save task" });
+    expect(save).toHaveAttribute("aria-disabled", "true");
+    expect(save).toHaveAccessibleDescription("Saving tasks needs the desktop app.");
+    expect(home().getByRole("button", { name: "Draft plan" })).toHaveAccessibleDescription(/Planning isn't available yet/);
+    expect(home().getByRole("button", { name: "Context" })).toHaveAccessibleDescription(/isn't available yet/);
+    expect(screen.queryByRole("button", { name: /Preview task|Select context|^(start|run)/i })).not.toBeInTheDocument();
+    // No saved tasks can exist here, so Home lists none and counts none.
+    expect(screen.queryByRole("heading", { name: "Drafts" })).not.toBeInTheDocument();
   });
 
-  it("edits and explicitly clears the draft", async () => {
+  it("keeps the draft across in-app navigation and shares it with New task", async () => {
     const user = userEvent.setup();
     renderApp();
-    expect(screen.queryByRole("button", { name: "Clear draft" })).not.toBeInTheDocument();
-    await user.type(draftBox(), "fix the login bug");
-    await user.click(screen.getByRole("button", { name: "Clear draft" }));
-    expect(draftBox()).toHaveValue("");
-    expect(status()).toHaveTextContent("Draft cleared");
+    await user.type(titleBox(), "Unfinished");
+    await user.type(descriptionBox(), "line one{Enter}line two");
+    await user.click(rail().getByRole("link", { name: "Settings" }));
+    await screen.findByRole("heading", { level: 1, name: "Settings" });
+    await user.click(rail().getByRole("link", { name: "New Task" }));
+    const form = within(await screen.findByRole("form", { name: "Prepare task" }));
+    expect(form.getByRole("textbox", { name: /^Title/ })).toHaveValue("Unfinished");
+    await user.type(form.getByRole("textbox", { name: /^Description/ }), " and three");
+    await user.click(rail().getByRole("link", { name: "Home" }));
+    expect(titleBox()).toHaveValue("Unfinished");
+    expect(descriptionBox()).toHaveValue("line one\nline two and three");
+  });
+
+  it("discards the draft only after the user confirms, and says so", async () => {
+    const user = userEvent.setup();
+    renderApp();
+    expect(home().queryByRole("button", { name: "Discard draft…" })).not.toBeInTheDocument();
+    await user.type(titleBox(), "Keep me");
+    await user.click(home().getByRole("button", { name: "Discard draft…" }));
+    const dialog = screen.getByRole("alertdialog", { name: "Discard this draft?" });
+    expect(within(dialog).getByRole("button", { name: "Cancel" })).toHaveFocus();
+    await user.keyboard("{Escape}");
+    expect(titleBox()).toHaveValue("Keep me");
+    expect(home().getByRole("button", { name: "Discard draft…" })).toHaveFocus();
+
+    await user.click(home().getByRole("button", { name: "Discard draft…" }));
+    await user.click(within(screen.getByRole("alertdialog")).getByRole("button", { name: "Discard" }));
+    expect(titleBox()).toHaveValue("");
+    expect(titleBox()).toHaveFocus();
+    expect(status()).toHaveTextContent("Draft discarded.");
   });
 
   it("updates the live region when the same action is announced twice", async () => {
     const user = userEvent.setup();
     renderApp();
-    await user.type(draftBox(), "first draft");
-    await user.click(screen.getByRole("button", { name: "Clear draft" }));
+    const discard = async (text: string) => {
+      await user.type(titleBox(), text);
+      await user.click(home().getByRole("button", { name: "Discard draft…" }));
+      await user.click(within(screen.getByRole("alertdialog")).getByRole("button", { name: "Discard" }));
+    };
+    await discard("first");
     const mutations: MutationRecord[] = [];
     const observer = new MutationObserver((records) => mutations.push(...records));
     observer.observe(status(), { childList: true, subtree: true, characterData: true });
-
-    await user.type(draftBox(), "second draft");
-    await user.click(screen.getByRole("button", { name: "Clear draft" }));
+    await discard("second");
     await Promise.resolve();
     observer.disconnect();
-
-    expect(status()).toHaveTextContent("Draft cleared");
+    expect(status()).toHaveTextContent("Draft discarded.");
     expect(mutations.length).toBeGreaterThan(0);
-  });
-
-  it("keeps the draft and project across in-app navigation", async () => {
-    const user = userEvent.setup();
-    renderApp();
-    await user.type(draftBox(), "unfinished thought");
-    await user.selectOptions(projectSelect(), "example-project");
-    await user.click(rail().getByRole("link", { name: "Settings" }));
-    await screen.findByRole("heading", { level: 1, name: "Settings" });
-    await user.click(rail().getByRole("link", { name: "Home" }));
-    expect(draftBox()).toHaveValue("unfinished thought");
-    expect(projectSelect()).toHaveValue("example-project");
-  });
-
-  it("selects sample context notes, inertly, and resets them on project change", async () => {
-    const user = userEvent.setup();
-    renderApp();
-    const toggle = screen.getByRole("button", { name: "Select context" });
-    expect(toggle).toHaveAttribute("aria-expanded", "false");
-    await user.click(toggle);
-    expect(toggle).toHaveAttribute("aria-expanded", "true");
-    const group = screen.getByRole("group", { name: /Sample context for atlas-api/ });
-    await user.click(within(group).getByRole("checkbox", { name: /Security \/ Tokens/ }));
-    expect(within(group).getByRole("checkbox", { name: /Security \/ Tokens/ })).toBeChecked();
-    expect(screen.getByText("1 of 5 selected")).toBeInTheDocument();
-    expect(status()).toHaveTextContent("Security / Tokens added to sample context");
-    await user.selectOptions(projectSelect(), "example-project");
-    expect(screen.queryByRole("group", { name: /Sample context/ })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Select context" })).toHaveAccessibleDescription(/no sample context/i);
-  });
-
-  it("offers only a preview action, disabled with a reason until there is a draft", async () => {
-    const user = userEvent.setup();
-    renderApp();
-    expect(screen.queryByRole("button", { name: /^(start|run)/i })).not.toBeInTheDocument();
-    const preview = screen.getByRole("button", { name: "Preview task" });
-    expect(preview).toHaveAttribute("aria-disabled", "true");
-    expect(preview).toHaveAccessibleDescription("Describe the task first.");
-    await user.click(preview);
-    expect(screen.getByRole("heading", { level: 1, name: "What should we work on?" })).toBeInTheDocument();
-
-    await user.type(draftBox(), "line one{Enter}line two");
-    await user.click(screen.getByRole("button", { name: "Preview task" }));
-    expect(await screen.findByRole("heading", { level: 1, name: "Task preview" })).toBeInTheDocument();
-    expect(screen.getByText(/line one\s+line two/)).toBeInTheDocument();
-    expect(screen.getByRole("note", { name: "Sample data notice" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Plan with agents" })).toHaveAttribute("aria-disabled", "true");
-    expect(rail().getByRole("link", { name: "Home" })).toHaveAttribute("aria-current", "page");
-    await user.click(screen.getByRole("button", { name: "Back to draft" }));
-    expect(draftBox()).toHaveValue("line one\nline two");
-  });
-
-  it("has nothing to preview when no project is chosen", async () => {
-    const user = userEvent.setup();
-    renderApp();
-    await user.type(draftBox(), "something");
-    await user.selectOptions(projectSelect(), "");
-    expect(status()).toHaveTextContent("No project selected");
-    expect(screen.getByRole("button", { name: "Preview task" })).toHaveAccessibleDescription("Choose a project first.");
-    window.location.hash = "#/preview";
-    expect(await screen.findByRole("heading", { name: "Nothing to preview" })).toBeInTheDocument();
   });
 
   it("opens a sample task preview from an active task row", async () => {
@@ -143,46 +117,28 @@ describe("Home composer", () => {
     await waitFor(() => expect(screen.getByRole("heading", { level: 2, name: "atlas-api" })).toBeInTheDocument());
   });
 
-  it("shows first-use guidance, keeps the draft and cannot preview when sample data is off", async () => {
+  it("shows first-use guidance and keeps the composer when sample data is off", async () => {
     const user = userEvent.setup();
     renderApp(false);
     expect(screen.getByRole("heading", { name: "Set up Ordelis" })).toBeInTheDocument();
-    expect(projectSelect()).toBeDisabled();
-    await user.type(draftBox(), "still typing");
-    expect(screen.getByRole("button", { name: "Preview task" })).toHaveAccessibleDescription(/Sample data is hidden/);
+    await user.type(titleBox(), "still typing");
+    expect(titleBox()).toHaveValue("still typing");
+    expect(home().getByRole("button", { name: "Save task" })).toHaveAccessibleDescription("Saving tasks needs the desktop app.");
     expect(screen.queryByRole("link", { name: /Fix pagination/ })).not.toBeInTheDocument();
-  });
-
-  it("does not restore stale project or context selections after sample data is hidden", async () => {
-    const user = userEvent.setup();
-    renderApp();
-    await user.click(screen.getByRole("button", { name: "Select context" }));
-    await user.click(screen.getByRole("checkbox", { name: /Security \/ Tokens/ }));
-    await user.click(screen.getByRole("button", { name: "Hide sample data" }));
-    await user.click(rail().getByRole("link", { name: "Settings" }));
-    await user.click(screen.getByRole("checkbox", { name: "Show sample data" }));
-    await user.click(rail().getByRole("link", { name: "Home" }));
-    expect(projectSelect()).toHaveValue("");
-    await user.selectOptions(projectSelect(), "atlas-api");
-    await user.click(screen.getByRole("button", { name: "Select context" }));
-
-    expect(screen.getByRole("checkbox", { name: /Security \/ Tokens/ })).not.toBeChecked();
-    expect(screen.getByText("5 available")).toBeInTheDocument();
   });
 });
 
 describe("Projects", () => {
-  it("stays in sync with Home in both directions", async () => {
+  it("keeps the sample project selection in sync with Context", async () => {
     const user = userEvent.setup();
     renderApp();
-    await user.selectOptions(projectSelect(), "mochi-web");
     await user.click(rail().getByRole("link", { name: "Projects" }));
-    expect(await screen.findByRole("heading", { level: 2, name: "mochi-web" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /mochi-web/ })).toHaveAttribute("aria-pressed", "true");
-
-    await user.click(screen.getByRole("button", { name: /example-project/ }));
-    await user.click(rail().getByRole("link", { name: "Home" }));
-    expect(projectSelect()).toHaveValue("example-project");
+    await user.click(await screen.findByRole("button", { name: /mochi-web/ }));
+    await user.click(rail().getByRole("link", { name: "Context" }));
+    expect(await screen.findByRole("combobox", { name: "Project" })).toHaveValue("mochi-web");
+    await user.selectOptions(screen.getByRole("combobox", { name: "Project" }), "example-project");
+    await user.click(rail().getByRole("link", { name: "Projects" }));
+    expect(await screen.findByRole("heading", { level: 2, name: "example-project" })).toBeInTheDocument();
   });
 
   it("shows sample repository, workspace and task details with inert paths", async () => {
@@ -196,28 +152,32 @@ describe("Projects", () => {
     expect(await screen.findByRole("heading", { level: 1, name: "Speed up note search" })).toBeInTheDocument();
   });
 
-  it("'Draft task here' goes to the composer with the project already chosen", async () => {
+  it("never starts a saved task in a sample project", async () => {
     const user = userEvent.setup();
     renderApp();
     await user.click(rail().getByRole("link", { name: "Projects" }));
     await user.click(await screen.findByRole("button", { name: /ensaios/ }));
-    await user.click(screen.getByRole("button", { name: "Draft task here" }));
-    expect(await screen.findByRole("heading", { level: 1, name: "What should we work on?" })).toBeInTheDocument();
-    expect(projectSelect()).toHaveValue("ensaios");
+    const here = screen.getByRole("button", { name: "New task in this project" });
+    expect(here).toHaveAttribute("aria-disabled", "true");
+    expect(here).toHaveAccessibleDescription(/Saved tasks belong to your own folders/);
+    await user.click(here);
+    expect(screen.getByRole("heading", { level: 2, name: "ensaios" })).toBeInTheDocument();
   });
 
   it("opens a project from a link and selects it", async () => {
+    const user = userEvent.setup();
     renderApp();
     window.location.hash = "#/projects/mochi-web";
     expect(await screen.findByRole("heading", { level: 2, name: "mochi-web" })).toBeInTheDocument();
-    window.location.hash = "#/home";
+    await user.click(rail().getByRole("link", { name: "Context" }));
     expect(await screen.findByRole("combobox", { name: "Project" })).toHaveValue("mochi-web");
   });
 
   it("handles unselected, not-found and empty states", async () => {
     const user = userEvent.setup();
     renderApp();
-    await user.selectOptions(projectSelect(), "");
+    await user.click(rail().getByRole("link", { name: "Context" }));
+    await user.selectOptions(await screen.findByRole("combobox", { name: "Project" }), "");
     await user.click(rail().getByRole("link", { name: "Projects" }));
     expect(await screen.findByRole("heading", { name: "No project selected" })).toBeInTheDocument();
 
@@ -267,18 +227,20 @@ describe("accessibility and boundaries", () => {
   it("is operable from the keyboard alone", async () => {
     const user = userEvent.setup();
     renderApp();
-    await user.click(draftBox());
+    await user.click(titleBox());
     await user.keyboard("by keyboard");
-    await user.tab(); // project
-    await user.tab(); // Clear draft
-    expect(screen.getByRole("button", { name: "Clear draft" })).toHaveFocus();
-    await user.tab(); // Select context
+    await user.tab();
+    expect(descriptionBox()).toHaveFocus();
+    await user.keyboard("and more");
+    await user.tab(); // the project picker is disabled in a browser preview, so Context is next
+    expect(home().getByRole("button", { name: "Context" })).toHaveFocus();
+    await user.tab();
+    expect(home().getByRole("button", { name: "Discard draft…" })).toHaveFocus();
     await user.keyboard("{Enter}");
-    expect(screen.getByRole("button", { name: "Select context" })).toHaveAttribute("aria-expanded", "true");
-    await user.tab(); // Preview task
-    await user.tab(); // first checkbox, which follows the toolbar in DOM order
-    await user.keyboard(" ");
-    expect(screen.getAllByRole("checkbox")[0]).toBeChecked();
+    expect(within(screen.getByRole("alertdialog")).getByRole("button", { name: "Cancel" })).toHaveFocus();
+    await user.keyboard("{Escape}");
+    expect(home().getByRole("button", { name: "Discard draft…" })).toHaveFocus();
+    expect(descriptionBox()).toHaveValue("and more");
   });
 
   it("defines narrow-window rules for the new layouts", () => {
