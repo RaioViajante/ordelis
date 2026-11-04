@@ -1805,3 +1805,327 @@
     margin-top: 4px;
   }
 }
+
+/* Saved tasks (issue #96): the Product states board's lifecycle rows and pills, the Composer board's steps and
+   fields, and the Task detail board's header. Values are the boards'; only existing tokens are used. */
+@layer components {
+  .card {
+    background: var(--surf);
+    border: 1px solid var(--line);
+    border-radius: var(--r-md);
+  }
+  .lb {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 0 0 8px;
+    font: 600 12px/16px var(--font-sans);
+    color: var(--ink2);
+  }
+  .lb .cap {
+    margin-left: auto;
+    font-weight: 400;
+  }
+  .cap {
+    font-size: 11px;
+    line-height: 14px;
+    color: var(--ink3);
+  }
+  .cap--warn {
+    color: var(--bad);
+  }
+
+  /* Status pill and glyph: a glyph plus a word, never color alone. */
+  .pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 22px;
+    padding: 0 9px 0 8px;
+    border-radius: var(--r-pill);
+    font-size: 12px;
+    font-weight: 500;
+    white-space: nowrap;
+  }
+  .p-mute {
+    background: var(--hover);
+    color: var(--ink2);
+  }
+  .g {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    flex: none;
+  }
+  .g-wait {
+    border: 1.5px dashed currentColor;
+  }
+  .g-arch {
+    border-radius: 2px;
+    border: 1.5px solid currentColor;
+    box-shadow: inset 0 2px 0 0 currentColor;
+  }
+
+  /* Segmented switch (Drafts / Archived). */
+  .seg {
+    display: inline-flex;
+    align-self: flex-start;
+    gap: 2px;
+    padding: 2px;
+    border-radius: var(--r-sm);
+    background: var(--hover);
+  }
+  .seg button {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 26px;
+    padding: 0 12px;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--ink2);
+    font: 500 12px/16px var(--font-sans);
+    cursor: pointer;
+  }
+  .seg button[aria-pressed="true"] {
+    background: var(--surf);
+    color: var(--ink1);
+    box-shadow: 0 1px 2px rgb(0 0 0 / 0.1);
+  }
+  .seg button:focus-visible {
+    outline: 2px solid var(--brand);
+    outline-offset: 2px;
+  }
+
+  /* Lifecycle rows. */
+  .tlist {
+    overflow: hidden;
+  }
+  .tlist > li + li {
+    border-top: 1px solid var(--line);
+  }
+  .trow {
+    display: grid;
+    grid-template-columns: 18px minmax(0, 1fr) minmax(0, 300px) auto;
+    gap: 12px;
+    align-items: center;
+    padding: 11px 16px;
+    color: inherit;
+    text-decoration: none;
+  }
+  .trow:hover {
+    background: var(--hover);
+  }
+  .trow:focus-visible {
+    outline: 2px solid var(--brand);
+    outline-offset: -2px;
+  }
+  .trow__g {
+    color: var(--ink3);
+  }
+  .trow__t {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-weight: 500;
+    color: var(--ink1);
+  }
+  .trow__p {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .trow__p--warn > :first-child {
+    color: var(--att);
+  }
+  @media (max-width: 900px) {
+    .trow {
+      grid-template-columns: 18px minmax(0, 1fr) auto;
+    }
+    .trow__p {
+      grid-column: 2 / 4;
+      grid-row: 2;
+    }
+  }
+
+  /* New task and editing. */
+  .tk-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 12px 22px;
+  }
+  .steps {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 12px;
+  }
+  .stp {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-weight: 500;
+    color: var(--ink3);
+  }
+  .stp + .stp::before {
+    content: "";
+    width: 28px;
+    height: 1px;
+    margin-right: 4px;
+    background: var(--line2);
+  }
+  .stp b {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    border: 1.5px solid var(--line2);
+    border-radius: 50%;
+    font-size: 11px;
+  }
+  .stp.on {
+    color: var(--ink1);
+  }
+  .stp.on b {
+    border-color: var(--pri);
+    background: var(--pri);
+    color: var(--pri-ink);
+  }
+  .tk-lay {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 300px;
+    gap: 28px;
+    align-items: start;
+  }
+  @media (max-width: 1000px) {
+    .tk-lay {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  }
+  .tk-form {
+    display: flex;
+    flex-direction: column;
+    gap: 22px;
+    min-width: 0;
+    max-width: 760px;
+  }
+  .tk-field {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+  }
+  .tk-field > .select {
+    align-self: flex-start;
+    max-width: 100%;
+  }
+  .tk-project {
+    min-width: 240px;
+    max-width: 100%;
+  }
+  .tk-title {
+    width: 100%;
+    font-size: 15px;
+  }
+  .tk-card {
+    padding: 14px 16px;
+  }
+  .tk-card:focus-within {
+    outline: 2px solid var(--brand);
+    outline-offset: 2px;
+  }
+  .tk-description {
+    display: block;
+    width: 100%;
+    min-height: 120px;
+    resize: vertical;
+    border: 0;
+    background: transparent;
+    color: var(--ink1);
+    font: 400 15px/24px var(--font-sans);
+  }
+  .tk-description:focus-visible {
+    outline: none;
+  }
+  .tk-problem {
+    margin-top: 6px;
+    font-size: 12px;
+    line-height: 16px;
+    color: var(--bad);
+  }
+  .tk-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px;
+  }
+  .tk-aside {
+    padding: 18px 20px;
+  }
+  .tk-next {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+  .tk-next li {
+    display: flex;
+    gap: 12px;
+    font-size: 12.5px;
+    line-height: 18px;
+    color: var(--ink2);
+  }
+  .tk-next b {
+    display: inline-flex;
+    flex: none;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    background: var(--hover);
+    font-size: 11px;
+    color: var(--ink2);
+  }
+  .tk-next strong {
+    display: block;
+    font-weight: 600;
+    color: var(--ink1);
+  }
+
+  /* Task detail. */
+  .tk-crumbs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .tk-titlebar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 12px;
+  }
+  .tk-titlebar .h1 {
+    min-width: 0;
+    max-width: 100%;
+  }
+  .tk-edit {
+    padding: 20px;
+    border-radius: var(--r-md);
+    background: var(--surf2);
+    box-shadow: inset 0 0 0 1px var(--line);
+    max-width: none;
+  }
+  .tk-warn {
+    color: var(--att);
+  }
+  .tk-facts .block {
+    display: block;
+    max-width: 640px;
+    margin-top: 2px;
+  }
+}

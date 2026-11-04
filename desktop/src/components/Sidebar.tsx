@@ -15,8 +15,7 @@ function NavLink({ id, current }: { id: RouteId; current: RouteId | undefined })
   );
 }
 
-/** `sampleBadge` is true on the pages that show sample data, so the count is never shown outside them. */
-export function Sidebar({ loc, current, sampleBadge }: { loc: Location; current: RouteId | undefined; sampleBadge: boolean }) {
+export function Sidebar({ loc, current }: { loc: Location; current: RouteId | undefined }) {
   const { desktop, loading, projects } = useRegistry();
 
   return (
@@ -24,29 +23,21 @@ export function Sidebar({ loc, current, sampleBadge }: { loc: Location; current:
       <a className="side__brand" href={hrefFor("home")}>
         ordelis
       </a>
-      <Button variant="go" className="side__new" reason="Task planning isn't built yet. Nothing can be started from here.">
+      {/* Writes a saved task; it plans and starts nothing. */}
+      <a
+        className={`btn btn--go side__new${loc.page === "tasks" && loc.param === "new" ? " is-on" : ""}`}
+        href={hrefFor("tasks", "new")}
+        aria-current={loc.page === "tasks" && loc.param === "new" ? "page" : undefined}
+      >
         {PLUS_ICON}
         <span className="side__label">New Task</span>
-      </Button>
+      </a>
       <Button className="side__search" reason="Search isn't built yet.">
         {SEARCH_ICON}
         <span className="side__label">Search</span>
       </Button>
 
-      <NavLink id="home" current={current} />
-      <Button variant="bare" className="nav" reason="Tasks and the inbox arrive with task planning. Nothing is waiting on you.">
-        {NAV_ICONS.tasks}
-        <span className="nav__label">Tasks</span>
-        {sampleBadge && (
-          <>
-            <span className="badge" aria-hidden="true">
-              3
-            </span>
-            <span className="sr">, 3 sample items need you</span>
-          </>
-        )}
-      </Button>
-      {ROUTES.filter((r) => r.id !== "home" && r.id !== "settings").map((r) => (
+      {ROUTES.filter((r) => r.id !== "settings").map((r) => (
         <NavLink key={r.id} id={r.id} current={current} />
       ))}
 

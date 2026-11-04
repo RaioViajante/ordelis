@@ -1,7 +1,7 @@
-// The order is the sidebar's order, and Ctrl/⌘ 1-6 follow it. Tasks sits between Home and Sessions in the
-// sidebar but has no route yet, so it has no shortcut.
+// The order is the sidebar's order, and Ctrl/⌘ 1-7 follow it (Tasks is ⌘2, issue #86).
 export const ROUTES = [
   { id: "home", label: "Home" },
+  { id: "tasks", label: "Tasks" },
   { id: "sessions", label: "Sessions" },
   { id: "projects", label: "Projects" },
   { id: "context", label: "Context" },
@@ -14,7 +14,8 @@ export type RouteId = (typeof ROUTES)[number]["id"];
 /** A page. `task` and `preview` are sub-pages that are not primary destinations. */
 export interface Location {
   page: RouteId | "task" | "preview";
-  /** Project name for `projects`, session id for `sessions`, task id for `task`. */
+  /** Registration id or sample project name for `projects`, session id for `sessions`, `new` or a saved task id for
+   * `tasks`, sample task id for `task`. */
   param?: string;
 }
 
@@ -31,7 +32,7 @@ export function parseHash(hash: string): Location {
   }
   if (id === "task" || id === "preview") return { page: id, param };
   const route = ROUTES.find((r) => r.id === id)?.id ?? "home";
-  return { page: route, param: route === "projects" || route === "sessions" ? param : undefined };
+  return { page: route, param: route === "projects" || route === "sessions" || route === "tasks" ? param : undefined };
 }
 
 export function hrefFor(page: Location["page"], param?: string): string {

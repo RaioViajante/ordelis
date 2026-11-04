@@ -371,8 +371,8 @@ describe("desktop trust boundary", () => {
     for (const file of sources.filter((f) => f !== adapter)) {
       expect(read(`src/${file}`), file).not.toMatch(/\b(?:list_projects|add_project|remove_project|reset_projects)\b/);
     }
-    // Exactly the two reviewed adapters load the Tauri API.
-    expect(sources.filter((f) => /@tauri-apps/.test(read(`src/${f}`))).sort()).toEqual(["app/projects.ts", "app/runtimeStatus.ts"]);
+    // Exactly the three reviewed adapters load the Tauri API.
+    expect(sources.filter((f) => /@tauri-apps/.test(read(`src/${f}`))).sort()).toEqual(["app/projects.ts", "app/runtimeStatus.ts", "app/tasks.ts"]);
 
     const code = read(`src/${adapter}`);
     expect(code).not.toMatch(/reset_projects/);
@@ -386,6 +386,35 @@ describe("desktop trust boundary", () => {
     expect(code).toMatch(/export function listProjects\(\): /);
     expect(code).toMatch(/export function addProject\(\): /);
     expect(code).toMatch(/export function removeProject\(id: string\): /);
+    expect(code).not.toMatch(/export[^\n]*\binvoke\b(?!\()|export \{|export \*/);
+  });
+
+  // Issue #96: the task adapter is the only module that names a task command. No call takes a path: list_tasks takes
+  // nothing, get_task a task id, create_task a registration id and text, update_task an id, revision, text and status.
+  it("names the task commands in one module only, with the reviewed arguments and no path", () => {
+    const sources: string[] = [];
+    const walk = (dir: string) => {
+      for (const name of readdirSync(dir)) {
+        const p = join(dir, name);
+        if (statSync(p).isDirectory()) walk(p);
+        else if (/\.[cm]?[jt]sx?$/.test(name) && !/\.(test|spec)\./.test(name)) sources.push(p.slice(join(root, "src").length + 1));
+      }
+    };
+    walk(join(root, "src"));
+    const adapter = "app/tasks.ts";
+    expect(sources).toContain(adapter);
+    for (const file of sources.filter((f) => f !== adapter)) {
+      expect(read(`src/${file}`), file).not.toMatch(/\b(?:list_tasks|get_task|create_task|update_task)\b/);
+    }
+    const code = read(`src/${adapter}`);
+    expect(code.match(/from "@tauri-apps[^"]*"/g)).toEqual(['from "@tauri-apps/api/core"']);
+    expect(code).toMatch(/^import \{ invoke, isTauri \} from "@tauri-apps\/api\/core";$/m);
+    expect(code.match(/\binvoke\(/g)).toHaveLength(4);
+    expect(code).toMatch(/\binvoke\("list_tasks"\)/);
+    expect(code).toMatch(/\binvoke\("get_task", \{ id \}\)/);
+    expect(code).toMatch(/\binvoke\("create_task", \{ project_id: projectId, title, description \}\)/);
+    expect(code).toMatch(/\binvoke\("update_task", \{ id, revision, title, description, status \}\)/);
+    expect(code).not.toMatch(/\b(?:list_projects|add_project|remove_project|reset_projects|get_runtime_status)\b/);
     expect(code).not.toMatch(/export[^\n]*\binvoke\b(?!\()|export \{|export \*/);
   });
 

@@ -300,14 +300,14 @@ describe("cross-page navigation", () => {
     expect(await screen.findByText("none in the sample data")).toBeInTheDocument();
   });
 
-  it("keeps the six rail destinations and shortcuts", async () => {
+  it("keeps the seven rail destinations and shortcuts", async () => {
     const user = userEvent.setup();
     window.location.hash = "#/sessions/b71c";
     renderApp();
-    for (const name of ["Home", "Projects", "Sessions", "Context", "Agents", "Settings"]) {
+    for (const name of ["Home", "Tasks", "Projects", "Sessions", "Context", "Agents", "Settings"]) {
       expect(rail().getByRole("link", { name })).toBeInTheDocument();
     }
-    await user.keyboard("{Control>}2{/Control}");
+    await user.keyboard("{Control>}3{/Control}");
     expect(await screen.findByRole("list", { name: "Sample sessions" })).toBeInTheDocument();
   });
 });
