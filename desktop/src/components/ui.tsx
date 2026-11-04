@@ -1,5 +1,5 @@
 import { ChevronDown } from "lucide-react";
-import { useId, useState, type ButtonHTMLAttributes, type ReactNode, type SelectHTMLAttributes } from "react";
+import { useId, useState, type ButtonHTMLAttributes, type ReactNode, type Ref, type SelectHTMLAttributes } from "react";
 
 type Variant = "default" | "go" | "ghost" | "link" | "bare";
 
@@ -8,6 +8,8 @@ interface ButtonProps extends Omit<ButtonHTMLAttributes<HTMLButtonElement>, "dis
   small?: boolean;
   /** When set, the control is disabled and the reason is shown on hover and keyboard focus. */
   reason?: string;
+  /** Reaches the inner button (React 19 passes it as a prop). */
+  ref?: Ref<HTMLButtonElement>;
 }
 
 export function Button({ variant = "default", small, reason, className = "", children, ...rest }: ButtonProps) {

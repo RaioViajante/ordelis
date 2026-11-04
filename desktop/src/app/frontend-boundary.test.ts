@@ -1,8 +1,8 @@
 // @vitest-environment node
 // The production bundle may only contain the app's own src/ modules and its pinned packages. Only the project
 // adapter (src/app/projects.ts) may name list_projects, add_project or remove_project, and nothing in the frontend
-// may name reset_projects (the UI has no reset). No frontend module names a task command yet: list_tasks, get_task,
-// create_task and update_task have no caller until a reviewed adapter is added (D3.1c, issue #86).
+// may name reset_projects (the UI has no reset). Only the task adapter (src/app/tasks.ts) may name list_tasks,
+// get_task, create_task or update_task (issue #96).
 //
 // The inspector below looks at what a production Vite build of the desktop UI actually contains, rather than
 // which files happen to exist under src/. It builds without writing anything and reads Rollup's module graph and
@@ -37,8 +37,9 @@ async function frontendBuildViolations(projectRoot: string): Promise<string[]> {
   const packages = realpathSync(join(root, "node_modules")) + sep;
   const tauriApi = `${sep}node_modules${sep}@tauri-apps${sep}`;
   // The reviewed adapters: the only modules that may load the Tauri API.
-  const adapters = [join(root, "src", "app", "runtimeStatus.ts"), join(root, "src", "app", "projects.ts")];
+  const adapters = [join(root, "src", "app", "runtimeStatus.ts"), join(root, "src", "app", "projects.ts"), join(root, "src", "app", "tasks.ts")];
   const projectAdapter = adapters[1];
+  const taskAdapter = adapters[2];
   const graph = new Map<string, string[]>();
   const outputs: Output[] = [];
   const inspector: Plugin = {
@@ -92,7 +93,7 @@ async function frontendBuildViolations(projectRoot: string): Promise<string[]> {
     if (SCRIPT.test(file)) {
       const text = readFileSync(file, "utf8");
       if ((file === projectAdapter ? RESET_COMMAND : PROJECT_COMMANDS).test(text)) violations.push(`${name(id)}: names a project command`);
-      if (TASK_COMMANDS.test(text)) violations.push(`${name(id)}: names a task command`);
+      if (file !== taskAdapter && TASK_COMMANDS.test(text)) violations.push(`${name(id)}: names a task command`);
       if (text.includes("__TAURI")) violations.push(`${name(id)}: reaches Tauri internals`);
     }
   }
@@ -100,7 +101,6 @@ async function frontendBuildViolations(projectRoot: string): Promise<string[]> {
     // A script emitted as a plain asset (new URL(..., import.meta.url), a worker) bypasses the module graph.
     if (out.type === "asset" && SCRIPT.test(out.fileName)) violations.push(`emits script asset ${out.fileName}`);
     if (out.type === "chunk" && RESET_COMMAND.test(out.code)) violations.push(`${out.fileName}: names a project command`);
-    if (out.type === "chunk" && TASK_COMMANDS.test(out.code)) violations.push(`${out.fileName}: names a task command`);
   }
   return violations;
 }

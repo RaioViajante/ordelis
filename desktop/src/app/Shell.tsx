@@ -9,7 +9,11 @@ import { Sessions } from "../pages/Sessions";
 import { SessionDetail } from "../pages/SessionDetail";
 import { Settings } from "../pages/Settings";
 import { DraftPreview, TaskPreview } from "../pages/Preview";
+import { TaskDetail } from "../pages/TaskDetail";
+import { TaskNew } from "../pages/TaskNew";
+import { Tasks } from "../pages/Tasks";
 import { RegistryProvider } from "./Registry";
+import { TasksProvider } from "./TaskState";
 import { useSampleData } from "./SampleData";
 import { railRoute, ROUTES } from "./routes";
 import { useRoute } from "./useRoute";
@@ -18,11 +22,19 @@ import { useWorkspace, WorkspaceProvider } from "./Workspace";
 const SAMPLE_ROUTES = ["home", "projects", "sessions", "context", "task", "preview"];
 const PAGE_LABELS = { task: "Task preview", preview: "Task preview" };
 
+function pageLabel(route: string, param: string | undefined): string | undefined {
+  if (route === "task" || route === "preview") return PAGE_LABELS[route];
+  if (route === "tasks" && param) return param === "new" ? "New task" : "Task";
+  return ROUTES.find((r) => r.id === route)?.label;
+}
+
 export function Shell() {
   return (
     <WorkspaceProvider>
       <RegistryProvider>
-        <ShellFrame />
+        <TasksProvider>
+          <ShellFrame />
+        </TasksProvider>
       </RegistryProvider>
     </WorkspaceProvider>
   );
@@ -60,11 +72,12 @@ function ShellFrame() {
 
   return (
     <div className="app">
-      <Sidebar loc={loc} current={current} sampleBadge={on && SAMPLE_ROUTES.includes(route)} />
+      <Sidebar loc={loc} current={current} />
 
-      <main className="page" ref={mainRef} tabIndex={-1} aria-label={route === "task" || route === "preview" ? PAGE_LABELS[route] : ROUTES.find((r) => r.id === route)?.label}>
+      <main className="page" ref={mainRef} tabIndex={-1} aria-label={pageLabel(route, loc.param)}>
         <div className="page__scroll">
           {route === "home" && <Home go={go} />}
+          {route === "tasks" && (loc.param === "new" ? <TaskNew go={go} /> : loc.param ? <TaskDetail key={loc.param} id={loc.param} /> : <Tasks />)}
           {route === "projects" && <Projects param={loc.param} go={go} />}
           {route === "task" && <TaskPreview id={loc.param} go={go} />}
           {route === "preview" && <DraftPreview go={go} />}

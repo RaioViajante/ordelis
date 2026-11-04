@@ -10,7 +10,7 @@ import { Button, Empty, Evidence, SecHead } from "../components/ui";
 
 type Go = (page: Location["page"], param?: string) => void;
 
-const STATUS_LABEL: Record<ProjectStatus, { tone: "done" | "fail" | "you"; text: string }> = {
+export const STATUS_LABEL: Record<ProjectStatus, { tone: "done" | "fail" | "you"; text: string }> = {
   available: { tone: "done", text: "Available" },
   missing: { tone: "fail", text: "Folder not found" },
   inaccessible: { tone: "fail", text: "Can't access folder" },

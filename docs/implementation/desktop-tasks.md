@@ -1,7 +1,7 @@
 # Saved tasks (native store and commands)
 
-**Status:** foundation. The Rust store and its four commands are implemented and tested ([issue #89](https://github.com/RaioViajante/ordelis/issues/89)); nothing in the interface calls them yet. The approved design is [issue #86](https://github.com/RaioViajante/ordelis/issues/86) (D3.1), and the storage protocol it reuses is the [project registry's](desktop-local-projects.md#storage).
-**Scope:** what a saved task is, how it is stored and validated, the native commands, and how a task stays tied to its project.
+**Status:** implemented and tested; not yet verified in the packaged app. The Rust store and its four commands ([issue #89](https://github.com/RaioViajante/ordelis/issues/89)) are used by the Tasks interface ([issue #96](https://github.com/RaioViajante/ordelis/issues/96)), whose tests run against a mocked native layer. The approved design is [issue #86](https://github.com/RaioViajante/ordelis/issues/86) (D3.1), and the storage protocol it reuses is the [project registry's](desktop-local-projects.md#storage).
+**Scope:** what a saved task is, how it is stored and validated, the native commands, how a task stays tied to its project, and the interface that uses them.
 **Related:** [Local project registration](desktop-local-projects.md) · [Desktop architecture](desktop-architecture.md#ipc-authorization) · [Orchestration](../architecture/orchestration.md)
 
 A saved task is a note about work the user wants done: a title and a description, tied to one registered project. Saving one starts nothing. A task has no plan, stage, agent, permission, path or run in it, and its stored status is only `draft` or `archived`. Planning and execution states belong to future records owned by the execution coordinator. Schema version 1 cannot express them, so neither a bug nor an edited file can make a saved task look like running work.
@@ -148,4 +148,42 @@ errors      = invalid_input | project_not_found | project_unavailable | tasks_fu
 
 `config.test.ts` pins the task module's files, its store calls and its registry accessor. It also pins that the module has no file operations, folder access, recovery or deletion, the exact schema fields and the two statuses, and exactly two `Store` implementations in the crate. `frontend-boundary.test.ts` refuses any frontend module or bundle that names a task command until a reviewed adapter exists.
 
-Not verified: the commands in a running app. They have no caller yet; native acceptance follows with the interface (D3.1c), under the [isolated procedure](../migration/ordelis.md#i2-native-acceptance-testing).
+Not verified: the commands and the interface in the packaged app. Native acceptance runs only under the [isolated procedure](../migration/ordelis.md#i2-native-acceptance-testing) (a dedicated VM or a separate standard macOS user in its own login session), when separately authorized.
+
+## Interface
+
+[Issue #96](https://github.com/RaioViajante/ordelis/issues/96) (D3.1c). Routes:
+
+- `#/tasks` lists Drafts or Archived, as lifecycle rows.
+- `#/tasks/new` is the composer's Prepare step.
+- `#/tasks/<id>` is the task detail.
+
+Tasks is `⌘2` in the sidebar, and New Task opens `#/tasks/new`.
+
+- **The adapter, `src/app/tasks.ts`.** It is the only frontend module that names a task command; `config.test.ts` pins its four call sites and `frontend-boundary.test.ts` checks the bundle's modules.
+  - **What it refuses before calling Rust:** an id, revision, status or text that Rust would refuse. The text limits are the ones above, counted in UTF-8 bytes.
+  - **Answers outside the contract are refused,** never partly shown: an unexpected or missing field, an execution status, an unknown link, `created > updated`, a revision below 1 or a repeated id.
+  - **Native messages are never shown.** Only known error codes are kept, and the UI words each one itself.
+  - **A browser preview** makes no call at all.
+- **The state, `TasksProvider` (`src/app/TaskState.tsx`).**
+  - The list comes from Rust and is held in memory only; nothing is written to browser storage.
+  - It is read again after every create and update, conflicts included.
+  - Only one change runs at a time, and a repeated submission shares the request in flight.
+  - A failed list is an error state, never an empty list and never the previous list.
+  - In memory only, the composer's draft and each task's unsaved edits (with the revision they started from) survive moving around the app, but not a restart.
+- **Text.** Titles and descriptions are rendered as text nodes only, with `dir="auto"` and `unicode-bidi: isolate`, and descriptions keep their line breaks (`white-space: pre-wrap`). There is no HTML or Markdown rendering and no automatic links. Task text is never logged. Limits are checked and explained before saving, never cut: a title is trimmed of surrounding spaces and nothing else.
+- **Conflicts.** An edit saves with the revision it started from. On `conflict` nothing is written and the latest saved version is shown, while the user's edits stay open beside it. The user can then save them over the newer version deliberately (with its revision), or discard them. Archive and Restore get the same treatment.
+- **Project links.** The registered project's name is shown while the link is `linked`; otherwise "Project removed", "Project changed" or "Project unavailable", with an explanation on the detail page. A task is never rebound, and no folder is read to work this out.
+- **Storage errors.** A corrupt or newer `tasks.json` shows an error that says the file was kept unchanged, with Try again; there is no reset, repair or recovery control. Projects keep working.
+- **Execution.** Draft plan is disabled with its reason on New task and on the detail page, and no execution state (planned, running, finished, failed) is ever shown for a saved task.
+- **Tests.** `src/app/Tasks.test.tsx` runs against a mocked native layer: an in-memory store that applies this contract. It covers:
+  - the adapter's arguments, refusals and contract checks;
+  - the list, empty, loading, error and browser-preview states;
+  - creating, persisting across a restart, validating, single submission and failure keeping the text;
+  - the detail page, editing, conflicts, discarding edits, archiving and restoring;
+  - the project link states;
+  - plain-text rendering;
+  - keyboard navigation;
+  - the absence of execution states.
+
+  Eight mutations of these behaviors were each caught.

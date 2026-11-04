@@ -253,13 +253,13 @@ describe("accessibility and boundaries", () => {
     expect(screen.getAllByRole("status")).toHaveLength(1);
   });
 
-  it("keeps the six primary destinations and the shortcuts", async () => {
+  it("keeps the seven primary destinations and the shortcuts", async () => {
     const user = userEvent.setup();
     renderApp();
-    for (const name of ["Home", "Projects", "Sessions", "Context", "Agents", "Settings"]) {
+    for (const name of ["Home", "Tasks", "Projects", "Sessions", "Context", "Agents", "Settings"]) {
       expect(rail().getByRole("link", { name })).toBeInTheDocument();
     }
-    await user.keyboard("{Control>}3{/Control}");
+    await user.keyboard("{Control>}4{/Control}");
     expect(await screen.findByRole("heading", { level: 1, name: "Projects" })).toBeInTheDocument();
     expect(screen.getByRole("main")).toHaveFocus();
   });
@@ -299,8 +299,9 @@ describe("accessibility and boundaries", () => {
     };
     walk(join(__dirname, ".."));
     expect(files.length).toBeGreaterThan(10);
-    // The runtime status and project adapters are the reviewed exceptions for the Tauri API and invoke (see config.test.ts).
-    const adapters = [join(__dirname, "runtimeStatus.ts"), join(__dirname, "projects.ts")];
+    // The runtime status, project and task adapters are the reviewed exceptions for the Tauri API and invoke (see
+    // config.test.ts).
+    const adapters = [join(__dirname, "runtimeStatus.ts"), join(__dirname, "projects.ts"), join(__dirname, "tasks.ts")];
     for (const a of adapters) expect(files).toContain(a);
     for (const f of files) {
       const text = readFileSync(f, "utf8");

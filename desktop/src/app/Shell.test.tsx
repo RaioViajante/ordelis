@@ -39,15 +39,15 @@ describe("navigation", () => {
   it("switches page with Ctrl+number and moves focus to the page", async () => {
     const user = userEvent.setup();
     renderApp();
-    await user.keyboard("{Control>}2{/Control}");
+    await user.keyboard("{Control>}3{/Control}");
     expect(await screen.findByRole("heading", { level: 1, name: "Sessions" })).toBeInTheDocument();
     expect(screen.getByRole("main")).toHaveFocus();
   });
 
-  it("numbers the shortcuts in sidebar order, and gives the unavailable Tasks entry none", async () => {
+  it("numbers the shortcuts in sidebar order, with Tasks second (#86)", async () => {
     const user = userEvent.setup();
     renderApp();
-    const order = ["Home", "Sessions", "Projects", "Context", "Agents", "Settings"];
+    const order = ["Home", "Tasks", "Sessions", "Projects", "Context", "Agents", "Settings"];
     const links = rail()
       .getAllByRole("link")
       .map((l) => l.textContent)
@@ -59,8 +59,8 @@ describe("navigation", () => {
     }
     expect(within(screen.getByRole("main")).getByRole("heading", { level: 1, name: "Settings" })).toBeInTheDocument();
     for (const row of screen.getAllByText(/^Go to /)) expect(row.parentElement).toHaveTextContent(/⌘\d · Ctrl\+\d/);
-    expect(screen.getByText("Go to Sessions").parentElement).toHaveTextContent("⌘2");
-    expect(screen.queryByText("Go to Tasks")).not.toBeInTheDocument();
+    expect(screen.getByText("Go to Tasks").parentElement).toHaveTextContent("⌘2");
+    expect(screen.getByText("Go to Sessions").parentElement).toHaveTextContent("⌘3");
   });
 
   it("ignores unmapped number shortcuts", async () => {
@@ -115,21 +115,26 @@ describe("honesty of mock data", () => {
     await user.click(rail().getByRole("link", { name: "Agents" }));
     await screen.findByRole("heading", { level: 1, name: "Agents" });
     expect(screen.queryByRole("note", { name: "Sample data notice" })).not.toBeInTheDocument();
-    expect(rail().getByRole("button", { name: "Tasks" }).querySelector(".badge")).toBeNull();
   });
 
-  it("labels the Tasks count as sample data, and only where sample data is shown", () => {
+  it("shows no sample count on Tasks, which lists real saved tasks only", async () => {
+    const user = userEvent.setup();
     renderApp();
-    expect(rail().getByRole("button", { name: "Tasks, 3 sample items need you" })).toBeInTheDocument();
+    expect(rail().getByRole("link", { name: "Tasks" }).querySelector(".badge")).toBeNull();
+    await user.click(rail().getByRole("link", { name: "Tasks" }));
+    await screen.findByRole("heading", { level: 1, name: "Tasks" });
+    expect(screen.queryByRole("note", { name: "Sample data notice" })).not.toBeInTheDocument();
   });
 
-  it("keeps New Task, Search and Tasks unavailable, each with a stated reason", () => {
+  it("opens Tasks and New Task from the sidebar, and keeps Search unavailable with a stated reason", async () => {
+    const user = userEvent.setup();
     renderApp();
-    for (const name of ["New Task", "Search", /^Tasks/]) {
-      const button = rail().getByRole("button", { name });
-      expect(button).toHaveAttribute("aria-disabled", "true");
-      expect(button).toHaveAccessibleDescription(/.+/);
-    }
+    await user.click(rail().getByRole("link", { name: "New Task" }));
+    expect(await screen.findByRole("heading", { level: 1, name: "New task" })).toBeInTheDocument();
+    expect(rail().getByRole("link", { name: "New Task" })).toHaveAttribute("aria-current", "page");
+    const search = rail().getByRole("button", { name: "Search" });
+    expect(search).toHaveAttribute("aria-disabled", "true");
+    expect(search).toHaveAccessibleDescription(/.+/);
   });
 
   it("lists only registered folders in the sidebar, never sample projects", () => {
