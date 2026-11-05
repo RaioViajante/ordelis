@@ -76,6 +76,70 @@ function projectContentViolations(files: Record<string, string>): string[] {
   return violations;
 }
 
+// The production files of the provider catalog and evidence vocabulary (issue #109), as listed (and compiler-verified)
+// above, keyed by path under src-tauri/src.
+function agentSources(): Record<string, string> {
+  const production = new Set(
+    ["default", "release", "dev-runtime"].flatMap((c) => nativeSources.configurations[c]).filter((f) => f.startsWith("src/agents")),
+  );
+  return Object.fromEntries([...production].map((f) => [f.slice("src/".length), read(`src-tauri/${f}`)]));
+}
+
+// Rust code with comments removed and every string literal emptied, so that documentation text (URLs, flag names in
+// notes) is never mistaken for code and code is never hidden in a comment. Raw strings are refused separately.
+function rustCodeOnly(text: string): string {
+  let out = "";
+  for (let i = 0; i < text.length; ) {
+    if (text.startsWith("//", i)) {
+      const end = text.indexOf("\n", i);
+      i = end < 0 ? text.length : end;
+    } else if (text.startsWith("/*", i)) {
+      const end = text.indexOf("*/", i + 2);
+      i = end < 0 ? text.length : end + 2;
+      out += " ";
+    } else if (text[i] === '"') {
+      let j = i + 1;
+      while (j < text.length && text[j] !== '"') j += text[j] === "\\" ? 2 : 1;
+      out += '""';
+      i = j + 1;
+    } else {
+      out += text[i++];
+    }
+  }
+  return out;
+}
+
+// Content rules for the provider catalog and evidence vocabulary: pure data and pure functions. No process, file,
+// network, environment, clock, thread, global state, FFI, unsafe code or included file; no Tauri, serde or libc; no
+// command; nothing visible outside the crate; no import from outside the agents module; no field that could hold a
+// path, a search location or an argument vector; and no macro other than matches!.
+function agentContentViolations(files: Record<string, string>): string[] {
+  const violations: string[] = [];
+  for (const [file, text] of Object.entries(files)) {
+    if (/\br#*"/.test(text)) violations.push(`${file}: raw string`);
+    const code = rustCodeOnly(text);
+    const forbidden = [
+      /\b(?:std|core|alloc)::/,
+      /\b(?:Command|process|spawn|fork|execve?|execvp|kill|signal|Child|Stdio|Output)\b/,
+      /\b(?:fs|File|OpenOptions|DirBuilder|Path|PathBuf|read_dir|read_to_string|metadata|canonicalize|symlink_metadata)\b/,
+      /\b(?:net|TcpStream|TcpListener|UdpSocket|UnixStream|SocketAddr|IpAddr)\b/,
+      /\b(?:env|var_os|SystemTime|Instant|UNIX_EPOCH|now|thread|sleep)\b/,
+      /\bstatic\s+mut\b|\b(?:thread_local|OnceLock|OnceCell|LazyLock|LazyCell|lazy_static|Cell|RefCell|Mutex|RwLock|Arc|Rc)\b|\bAtomic\w*/,
+      /\b(?:unsafe|extern)\b|#\s*!?\s*\[\s*(?:link|no_mangle|export_name|path|used|link_section)\b/,
+      /\b(?:tauri|serde|serde_json|libc|rfd)\b|invoke_handler|generate_handler/,
+      /\bcrate::(?!agents::)|\bsuper::super::/,
+      /\bpub\s+(?!\((?:crate|super)\))/,
+      /\b(?:argv|args|arguments|command_line|search_paths?|candidates?|dirs?|directory|directories|paths?|location)\b/,
+    ];
+    for (const pattern of forbidden) {
+      const hit = code.match(pattern);
+      if (hit) violations.push(`${file}: ${hit[0]}`);
+    }
+    for (const m of code.matchAll(/\b(\w+)\s*!\s*[([{]/g)) if (m[1] !== "matches") violations.push(`${file}: ${m[1]}!`);
+  }
+  return violations;
+}
+
 describe("desktop trust boundary", () => {
   const conf = JSON.parse(read("src-tauri/tauri.conf.json"));
 
@@ -326,6 +390,65 @@ describe("desktop trust boundary", () => {
     for (const [name, files] of Object.entries(bypasses)) {
       expect(projectContentViolations(files), name).not.toEqual([]);
     }
+  });
+
+  // D3.2a (#109, design #108): cataloguing a provider authorizes nothing. The catalog and evidence vocabulary are
+  // compiled in, but no command, module or initializer reaches them, and they can neither find nor run anything.
+  it("keeps the provider catalog and evidence vocabulary pure and unreachable from the interface", () => {
+    const files = agentSources();
+    expect(Object.keys(files).sort()).toEqual(["agents.rs", "agents/catalog.rs", "agents/evidence.rs"]);
+    expect(agentContentViolations(files)).toEqual([]);
+    // Each file ends with its test module declaration; tests live in their own files.
+    for (const file of ["agents/catalog.rs", "agents/evidence.rs"]) expect(files[file]).toMatch(/\n#\[cfg\(test\)\]\nmod tests;\n$/);
+    // lib.rs declares the module, silences dead-code warnings outside tests only, and names it nowhere else.
+    const lib = read("src-tauri/src/lib.rs");
+    const production = rustCodeOnly(lib.slice(0, lib.indexOf("#[cfg(test)]")));
+    expect(production.match(/\bagents\b/g)).toEqual(["agents"]);
+    expect(lib).toMatch(/\n#\[cfg_attr\(not\(test\), allow\(dead_code\)\)\]\nmod agents;\nmod projects;\n/);
+    // No other compiled production file uses it.
+    const others = ["default", "release", "dev-runtime"]
+      .flatMap((c) => nativeSources.configurations[c])
+      .filter((f) => !f.startsWith("src/agents") && f !== "src/lib.rs");
+    for (const file of new Set(others)) expect(rustCodeOnly(read(`src-tauri/${file}`)), file).not.toMatch(/\bagents\b/);
+    // The vocabulary has no field that could mean authorized, dispatched or enforced.
+    const evidence = rustCodeOnly(files["agents/evidence.rs"]);
+    expect(evidence).not.toMatch(/\b\w*(?:authori[sz]ed?|dispatch\w*|enforced|Enforced)\b/);
+  });
+
+  it("finds prohibited operations in the provider catalog and evidence vocabulary", () => {
+    const actual = agentSources();
+    const add = (file: string, text: string) => ({ ...actual, [file]: actual[file] + "\n" + text });
+    const bypasses: Record<string, Record<string, string>> = {
+      "a process": add("agents/catalog.rs", 'fn a() { let _ = std::process::Command::new("codex"); }'),
+      "an imported process type": add("agents/evidence.rs", "use std::process::Command;"),
+      "a file read": add("agents/catalog.rs", 'fn b() { let _ = std::fs::read("/opt/homebrew/bin/codex"); }'),
+      "a path type": add("agents/catalog.rs", "struct C { at: PathBuf }"),
+      "a network call": add("agents/evidence.rs", 'fn d() { let _ = std::net::TcpStream::connect("127.0.0.1:1"); }'),
+      "an environment read": add("agents/catalog.rs", 'fn e() { let _ = std::env::var("PATH"); }'),
+      "an environment macro": add("agents/catalog.rs", 'const F: &str = env!("HOME");'),
+      "an included file": add("agents/catalog.rs", 'const G: &str = include_str!("/etc/paths");'),
+      "a clock": add("agents/evidence.rs", "fn h() { let _ = std::time::SystemTime::now(); }"),
+      "global mutable state": add("agents/evidence.rs", "static mut I: u8 = 0;"),
+      "lazy initialization": add("agents/catalog.rs", "static J: OnceLock<u8> = OnceLock::new();"),
+      "unsafe code": add("agents/evidence.rs", "fn k() { unsafe {} }"),
+      "foreign code": add("agents/evidence.rs", 'extern "C" { fn getpid() -> i32; }'),
+      "libc": add("agents/evidence.rs", "fn l() -> i32 { libc::getpid() }"),
+      "a command": add("agents/catalog.rs", "#[tauri::command]\nfn m() {}"),
+      "serialization for IPC": add("agents/catalog.rs", "#[derive(serde::Serialize)]\nstruct N;"),
+      "another module of the crate": add("agents/evidence.rs", "use crate::store;"),
+      "a public item": add("agents/catalog.rs", "pub fn o() {}"),
+      "an argument vector": add("agents/catalog.rs", "struct P { argv: &'static [&'static str] }"),
+      "a search location": add("agents/catalog.rs", "const SEARCH_PATHS: [&str; 0] = []; struct Q { candidates: u8 }"),
+      "a raw string": add("agents/catalog.rs", 'const R: &str = r"--version";'),
+      "another macro": add("agents/evidence.rs", 'fn s() { println!("x"); }'),
+      "a module from another file": add("agents.rs", '#[path = "../store.rs"]\nmod t;'),
+    };
+    for (const [name, files] of Object.entries(bypasses)) {
+      expect(agentContentViolations(files), name).not.toEqual([]);
+    }
+    // Documentation text is data: a string or a comment that mentions a process or a path is not code.
+    const text = add("agents/catalog.rs", 'const U: &str = "std::process::Command::new(\\"codex\\") in /usr/bin"; // std::fs::read');
+    expect(agentContentViolations(text)).toEqual([]);
   });
 
   // Reviewed in issue #40: the frontend may depend on @tauri-apps/api, and only to call get_runtime_status.
