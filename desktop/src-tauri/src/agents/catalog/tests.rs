@@ -86,16 +86,18 @@ fn the_reviewed_uncertainties_and_absences_stay_explicit() {
     let status = |id, feature| provider(id).claim(feature).map(|c| c.status);
     // Kimi's documentation contradicts itself on the permission default of non-interactive mode.
     assert_eq!(status(ProviderId::Kimi, Feature::PermissionModes), Some(DocStatus::Contradictory));
-    // The inherited runtime's ACP launch commands for Codex and Claude Code are not documented by either vendor.
+    // The reviewed pages describe neither of the inherited runtime's ACP launch commands, for Codex or Claude Code.
     assert_eq!(status(ProviderId::Codex, Feature::AgentClientProtocol), Some(DocStatus::NotFound));
     assert_eq!(status(ProviderId::Claude, Feature::AgentClientProtocol), Some(DocStatus::NotFound));
-    // Only Claude Code documents a caller-chosen session id.
+    // Of the reviewed pages, only Claude Code's describe a caller-chosen session id; Kimi's were not reviewed for it.
     for id in ProviderId::ALL {
         let expected = if id == ProviderId::Claude { DocStatus::Documented } else if id == ProviderId::Kimi { DocStatus::NotReviewed } else { DocStatus::NotFound };
         assert_eq!(status(id, Feature::HostAssignedSessionId), Some(expected), "{}", id.id());
     }
-    // Codex documents no approval routing; its app-server is Experimental.
+    // The reviewed Codex pages describe no approval routing; its app-server is Experimental.
     assert_eq!(status(ProviderId::Codex, Feature::ApprovalRouting), Some(DocStatus::NotFound));
+    // Kimi's model option appears only in an example.
+    assert_eq!(status(ProviderId::Kimi, Feature::ModelSelection), Some(DocStatus::NotFound));
     // Kimi was read from excerpts only, and the parts nobody read say so.
     let kimi = provider(ProviderId::Kimi);
     assert!(kimi.claims.iter().all(|c| c.reading != Reading::Verbatim));
@@ -116,7 +118,7 @@ fn provider_sandboxes_are_described_as_the_providers_own() {
 }
 
 #[test]
-fn the_catalog_holds_no_local_path_or_command_line() {
+fn the_catalog_holds_no_local_path() {
     let mut texts: Vec<&str> = Vec::new();
     for id in ProviderId::ALL {
         let entry = provider(id);

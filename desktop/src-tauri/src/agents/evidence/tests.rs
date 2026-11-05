@@ -16,9 +16,15 @@ fn probe(h: char, probe_id: &str) -> Binding {
     Binding::Probe { executable_sha256: hash(h), probe_id: run(probe_id) }
 }
 
+/// The value a requirement on a valued capability names, and that a passing record for it reports.
+fn value(capability: Capability) -> Option<&'static str> {
+    capability.valued().then_some("v1")
+}
+
 /// A record bound to executable `a` and probe run `p1`, the configuration every evaluation below asks about.
 fn bound(capability: Capability, source: Source, outcome: Outcome) -> Record {
-    Record::new(capability, source, outcome, probe('a', "p1"), None, None, T0).unwrap()
+    let observed = if outcome == Outcome::Pass { value(capability) } else { None };
+    Record::new(capability, source, outcome, probe('a', "p1"), value(capability), observed, T0).unwrap()
 }
 
 fn docs(provider: ProviderId, capability: Capability, outcome: Outcome) -> Record {
@@ -26,7 +32,7 @@ fn docs(provider: ProviderId, capability: Capability, outcome: Outcome) -> Recor
 }
 
 fn require(capabilities: &[Capability]) -> Vec<Requirement> {
-    capabilities.iter().map(|&c| Requirement::new(c, None).unwrap()).collect()
+    capabilities.iter().map(|&c| Requirement::new(c, value(c)).unwrap()).collect()
 }
 
 fn judge(required: &[Requirement], records: &[Record]) -> Evaluation {
@@ -76,12 +82,14 @@ fn records_follow_the_closed_schema() {
     for source in [Source::AdapterDeclaration, Source::CliHelp, Source::RuntimeProbe, Source::ExternalCheck] {
         assert_eq!(make(OutputFormat, source, Pass, Binding::Documentation(ProviderId::Codex), None, None, T0), Err(EvidenceError::SourceBindingMismatch));
     }
-    // Documentation cannot witness a failure or observe a value.
+    // Documentation only describes: a pass with no values, never a failure, an unsupported outcome or an observation.
     let documentation = || Binding::Documentation(ProviderId::Claude);
-    assert_eq!(make(OutputFormat, Source::VendorDocumentation, Fail, documentation(), None, None, T0), Err(EvidenceError::InvalidDocumentationRecord));
+    assert!(make(OutputFormat, Source::VendorDocumentation, Pass, documentation(), None, None, T0).is_ok());
+    for outcome in [Fail, Unsupported] {
+        assert_eq!(make(OutputFormat, Source::VendorDocumentation, outcome, documentation(), None, None, T0), Err(EvidenceError::InvalidDocumentationRecord));
+    }
     assert_eq!(make(ModelAcceptance, Source::VendorDocumentation, Pass, documentation(), Some("m1"), None, T0), Err(EvidenceError::InvalidDocumentationRecord));
     assert_eq!(make(ModelAcceptance, Source::VendorDocumentation, Pass, documentation(), None, Some("m1"), T0), Err(EvidenceError::InvalidDocumentationRecord));
-    assert!(make(OutputFormat, Source::VendorDocumentation, Unsupported, documentation(), None, None, T0).is_ok());
     // Timestamps are explicit and bounded; provenance is kept as given.
     assert_eq!(make(OutputFormat, Source::RuntimeProbe, Pass, probe('a', "p1"), None, None, MAX_TIMESTAMP_MS + 1), Err(EvidenceError::InvalidTimestamp));
     let record = make(OutputFormat, Source::CliHelp, Pass, probe('a', "p1"), None, None, MAX_TIMESTAMP_MS).unwrap();
@@ -92,6 +100,11 @@ fn records_follow_the_closed_schema() {
 #[test]
 fn requirements_and_record_counts_are_bounded() {
     assert_eq!(Requirement::new(Capability::OutputFormat, Some("json")), Err(EvidenceError::InvalidRequirement));
+    // As in Python, a valued capability is only ever required for a named value (model_acceptance for the model).
+    for capability in [Capability::ModelAcceptance, Capability::ReasoningEffort] {
+        assert_eq!(Requirement::new(capability, None), Err(EvidenceError::InvalidRequirement));
+        assert!(Requirement::new(capability, Some("v1")).is_ok());
+    }
     let twice = require(&[Capability::OutputFormat, Capability::OutputFormat]);
     assert_eq!(evaluate(ProviderId::Codex, &hash('a'), &run("p1"), &twice, &[]), Err(EvidenceError::InvalidRequirement));
     let records = vec![bound(Capability::OutputFormat, Source::CliHelp, Outcome::Pass); MAX_EVIDENCE_RECORDS];
@@ -108,7 +121,6 @@ fn each_source_has_one_ceiling_and_documentation_is_the_weakest() {
     assert_eq!(levels, Level::ALL);
     assert!(Level::ALL.windows(2).all(|w| w[0] < w[1]));
     assert_eq!(Source::VendorDocumentation.level(), Level::VendorDocumented);
-    assert!(Level::ALL.iter().all(|&l| l == Level::VendorDocumented || Level::VendorDocumented < l));
     let classes: Vec<Class> = Level::ALL.iter().map(|l| l.class()).collect();
     assert_eq!(classes, [Class::Advertised, Class::Advertised, Class::Advertised, Class::Observed, Class::Verified]);
 }
@@ -150,7 +162,7 @@ fn the_real_catalog_as_evidence_satisfies_nothing() {
         let evaluation = evaluate(provider, &hash('a'), &run("p1"), &require(&Capability::ALL), &records).unwrap();
         assert_eq!(evaluation.blocking.len(), Capability::ALL.len(), "{}", provider.id());
         for result in &evaluation.capabilities {
-            assert!(matches!(result.status, Status::InsufficientEvidence | Status::Unknown | Status::Unsupported), "{} {:?}", provider.id(), result);
+            assert!(matches!(result.status, Status::InsufficientEvidence | Status::Unknown), "{} {:?}", provider.id(), result);
             assert!(result.highest_level.is_none_or(|l| l == Level::VendorDocumented));
         }
     }
@@ -168,7 +180,7 @@ fn documentation_records_follow_the_catalog_statuses() {
     ]);
     // Not found, contradictory and unreviewed statements produce nothing: the capability stays unknown.
     let kimi: Vec<Capability> = documentation_records(ProviderId::Kimi, T0).unwrap().iter().map(|r| r.capability()).collect();
-    assert_eq!(kimi, [Capability::OutputFormat, Capability::ModelAcceptance]);
+    assert_eq!(kimi, [Capability::OutputFormat]);
     let evaluation = evaluate(ProviderId::Kimi, &hash('a'), &run("p1"), &require(&[Capability::ReasoningEffort]), &documentation_records(ProviderId::Kimi, T0).unwrap()).unwrap();
     assert_eq!(status_of(&evaluation, Capability::ReasoningEffort), Status::Unknown);
     assert_eq!(documentation_records(ProviderId::Codex, MAX_TIMESTAMP_MS + 1), Err(EvidenceError::InvalidTimestamp));
@@ -185,11 +197,10 @@ fn unknown_means_no_applicable_record() {
 
 #[test]
 fn unsupported_outranks_any_pass() {
-    let records = [bound(Capability::OutputFormat, Source::ExternalCheck, Outcome::Pass), bound(Capability::OutputFormat, Source::CliHelp, Outcome::Unsupported)];
-    assert_eq!(one(Capability::OutputFormat, &records), Status::Unsupported);
-    // Documentation saying a feature is unavailable also blocks: a provider's documentation can only worsen a status.
-    let records = [bound(Capability::OutputFormat, Source::ExternalCheck, Outcome::Pass), docs(ProviderId::Codex, Capability::OutputFormat, Outcome::Unsupported)];
-    assert_eq!(one(Capability::OutputFormat, &records), Status::Unsupported);
+    for source in [Source::AdapterDeclaration, Source::CliHelp, Source::RuntimeProbe, Source::ExternalCheck] {
+        let records = [bound(Capability::OutputFormat, Source::ExternalCheck, Outcome::Pass), bound(Capability::OutputFormat, source, Outcome::Unsupported)];
+        assert_eq!(one(Capability::OutputFormat, &records), Status::Unsupported, "{}", source.name());
+    }
 }
 
 #[test]
@@ -210,6 +221,8 @@ fn conflicts_resolve_to_the_most_severe_status() {
     assert_eq!(status(&[valued(Source::RuntimeProbe, Outcome::Fail, Some("m2"), None)]), Status::Unknown);
     assert_eq!(status(&[valued(Source::RuntimeProbe, Outcome::Pass, None, None)]), Status::InsufficientEvidence);
     assert_eq!(status(&[valued(Source::RuntimeProbe, Outcome::Pass, Some("m1"), None)]), Status::InsufficientEvidence);
+    // A pass with no requested value that observed another value is a mismatch, as in Python.
+    assert_eq!(status(&[valued(Source::RuntimeProbe, Outcome::Pass, None, Some("m2"))]), Status::Mismatch);
     let order: Vec<&str> = Status::ALL.iter().map(|s| s.name()).collect();
     assert_eq!(order, ["failed", "mismatch", "unsupported", "satisfied", "insufficient_evidence", "unknown"]);
     assert!(Status::ALL.windows(2).all(|w| w[0] < w[1]));
@@ -242,6 +255,35 @@ fn evidence_for_another_executable_is_stale_and_ignored_both_ways() {
 }
 
 #[test]
+fn evidence_for_another_executable_and_run_counts_as_stale() {
+    // The hash is checked first, as in Python: a record that differs in both is stale, not unbound.
+    let other = Record::new(Capability::OutputFormat, Source::ExternalCheck, Outcome::Pass, probe('b', "p2"), None, None, T0).unwrap();
+    let evaluation = judge(&require(&[Capability::OutputFormat]), &[other]);
+    assert_eq!((evaluation.stale_evidence, evaluation.unbound_evidence), (1, 0));
+}
+
+#[test]
+fn the_result_does_not_depend_on_record_order() {
+    let mut records = vec![
+        bound(Capability::OutputFormat, Source::RuntimeProbe, Outcome::Pass),
+        bound(Capability::ModelAcceptance, Source::ExternalCheck, Outcome::Pass),
+        bound(Capability::ModelAcceptance, Source::CliHelp, Outcome::Unsupported),
+        bound(Capability::ReadOnlyFilesystem, Source::RuntimeProbe, Outcome::Pass),
+        Record::new(Capability::ProcessTermination, Source::RuntimeProbe, Outcome::Fail, probe('a', "p1"), None, Some("timeout"), T0).unwrap(),
+        Record::new(Capability::OutputFormat, Source::ExternalCheck, Outcome::Pass, probe('b', "p1"), None, None, T0).unwrap(),
+        Record::new(Capability::OutputFormat, Source::ExternalCheck, Outcome::Fail, probe('a', "p2"), None, None, T0).unwrap(),
+        docs(ProviderId::Codex, Capability::ReasoningEffort, Outcome::Pass),
+        docs(ProviderId::Kimi, Capability::OutputFormat, Outcome::Pass),
+    ];
+    let required = require(&Capability::ALL);
+    let forward = judge(&required, &records);
+    records.reverse();
+    assert_eq!(judge(&required, &records), forward);
+    records.rotate_left(4);
+    assert_eq!(judge(&required, &records), forward);
+}
+
+#[test]
 fn evidence_from_another_probe_run_is_unbound_and_ignored() {
     let other_run = Record::new(Capability::OutputFormat, Source::ExternalCheck, Outcome::Pass, probe('a', "p2"), None, None, T0).unwrap();
     let evaluation = judge(&require(&[Capability::OutputFormat]), &[other_run]);
@@ -250,15 +292,15 @@ fn evidence_from_another_probe_run_is_unbound_and_ignored() {
 
 #[test]
 fn documentation_applies_to_its_provider_only_and_never_goes_stale() {
-    let records = [docs(ProviderId::Claude, Capability::OutputFormat, Outcome::Unsupported), docs(ProviderId::Codex, Capability::OutputFormat, Outcome::Pass)];
+    let records = [docs(ProviderId::Claude, Capability::OutputFormat, Outcome::Pass), docs(ProviderId::Codex, Capability::OutputFormat, Outcome::Pass)];
     // Asked about Codex: Claude's documentation is ignored and counted, and Codex's applies whatever the executable.
     for executable in ['a', 'b', 'c'] {
         let evaluation = evaluate(ProviderId::Codex, &hash(executable), &run("p9"), &require(&[Capability::OutputFormat]), &records).unwrap();
         assert_eq!(status_of(&evaluation, Capability::OutputFormat), Status::InsufficientEvidence);
         assert_eq!((evaluation.other_provider_evidence, evaluation.stale_evidence, evaluation.unbound_evidence), (1, 0, 0));
     }
-    let evaluation = evaluate(ProviderId::Claude, &hash('a'), &run("p1"), &require(&[Capability::OutputFormat]), &records).unwrap();
-    assert_eq!(status_of(&evaluation, Capability::OutputFormat), Status::Unsupported);
+    let evaluation = evaluate(ProviderId::Kimi, &hash('a'), &run("p1"), &require(&[Capability::OutputFormat]), &records).unwrap();
+    assert_eq!((status_of(&evaluation, Capability::OutputFormat), evaluation.other_provider_evidence), (Status::Unknown, 2));
 }
 
 #[test]

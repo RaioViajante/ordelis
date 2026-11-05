@@ -1,4 +1,4 @@
-// The evidence vocabulary, mirrored from runtime/runtime_validation.py (see docs/guides/runtime-validation-foundations.md
+// The evidence vocabulary, mirrored from runtime/runtime_validation.py (see the runtime-validation guide in docs/guides
 // and the differences listed in docs/implementation/desktop-agents.md). It judges supplied records and nothing else.
 //
 // Records are unauthenticated caller data: an evaluation cannot tell a record built by trusted code from a forged one,
@@ -84,8 +84,13 @@ pub(crate) enum Source {
 }
 
 impl Source {
-    pub(crate) const ALL: [Source; 5] =
-        [Source::VendorDocumentation, Source::AdapterDeclaration, Source::CliHelp, Source::RuntimeProbe, Source::ExternalCheck];
+    pub(crate) const ALL: [Source; 5] = [
+        Source::VendorDocumentation,
+        Source::AdapterDeclaration,
+        Source::CliHelp,
+        Source::RuntimeProbe,
+        Source::ExternalCheck,
+    ];
 
     pub(crate) const fn name(self) -> &'static str {
         match self {
@@ -180,8 +185,15 @@ impl Outcome {
 }
 
 /// The closed failure vocabulary for capabilities without values (Python's `OBSERVATIONS`). Never allowed on a pass.
-pub(crate) const OBSERVATIONS: [&str; 7] =
-    ["timeout", "cancelled", "descendant_survived", "write_succeeded", "network_reachable", "session_data_written", "malformed_output"];
+pub(crate) const OBSERVATIONS: [&str; 7] = [
+    "timeout",
+    "cancelled",
+    "descendant_survived",
+    "write_succeeded",
+    "network_reachable",
+    "session_data_written",
+    "malformed_output",
+];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum EvidenceError {
@@ -193,13 +205,15 @@ pub(crate) enum EvidenceError {
     InvalidValues,
     /// Vendor documentation must be bound to a provider, and every other source to one probe run.
     SourceBindingMismatch,
-    /// Documentation describes; it cannot witness a failure or observe a value.
+    /// Documentation only describes: it is a pass with no values, never a failure, an unsupported outcome or an
+    /// observation. (Absence from a page is not evidence of absence, so documentation never blocks a capability.)
     InvalidDocumentationRecord,
     /// Above MAX_TIMESTAMP_MS.
     InvalidTimestamp,
     /// More than MAX_EVIDENCE_RECORDS records.
     TooManyRecords,
-    /// A capability required twice, or a requested value on a capability without values.
+    /// A capability required twice, a value on a capability without values, or a valued capability required without
+    /// the value it must have (Python always requires model_acceptance for a named model).
     InvalidRequirement,
 }
 
@@ -283,7 +297,7 @@ impl Record {
         if documentation != matches!(binding, Binding::Documentation(_)) {
             return Err(EvidenceError::SourceBindingMismatch);
         }
-        if documentation && (outcome == Outcome::Fail || requested.is_some() || observed.is_some()) {
+        if documentation && (outcome != Outcome::Pass || requested.is_some() || observed.is_some()) {
             return Err(EvidenceError::InvalidDocumentationRecord);
         }
         if recorded_at_ms > MAX_TIMESTAMP_MS {
@@ -322,7 +336,7 @@ pub(crate) struct Requirement {
 
 impl Requirement {
     pub(crate) fn new(capability: Capability, wanted: Option<&str>) -> Result<Requirement, EvidenceError> {
-        if wanted.is_some() && !capability.valued() {
+        if wanted.is_some() != capability.valued() {
             return Err(EvidenceError::InvalidRequirement);
         }
         Ok(Requirement { capability, wanted: wanted.map(Token::new).transpose()? })
@@ -342,8 +356,14 @@ pub(crate) enum Status {
 }
 
 impl Status {
-    pub(crate) const ALL: [Status; 6] =
-        [Status::Failed, Status::Mismatch, Status::Unsupported, Status::Satisfied, Status::InsufficientEvidence, Status::Unknown];
+    pub(crate) const ALL: [Status; 6] = [
+        Status::Failed,
+        Status::Mismatch,
+        Status::Unsupported,
+        Status::Satisfied,
+        Status::InsufficientEvidence,
+        Status::Unknown,
+    ];
 
     pub(crate) const fn name(self) -> &'static str {
         match self {
@@ -429,7 +449,13 @@ pub(crate) fn evaluate(
             status,
         });
     }
-    Ok(Evaluation { capabilities, stale_evidence: stale, unbound_evidence: unbound, other_provider_evidence: other_provider, blocking })
+    Ok(Evaluation {
+        capabilities,
+        stale_evidence: stale,
+        unbound_evidence: unbound,
+        other_provider_evidence: other_provider,
+        blocking,
+    })
 }
 
 /// Python's `_capability_status`, rule for rule.
@@ -461,7 +487,9 @@ fn capability_status(capability: Capability, wanted: Option<&Token>, records: &[
 }
 
 /// The capability a documented feature speaks to, where one exists. Most features have no counterpart among the
-/// eight capabilities and produce no record.
+/// eight capabilities and produce no record. A documentation pass means what a cli_help pass means, at a weaker
+/// level: a control for the capability is described (a model option, not that a model is accepted; an option to run
+/// without persistence, not that nothing is written).
 pub(crate) const fn documented_capability(feature: Feature) -> Option<Capability> {
     match feature {
         Feature::StructuredOutput => Some(Capability::OutputFormat),

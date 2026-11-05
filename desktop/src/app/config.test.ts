@@ -85,11 +85,14 @@ function agentSources(): Record<string, string> {
   return Object.fromEntries([...production].map((f) => [f.slice("src/".length), read(`src-tauri/${f}`)]));
 }
 
-// Rust code with comments removed and every string literal emptied, so that documentation text (URLs, flag names in
-// notes) is never mistaken for code and code is never hidden in a comment. Raw strings are refused separately.
+// Rust code with comments removed and every string and character literal emptied, so that documentation text (URLs,
+// flag names in notes) is never mistaken for code and code is never hidden in a comment or behind a quote character.
+// Path separators lose their surrounding spaces (`crate :: x` is `crate::x`). Raw strings are refused separately.
+const CHAR_LITERAL = /'(?:\\u\{[0-9A-Fa-f]{1,6}\}|\\x[0-9A-Fa-f]{2}|\\.|[^\\'\n])'/y;
 function rustCodeOnly(text: string): string {
   let out = "";
   for (let i = 0; i < text.length; ) {
+    CHAR_LITERAL.lastIndex = i;
     if (text.startsWith("//", i)) {
       const end = text.indexOf("\n", i);
       i = end < 0 ? text.length : end;
@@ -97,6 +100,10 @@ function rustCodeOnly(text: string): string {
       const end = text.indexOf("*/", i + 2);
       i = end < 0 ? text.length : end + 2;
       out += " ";
+    } else if (text[i] === "'" && CHAR_LITERAL.test(text)) {
+      // A character or byte literal; a lifetime such as 'static has no closing quote and is kept as code.
+      out += "''";
+      i = CHAR_LITERAL.lastIndex;
     } else if (text[i] === '"') {
       let j = i + 1;
       while (j < text.length && text[j] !== '"') j += text[j] === "\\" ? 2 : 1;
@@ -106,17 +113,18 @@ function rustCodeOnly(text: string): string {
       out += text[i++];
     }
   }
-  return out;
+  return out.replace(/\s*::\s*/g, "::");
 }
 
 // Content rules for the provider catalog and evidence vocabulary: pure data and pure functions. No process, file,
 // network, environment, clock, thread, global state, FFI, unsafe code or included file; no Tauri, serde or libc; no
-// command; nothing visible outside the crate; no import from outside the agents module; no field that could hold a
-// path, a search location or an argument vector; and no macro other than matches!.
+// command; nothing visible outside the crate; no path into the rest of the crate (agents.rs names no `super`, and its
+// two modules reach only each other); no identifier that could hold a path, a search location, an argument vector or
+// a command; and no macro other than matches!.
 function agentContentViolations(files: Record<string, string>): string[] {
   const violations: string[] = [];
   for (const [file, text] of Object.entries(files)) {
-    if (/\br#*"/.test(text)) violations.push(`${file}: raw string`);
+    if (/(?<![A-Za-z0-9_])[bc]?r#*"/.test(text)) violations.push(`${file}: raw string`);
     const code = rustCodeOnly(text);
     const forbidden = [
       /\b(?:std|core|alloc)::/,
@@ -127,9 +135,12 @@ function agentContentViolations(files: Record<string, string>): string[] {
       /\bstatic\s+mut\b|\b(?:thread_local|OnceLock|OnceCell|LazyLock|LazyCell|lazy_static|Cell|RefCell|Mutex|RwLock|Arc|Rc)\b|\bAtomic\w*/,
       /\b(?:unsafe|extern)\b|#\s*!?\s*\[\s*(?:link|no_mangle|export_name|path|used|link_section)\b/,
       /\b(?:tauri|serde|serde_json|libc|rfd)\b|invoke_handler|generate_handler/,
-      /\bcrate::(?!agents::)|\bsuper::super::/,
+      // The rest of the crate: by `crate`, by the sibling modules' names, or through `super` from agents.rs (where it
+      // is the crate root). catalog.rs and evidence.rs may name only each other through `super`.
+      /(?<!pub\()\bcrate\b|\b(?:runtime_bridge|store|projects|tasks|lib|main)\b/,
+      file === "agents.rs" ? /\bsuper\b/ : /\bsuper\b(?!::(?:catalog|evidence)\b)/,
       /\bpub\s+(?!\((?:crate|super)\))/,
-      /\b(?:argv|args|arguments|command_line|search_paths?|candidates?|dirs?|directory|directories|paths?|location)\b/,
+      /\b\w*(?:path|argv|args|arguments|dirs?(?![a-z])|director|search|location|candidate|command|launch|invoke)\w*\b/i,
     ];
     for (const pattern of forbidden) {
       const hit = code.match(pattern);
@@ -442,6 +453,21 @@ describe("desktop trust boundary", () => {
       "a raw string": add("agents/catalog.rs", 'const R: &str = r"--version";'),
       "another macro": add("agents/evidence.rs", 'fn s() { println!("x"); }'),
       "a module from another file": add("agents.rs", '#[path = "../store.rs"]\nmod t;'),
+      // Independent review of #110: escapes into the rest of the crate, code behind a quote character, byte and C raw
+      // strings, and compound identifiers.
+      "the crate root through super in agents.rs": add("agents.rs", "pub(crate) fn v() { let _ = super::runtime_bridge::query(); }"),
+      "a sibling module imported through super": add("agents.rs", "use super::store;"),
+      "a crate path with spaces": add("agents/catalog.rs", "fn w() { let _ = crate :: runtime_bridge :: query(); }"),
+      "the crate renamed": add("agents/catalog.rs", "use crate as root;"),
+      "super of super renamed": add("agents/evidence.rs", "use super::super as root;"),
+      "a root import through super": add("agents/evidence.rs", "#[derive(super::Serialize)]\nstruct X;"),
+      "a root type through super": add("agents/evidence.rs", "fn y(_: super::State<'_, u8>) {}"),
+      "code between quote characters": add("agents/evidence.rs", "fn z() { let _q = '\"'; let _ = std::process::Command::new(\"sh\"); let _r = '\"'; }"),
+      "code between escaped quote characters": add("agents/catalog.rs", "fn aa() { let _q = b'\\\"'; let _ = std::fs::read(\"x\"); let _r = '\\\"'; }"),
+      "a byte raw string": add("agents/catalog.rs", 'const AB: &[u8] = br"\\"; fn ac() { let _ = std::fs::read(br"\\"); }'),
+      "a C raw string": add("agents/catalog.rs", 'const AD: &str = cr"x";'),
+      "compound identifiers": add("agents/catalog.rs", "struct AE { executable_path: &'static str, launch_args: &'static [&'static str], search_dirs: u8 }"),
+      "a command template": add("agents/catalog.rs", "const VERSION_COMMAND: [&str; 0] = [];"),
     };
     for (const [name, files] of Object.entries(bypasses)) {
       expect(agentContentViolations(files), name).not.toEqual([]);

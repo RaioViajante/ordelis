@@ -5,6 +5,8 @@
 // version is installed, that it behaves as documented, or that an account can use it. The catalog holds no path, no
 // search location, no argument vector and no authentication check: a documented executable name is metadata about
 // the product, never something to look up or run.
+use Feature::*;
+use Reading::{Summarized, Verbatim};
 
 /// Stable provider identifiers. `codex`, `claude` and `opencode` match the inherited runtime's adapter ids.
 /// `kimi` is the dedicated Kimi Code CLI; Kimi through OpenCode is a separate route that is not decided (#108).
@@ -180,7 +182,7 @@ const fn not_reviewed(feature: Feature) -> Claim {
 
 // References. Retrieved 2026-11-05; only the OpenCode pages showed a last-updated date.
 
-static CODEX_COMMANDS: Reference = Reference {
+static CODEX_CLI: Reference = Reference {
     title: "Codex: developer commands (redirected from developers.openai.com/codex/cli/reference)",
     url: "https://learn.chatgpt.com/docs/developer-commands?surface=cli",
     retrieved_on: RETRIEVED,
@@ -228,67 +230,65 @@ static OPENCODE_SERVER: Reference = Reference {
     retrieved_on: RETRIEVED,
     page_updated: None,
 };
-static KIMI_COMMAND: Reference = Reference {
+static KIMI_CLI: Reference = Reference {
     title: "Kimi Code CLI: the kimi command",
     url: "https://www.kimi.com/code/docs/en/kimi-code-cli/reference/kimi-command.html",
     retrieved_on: RETRIEVED,
     page_updated: None,
 };
 
-use Feature::*;
-use Reading::{Summarized, Verbatim};
 
 static CODEX: Provider = Provider {
     id: ProviderId::Codex,
     display_name: "Codex",
     executable_name: "codex",
-    executable_name_reference: &CODEX_COMMANDS,
+    executable_name_reference: &CODEX_CLI,
     notes: &[
         "The command reference redirected to learn.chatgpt.com. Parts of it, and of the sandbox page, were read \
         only as a summary.",
     ],
     claims: &[
-        documented(NonInteractiveMode, Verbatim, &CODEX_COMMANDS, "codex exec runs Codex non-interactively."),
+        documented(NonInteractiveMode, Verbatim, &CODEX_CLI, "codex exec runs Codex non-interactively."),
         documented(StructuredOutput, Summarized, &CODEX_NON_INTERACTIVE, "codex exec --json emits JSON Lines events."),
         documented(
-            ModelSelection, Verbatim, &CODEX_COMMANDS,
+            ModelSelection, Verbatim, &CODEX_CLI,
             "A global --model option takes a model name. Whether an account can use a model is not documented here.",
         ),
         not_found(
-            ReasoningEffort, Summarized, &CODEX_COMMANDS,
+            ReasoningEffort, Summarized, &CODEX_CLI,
             "No dedicated effort option; only the generic --config key=value override. The repository's Codex \
             inspection guide cites a model_reasoning_effort key that was not re-read.",
         ),
         documented(
-            PermissionModes, Verbatim, &CODEX_COMMANDS,
+            PermissionModes, Verbatim, &CODEX_CLI,
             "--sandbox read-only, workspace-write or danger-full-access; --ask-for-approval on-request or never.",
         ),
         not_found(
-            ApprovalRouting, Verbatim, &CODEX_COMMANDS,
+            ApprovalRouting, Verbatim, &CODEX_CLI,
             "codex app-server is marked Experimental; the reviewed official pages do not describe its approval \
             requests.",
         ),
         not_found(
-            HostAssignedSessionId, Summarized, &CODEX_COMMANDS,
+            HostAssignedSessionId, Summarized, &CODEX_CLI,
             "No option to choose a new session's identifier was found.",
         ),
         documented(
-            SessionResume, Summarized, &CODEX_COMMANDS,
+            SessionResume, Summarized, &CODEX_CLI,
             "codex exec resume takes a session identifier or --last.",
         ),
-        documented(SessionPersistenceOff, Summarized, &CODEX_COMMANDS, "codex exec --ephemeral."),
+        documented(SessionPersistenceOff, Summarized, &CODEX_CLI, "codex exec --ephemeral."),
         documented(
             ProviderSandbox, Summarized, &CODEX_SANDBOX,
             "Codex sandboxes itself with Seatbelt on macOS and bubblewrap on Linux. Whether workspace-write blocks \
             the network by default was not found.",
         ),
         not_found(
-            AgentClientProtocol, Summarized, &CODEX_COMMANDS,
+            AgentClientProtocol, Summarized, &CODEX_CLI,
             "No ACP mode in the reviewed reference, so the inherited runtime's ACP launch command for Codex is \
             undocumented.",
         ),
         documented(
-            LocalServer, Verbatim, &CODEX_COMMANDS,
+            LocalServer, Verbatim, &CODEX_CLI,
             "codex app-server exists and is marked Experimental. Its transport was not reviewed.",
         ),
     ],
@@ -398,28 +398,28 @@ static KIMI: Provider = Provider {
     id: ProviderId::Kimi,
     display_name: "Kimi Code CLI",
     executable_name: "kimi",
-    executable_name_reference: &KIMI_COMMAND,
+    executable_name_reference: &KIMI_CLI,
     notes: &[
         "The dedicated Kimi Code CLI only. Kimi through OpenCode is a separate route, and the Kimi decision gate is \
         open.",
         "Read from search excerpts of the official reference, not its full text.",
     ],
     claims: &[
-        documented(NonInteractiveMode, Summarized, &KIMI_COMMAND, "--print runs non-interactively."),
+        documented(NonInteractiveMode, Summarized, &KIMI_CLI, "--print runs non-interactively."),
         documented(
-            StructuredOutput, Summarized, &KIMI_COMMAND,
+            StructuredOutput, Summarized, &KIMI_CLI,
             "--output-format stream-json emits JSON Lines, only together with --prompt.",
         ),
-        documented(
-            ModelSelection, Summarized, &KIMI_COMMAND,
-            "Only an example with -m was found; the option itself is not described.",
+        not_found(
+            ModelSelection, Summarized, &KIMI_CLI,
+            "Only an example invocation with -m was seen; the option itself is not described.",
         ),
-        not_found(ReasoningEffort, Summarized, &KIMI_COMMAND, "No reasoning or thinking control was found."),
+        not_found(ReasoningEffort, Summarized, &KIMI_CLI, "No reasoning or thinking control was found."),
         Claim {
             feature: PermissionModes,
             status: DocStatus::Contradictory,
             reading: Summarized,
-            reference: Some(&KIMI_COMMAND),
+            reference: Some(&KIMI_CLI),
             note: "One version says print mode implies --yolo; another says non-interactive mode approves \
                   automatically by default and rejects --yolo, --auto and --plan with --prompt.",
         },
@@ -429,7 +429,7 @@ static KIMI: Provider = Provider {
         not_reviewed(SessionPersistenceOff),
         not_reviewed(ProviderSandbox),
         documented(
-            AgentClientProtocol, Summarized, &KIMI_COMMAND,
+            AgentClientProtocol, Summarized, &KIMI_CLI,
             "kimi acp starts an ACP server over standard input and output; the --acp option is deprecated.",
         ),
         not_reviewed(LocalServer),
