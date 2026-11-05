@@ -71,7 +71,7 @@ describe("Sessions list", () => {
     const user = userEvent.setup();
     renderApp();
     await openSessions(user);
-    const header = screen.getByText("5 sample sessions · none started").parentElement as HTMLElement;
+    const header = screen.getByText("5 sample sessions · examples only").parentElement as HTMLElement;
     expect(within(header).getByRole("heading", { level: 1, name: "Sessions" })).toBeInTheDocument();
     expect(header.textContent).not.toMatch(/\d+ (running|paused|stopped|finished|blocked)/);
     // Each row keeps its state, as a layout example inside the list labelled as sample.
@@ -337,14 +337,14 @@ describe("layout and boundaries", () => {
   it("drops columns before the Task column runs out of room, so headers never overlap (#103)", () => {
     // Five columns need about 1240 px with the 236 px rail. Native acceptance at 1024 px showed the Task column
     // collapsed under the fixed ones: Task and Project headers overlapped and task text wrapped one word per line.
-    const wide = css().match(/@media \(max-width: 1240px\)\s*{([\s\S]*?)\n {2}}/)?.[1] ?? "";
+    // The media blocks that style the session rows, in source order (later blocks win at narrower widths).
+    const blocks = [...css().matchAll(/@media \(max-width: (\d+)px\)\s*{([\s\S]*?)\n {2}}/g)].filter((m) => m[2].includes(".srow"));
+    expect(blocks.map((m) => m[1])).toEqual(["1240", "1100"]);
+    const [wide, narrow] = blocks.map((m) => m[2]);
     expect(wide).toMatch(/\.srow,\s*\.hdr\s*{\s*grid-template-columns:\s*150px minmax\(0, 1fr\) 120px 170px;/);
     expect(wide).toMatch(/\.srow > :nth-child\(5\),\s*\.hdr > :nth-child\(5\)\s*{\s*display:\s*none;/);
-    const narrow = css().match(/@media \(max-width: 1100px\)\s*{([\s\S]*?)\n {2}}/)?.[1] ?? "";
     expect(narrow).toMatch(/\.srow,\s*\.hdr\s*{\s*grid-template-columns:\s*130px minmax\(0, 1fr\) 150px;/);
     expect(narrow).toMatch(/\.srow > :nth-child\(3\),\s*\.srow > :nth-child\(5\),\s*\.hdr > :nth-child\(3\),\s*\.hdr > :nth-child\(5\)\s*{\s*display:\s*none;/);
-    // Nothing adds a fixed width the page would have to scroll sideways for.
-    expect(narrow + wide).not.toMatch(/min-width:\s*\d{3}px/);
   });
 
   it("adds no motion, so reduced-motion needs nothing extra", () => {

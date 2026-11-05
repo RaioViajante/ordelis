@@ -28,7 +28,7 @@ export function Sessions() {
         </PageTitle>
         <span className="sp" />
         {/* A summary never counts samples as running or paused (#103); each row shows its state as a layout example. */}
-        <span className="meta">{on ? `${all.length} sample sessions · none started` : "0 sessions"}</span>
+        <span className="meta">{on ? `${all.length} sample sessions · examples only` : "0 sessions"}</span>
       </div>
 
       {!on ? (

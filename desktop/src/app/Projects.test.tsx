@@ -552,7 +552,7 @@ describe("Home, sidebar and persistence", () => {
     await user.click(atlas);
     await main().findByRole("heading", { level: 2, name: "atlas-api" });
     const stage = main().getByText("Sessions", { selector: ".stage-i b" }).parentElement as HTMLElement;
-    expect(stage).toHaveTextContent("2 sample sessions, none started");
+    expect(stage).toHaveTextContent(/^Sessions2 sample sessions$/);
     // Per-worktree states stay as layout examples, in a section labelled as sample like Context.
     const workspace = main().getByRole("heading", { level: 2, name: "Workspace" }).parentElement as HTMLElement;
     expect(within(workspace).getByText("sample")).toBeInTheDocument();

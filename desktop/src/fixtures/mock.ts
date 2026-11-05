@@ -70,7 +70,7 @@ export const MOCK_PROJECTS: MockProject[] = [
     stages: [
       { label: "Workspace", tone: "ok", text: "3 worktrees" },
       { label: "Context", tone: "ok", text: "sample vault · 4 sample notes" },
-      { label: "Sessions", tone: "you", text: "2 sample sessions, none started" },
+      { label: "Sessions", tone: "you", text: "2 sample sessions" },
       { label: "Changes", tone: "warn", text: "1 approved, not applied" },
     ],
     repo: "git · origin/main",

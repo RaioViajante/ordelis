@@ -209,7 +209,7 @@ Tasks is `⌘2` in the sidebar, and New Task opens `#/tasks/new`.
   - While a save is in flight, every page freezes the draft: fields are read-only, and the picker, Discard and New task in this project are unavailable. The provider also refuses to discard during a save, so a draft being written is never reported as discarded.
 - **Leaving and discarding.**
   - New task's secondary link is **Back to Tasks**, which leaves the draft as it is.
-  - New task keeps **Draft plan** and **Save task** together on the right; when the row is too narrow they wrap as a pair, never Save task alone. The "What happens next" aside moves below the form at 1100 px, so at 1024 px the four actions fit on one row ([#103](https://github.com/RaioViajante/ordelis/issues/103)).
+  - New task keeps **Draft plan** and **Save task** together on the right; when the row is too narrow they wrap as a pair, never Save task alone. The "What happens next" aside moves below the form at 1100 px, so by the layout arithmetic the four actions fit on one row at 1024 px; native verification is pending ([#103](https://github.com/RaioViajante/ordelis/issues/103)).
   - **Discard draft…**, on both pages, appears once there is text and asks for confirmation (Cancel has focus, Escape cancels).
   - The pages say the draft is shared, stays while moving around Ordelis, and is not kept when Ordelis quits.
 - **Home.** The composer (Title, Description, the project picker, Context and Draft plan disabled with their reasons, **Save task**), then the five most recently updated drafts with All tasks, then Recent projects with their draft counts. Loading, empty and error states say what is true; a task file that can't be read is an error with Try again, never an empty list.
