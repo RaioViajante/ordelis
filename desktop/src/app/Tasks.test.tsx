@@ -40,6 +40,7 @@ let taskFailure: string | null = null;
 /** Per project id, an unreadable registry ("unknown") instead of the link the registrations imply. */
 let links: Record<string, "unknown"> = {};
 let holdCreate: ((v: unknown) => void)[] | null = null;
+let holdList: (() => void)[] | null = null;
 let clock = 1_790_000_000_000;
 
 const flag = globalThis as { isTauri?: boolean };
@@ -64,10 +65,11 @@ function native() {
     const args = raw as Record<string, unknown>;
     calls.push({ cmd, args });
     if (cmd === "list_projects") {
-      return {
+      const answer = {
         schema_version: 1,
         projects: projects.map((p) => ({ id: p.id, name: p.name, path_display: `~/Code/${p.name}`, status: "available", registered_at_ms: at(p) })),
       };
+      return holdList ? new Promise((resolve) => holdList!.push(() => resolve(answer))) : answer;
     }
     if (cmd === "remove_project") {
       const found = projects.some((p) => p.id === args.id);
@@ -156,8 +158,11 @@ beforeEach(() => {
   taskFailure = null;
   links = {};
   holdCreate = null;
+  holdList = null;
 });
 afterEach(() => {
+  // A held answer is released even when its test failed early, so the next test never waits on it.
+  holdList?.splice(0).forEach((release) => release());
   delete flag.isTauri;
   clearMocks();
   window.location.hash = "";
@@ -407,8 +412,17 @@ describe("Tasks page", () => {
 });
 
 describe("New task", () => {
+  // The select renders at once, disabled and with only "Loading projects…"; the registered projects arrive later with
+  // the answer to list_projects. So wait for the option, not the select, or a slow runner chooses before it exists
+  // (#107). user-event silently ignores a disabled select, so check that the choice took.
+  async function chooseProject(user: ReturnType<typeof userEvent.setup>) {
+    await main().findByRole("option", { name: "atlas-api" });
+    const select = main().getByRole("combobox", { name: "Project" });
+    await user.selectOptions(select, "p1");
+    expect(select).toHaveValue("p1");
+  }
   async function fill(user: ReturnType<typeof userEvent.setup>, title: string, description = "") {
-    await user.selectOptions(await main().findByRole("combobox", { name: "Project" }), "p1");
+    await chooseProject(user);
     await user.type(main().getByRole("textbox", { name: /Title/ }), title);
     if (description) await user.type(main().getByRole("textbox", { name: /Description/ }), description);
   }
@@ -420,6 +434,24 @@ describe("New task", () => {
     expect(await main().findByText(/Every task belongs to one of your project folders/)).toBeInTheDocument();
     expect(main().getByRole("link", { name: "Go to Projects" })).toHaveAttribute("href", "#/projects");
     expect(main().getByRole("button", { name: "Save task" })).toHaveAccessibleDescription("Add a project first.");
+  });
+
+  it("offers no project until the registered ones have loaded, and saves the one chosen after they arrive (#107)", async () => {
+    const user = userEvent.setup();
+    native();
+    holdList = [];
+    renderApp("#/tasks/new");
+    const select = await main().findByRole("combobox", { name: "Project" });
+    expect(select).toBeDisabled();
+    expect(select).toHaveDisplayValue("Loading projects…");
+    expect(within(select).getAllByRole("option")).toHaveLength(1);
+    expect(holdList).toHaveLength(1);
+    // The answer arrives while the form is already being filled in, as on a slow runner.
+    setTimeout(() => holdList?.splice(0).forEach((release) => release()), 20);
+    await fill(user, "After loading");
+    await user.click(main().getByRole("button", { name: "Save task" }));
+    expect(await main().findByRole("heading", { level: 1, name: "After loading" })).toBeInTheDocument();
+    expect(lastArgs("create_task")).toEqual({ project_id: "p1", expected_registered_at_ms: 1, title: "After loading", description: "" });
   });
 
   it("saves a draft through create_task, opens it, and finds it again after a restart", async () => {
@@ -448,7 +480,7 @@ describe("New task", () => {
     const user = userEvent.setup();
     native();
     renderApp("#/tasks/new");
-    await user.selectOptions(await main().findByRole("combobox", { name: "Project" }), "p1");
+    await chooseProject(user);
     await user.click(main().getByRole("button", { name: "Save task" }));
     expect(main().getByRole("alert")).toHaveTextContent("Give the task a title.");
     const title = main().getByRole("textbox", { name: /Title/ });
