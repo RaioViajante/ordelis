@@ -12,7 +12,7 @@ Nothing here is a release commitment, a delivery date or a version number.
 | --- | --- | --- |
 | [A. Workspace and projects](#a-workspace-and-projects) | **Prototype** pages (mostly sample data); **Foundation** project registry (macOS) | [Overview](../architecture/overview.md) |
 | [B. Agent integrations](#b-agent-integrations) | **Working** in the inherited CLI; **Foundation** provider catalog in the desktop, with no discovery or execution | [Agents](../architecture/agents.md) |
-| [C. Planning and task delegation](#c-planning-and-task-delegation) | **Working** saved tasks in the desktop (native acceptance pending); **Prototype** task preview; **Working** non-dispatching plan on the command line (added since the fork) | [Orchestration](../architecture/orchestration.md) |
+| [C. Planning and task delegation](#c-planning-and-task-delegation) | **Working** saved tasks in the desktop (natively accepted, [#86](https://github.com/RaioViajante/ordelis/issues/86)); **Prototype** task preview; **Working** non-dispatching plan on the command line (added since the fork) | [Orchestration](../architecture/orchestration.md) |
 | [D. Orchestration and execution](#d-orchestration-and-execution) | **Working** in the inherited CLI; **Foundation** safety gate; nothing in the desktop | [Execution](../architecture/execution.md) |
 | [E. Git and worktree isolation](#e-git-and-worktree-isolation) | **Planned** | [Worktrees](../architecture/worktrees.md) |
 | [F. Context management](#f-context-management) | **Working** vault preview on the command line (added since the fork); **Prototype** Context page | [Context](../architecture/context.md) |
@@ -83,7 +83,7 @@ Providers do not expose the same capabilities. Ordelis does not assume they do.
 
 **Today**
 
-- *Working, desktop (native acceptance pending).* Saved tasks: Home's composer, Tasks, New task and the task detail create, list, edit, archive and restore a task with a title and description for a registered project, kept on this Mac. Home lists recent drafts, each registered project lists its tasks, and the sidebar counts drafts. A saved task is a draft or archived and starts nothing; Draft plan stays disabled. Tested against the Rust store and, in the interface, against a mocked native layer. See [saved tasks](../implementation/desktop-tasks.md#interface).
+- *Working, desktop (natively accepted in [#86](https://github.com/RaioViajante/ordelis/issues/86)).* Saved tasks: Home's composer, Tasks, New task and the task detail create, list, edit, archive and restore a task with a title and description for a registered project, kept on this Mac. Home lists recent drafts, each registered project lists its tasks, and the sidebar counts drafts. A saved task is a draft or archived and starts nothing; Draft plan stays disabled. Tested against the Rust store and, in the interface, against a mocked native layer, and accepted in the packaged app in a disposable, offline macOS VM (UI fixes in [#103](https://github.com/RaioViajante/ordelis/issues/103)). See [saved tasks](../implementation/desktop-tasks.md#interface).
 - *Prototype.* Read-only previews of sample tasks.
 - *Working, command line, added since the fork.* `mco context plan` produces one deterministic, private, non-dispatching plan from a task, selected context and policy, and reports unknown settings as unknown. It is not stage decomposition. See the [guide](../guides/private-execution-plan.md).
 - *Planned.* Everything else in this group.
