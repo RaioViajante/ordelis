@@ -67,8 +67,9 @@ The adapter boundary is what keeps orchestration independent of any one agent. A
 - *Working, inherited CLI.* Adapters for Claude Code, Codex CLI, OpenCode and other agents, a configurable custom-agent path including an ACP transport, `mco doctor` for installation and authentication readiness, and `mco agent list`, `check` and `models`. The permission modes `read_only`, `write` and `yolo` are mapped to each provider's own controls, and strict mode rejects a policy the adapter cannot express. See [provider permissions](../contracts/provider-permissions-v0.1.x.md).
 - *Working, command line, added since the fork.* `mco context inspect-codex`, an explicit Codex version and help inspection ([guide](../guides/codex-cli-capability-inspection.md)).
 - *Foundation.* A closed evidence schema and evaluator that keep unverified requirements blocking ([guide](../guides/runtime-validation-foundations.md)), and a probe runner exercised only with fake executables.
+- *Foundation, desktop ([D3.2a](../implementation/desktop-agents.md)).* A pure Rust provider catalog for Codex, Claude Code, OpenCode and Kimi, recording what each vendor's documentation claims (advertised only, with references and dates), and the same evidence vocabulary in Rust, under which documentation can never be promoted to observed or verified. No command or page uses it, and it finds and runs nothing. Passive discovery is not implemented, active probes are not authorized, and authentication stays unchecked.
 - *Gaps recorded in the audit.* The Claude and OpenCode adapters currently ignore an invocation's model; the model catalog probes only some providers; there is no common reasoning-level control; there is no Kimi adapter.
-- *Prototype.* The Agents page, which shows every fact as unknown and says nothing was checked.
+- *Prototype.* The Agents page, which shows every fact as unknown and says nothing was checked. It does not read the catalog and shows no installed agent.
 
 ## Open questions
 

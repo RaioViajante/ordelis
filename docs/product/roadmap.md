@@ -30,7 +30,7 @@ Where a phase has no issue yet, none is linked. Issues are created when a phase 
 
 ### 4. Provider discovery and capability integration
 
-**Not started in the desktop.** The inherited CLI already detects installed agents and checks readiness, and the Codex inspection and probe foundations exist. This phase connects real discovery to the Agents page, and records what each provider actually supports, one provider at a time, starting with read-only checks. The Kimi decision gate is part of it. See [Agents](../architecture/agents.md).
+**Started in the desktop with a foundation only.** The inherited CLI already detects installed agents and checks readiness, and the Codex inspection and probe foundations exist. In the desktop, the D3.2 design record ([#108](https://github.com/RaioViajante/ordelis/issues/108)) and a pure provider catalog and evidence vocabulary ([#109](https://github.com/RaioViajante/ordelis/issues/109), [details](../implementation/desktop-agents.md)) exist; nothing locates, runs or authenticates an agent. This phase connects real discovery to the Agents page, and records what each provider actually supports, one provider at a time, starting with read-only checks. The Kimi decision gate is part of it. See [Agents](../architecture/agents.md).
 
 ### 5. Task planning and approvals
 
