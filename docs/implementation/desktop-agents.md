@@ -86,7 +86,7 @@ Mirrored from `runtime/runtime_validation.py` ([guide](../guides/runtime-validat
 
 `config.test.ts` checks the compiled `src/agents*` files, listed in `scripts/native-sources.json` and verified against the compiler's dep-info by `verify-native-boundary.mjs`. Before the rules apply:
 
-- comments are dropped;
+- comments are dropped, nested block comments included;
 - string, character and byte literals are emptied, so documentation text is never read as code and a quote character cannot hide code;
 - spaces around `::` are removed.
 
@@ -96,10 +96,10 @@ The rules:
 - **No hidden state or foreign code:** no global or lazily initialized state, no interior mutability, no `unsafe`, `extern` or linkage attribute, no `#[path]`.
 - **Nothing reachable from the webview:** no Tauri, serde, serde_json, libc or rfd.
 - **No escape from the module:** no `crate` path, no sibling module name, no `super` in `agents.rs` (where it is the crate root), and only `super::catalog` or `super::evidence` in the two submodules. No item is visible outside the crate.
-- **No way to name something to run:** no identifier containing path, argv, args, dir, directory, search, location, candidate, command, launch or invoke (compound names such as `executable_path` included), and no raw string of any kind (`r`, `br`, `cr`).
+- **No way to name something to run:** no identifier containing path, argv, args, dir, directory, search, location, candidate, command, cmd, launch, invoke, program, exe (other than executable), binary, template or flag (compound names such as `executable_path` included), and no raw string of any kind (`r`, `br`, `cr`).
 - **Only one macro:** `matches!`.
 
-Fixtures show each rule catches its bypass, including those found in independent review: the crate root through `super`, a renamed `crate`, spaced paths, code between quote characters, byte and C raw strings, and compound identifiers. Another fixture shows that text in strings and comments does not trip any rule. Further pins:
+Fixtures show each rule catches its bypass, including those found in independent review: the crate root through `super`, a renamed `crate`, spaced paths, code between quote characters or after a nested block comment, byte and C raw strings, and compound or alternative names for something to run. Another fixture shows that text in strings and comments does not trip any rule. Further pins:
 
 - `lib.rs` declares `mod agents;` and names it nowhere else.
 - No other compiled production file mentions it.

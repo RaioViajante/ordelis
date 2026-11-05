@@ -97,8 +97,19 @@ function rustCodeOnly(text: string): string {
       const end = text.indexOf("\n", i);
       i = end < 0 ? text.length : end;
     } else if (text.startsWith("/*", i)) {
-      const end = text.indexOf("*/", i + 2);
-      i = end < 0 ? text.length : end + 2;
+      // Block comments nest in Rust: the comment ends at the */ that closes the first /*.
+      let depth = 0;
+      do {
+        if (text.startsWith("/*", i)) {
+          depth++;
+          i += 2;
+        } else if (text.startsWith("*/", i)) {
+          depth--;
+          i += 2;
+        } else {
+          i++;
+        }
+      } while (depth > 0 && i < text.length);
       out += " ";
     } else if (text[i] === "'" && CHAR_LITERAL.test(text)) {
       // A character or byte literal; a lifetime such as 'static has no closing quote and is kept as code.
@@ -140,7 +151,7 @@ function agentContentViolations(files: Record<string, string>): string[] {
       /(?<!pub\()\bcrate\b|\b(?:runtime_bridge|store|projects|tasks|lib|main)\b/,
       file === "agents.rs" ? /\bsuper\b/ : /\bsuper\b(?!::(?:catalog|evidence)\b)/,
       /\bpub\s+(?!\((?:crate|super)\))/,
-      /\b\w*(?:path|argv|args|arguments|dirs?(?![a-z])|director|search|location|candidate|command|launch|invoke)\w*\b/i,
+      /\b\w*(?:path|argv|args|arguments|dirs?(?![a-z])|director|search|location|candidate|command|cmd|launch|invoke|program|exe(?!cutable)|binar|template|flag)\w*\b/i,
     ];
     for (const pattern of forbidden) {
       const hit = code.match(pattern);
@@ -468,6 +479,14 @@ describe("desktop trust boundary", () => {
       "a C raw string": add("agents/catalog.rs", 'const AD: &str = cr"x";'),
       "compound identifiers": add("agents/catalog.rs", "struct AE { executable_path: &'static str, launch_args: &'static [&'static str], search_dirs: u8 }"),
       "a command template": add("agents/catalog.rs", "const VERSION_COMMAND: [&str; 0] = [];"),
+      // Re-review of #110: nested block comments, and other names for something to run.
+      "code after a nested block comment": add("agents/evidence.rs", 'fn af() { /* /* */ " */ let _ = std::env::var(""); /* " */ }'),
+      "a cmd field": add("agents/catalog.rs", "struct AG { cmd: u8 }"),
+      "a program field": add("agents/catalog.rs", "struct AH { program: u8 }"),
+      "an exec constant": add("agents/catalog.rs", 'const EXEC: [&str; 2] = ["exec", "--json"];'),
+      "a binary field": add("agents/catalog.rs", "struct AI { binary: u8 }"),
+      "a version flag": add("agents/catalog.rs", 'const VERSION_FLAG: &str = "--version";'),
+      "an argument template": add("agents/catalog.rs", "struct AJ { template: u8 }"),
     };
     for (const [name, files] of Object.entries(bypasses)) {
       expect(agentContentViolations(files), name).not.toEqual([]);

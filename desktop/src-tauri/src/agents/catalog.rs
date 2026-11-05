@@ -237,7 +237,6 @@ static KIMI_CLI: Reference = Reference {
     page_updated: None,
 };
 
-
 static CODEX: Provider = Provider {
     id: ProviderId::Codex,
     display_name: "Codex",
