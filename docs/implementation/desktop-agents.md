@@ -36,9 +36,10 @@ Cataloguing a provider authorizes nothing: not locating it, not running it, not 
 All references were retrieved on 2026-11-05. The statements the D3.2 design relies on are pinned by tests:
 
 - Kimi's documentation contradicts itself on non-interactive permissions.
-- Neither Codex nor Claude Code documents the ACP launch commands the inherited runtime uses.
-- Only Claude Code documents a caller-chosen session id.
-- Codex documents no approval routing; its `app-server` is marked Experimental.
+- The reviewed pages describe neither of the ACP launch commands the inherited runtime uses for Codex and Claude Code.
+- Of the reviewed pages, only Claude Code's describe a caller-chosen session id; Kimi's were not reviewed for it.
+- The reviewed Codex pages describe no approval routing; its `app-server` is marked Experimental.
+- Kimi's model option appears only in an example, so model selection is recorded as not found.
 - The Kimi entry rests on search excerpts only.
 
 ## Evidence vocabulary (`agents/evidence.rs`)
@@ -61,44 +62,61 @@ Mirrored from `runtime/runtime_validation.py` ([guide](../guides/runtime-validat
 - **No authorization.** An evaluation has no field that could mean authorized, dispatched or enforced, and a static test pins that. Records are unauthenticated caller data.
 - **No "enforced" class.** `independently_verified` is an observation made from outside the provider. It is not the gate's *independently enforced* control, which needs a mechanism Ordelis applied; nothing here can express that.
 
-`documentation_records(provider, recorded_at_ms)` turns a provider's `Documented` claims about structured output, model selection, reasoning effort and running without persistence into `vendor_documentation` passes for `output_format`, `model_acceptance`, `reasoning_effort` and `session_persistence`. Every other claim produces nothing, so the capability stays unknown. A test evaluates every provider's documentation with every capability required, and nothing is satisfied.
+`documentation_records(provider, recorded_at_ms)` turns a provider's `Documented` claims about structured output, model selection, reasoning effort and running without persistence into `vendor_documentation` passes for `output_format`, `model_acceptance`, `reasoning_effort` and `session_persistence`.
+
+- **Meaning:** as with a `cli_help` pass, the pass means a control for the capability is described. A model option is not a model being accepted, and an option to run without persistence is not proof that nothing is written.
+- **Everything else produces nothing:** every other claim leaves the capability unknown.
+- **Tested:** every provider's documentation, evaluated with every capability required, satisfies nothing.
 
 ### Differences from `runtime_validation.py`
 
 | # | Rust | Python | Why |
 | --- | --- | --- | --- |
 | 1 | Adds the source `vendor_documentation` with level `vendor_documented`, weaker than every existing level | Four sources and levels | Documentation is about a product, not an installed file. The four existing names and their order are unchanged. |
-| 2 | A documentation record is bound to a provider, not to an executable and probe run. It applies to that provider whatever the executable, never goes stale, cannot be a failure and carries no values. Records about another provider are counted (`other_provider_evidence`) | Every record has an executable hash and probe id | Documentation cannot witness a failure or observe a value, and is not about one file. It can only worsen a status (through `unsupported`), never satisfy one. |
+| 2 | A documentation record is bound to a provider, not to an executable and probe run. It applies to that provider whatever the executable, never goes stale, is always a pass and carries no values. Records about another provider are counted (`other_provider_evidence`) | Every record has an executable hash and probe id | Documentation cannot witness a failure or observe a value, and is not about one file. It cannot block a capability either: absence from a page is not evidence of absence, and a block that never goes stale would outlive every version. It can only move a capability from unknown to insufficient evidence. |
 | 3 | Every record carries `recorded_at_ms`, a caller-stated timestamp up to 2^53−1 | No timestamp | Provenance. No rule reads it, so it cannot be used to let a later pass override a failure. |
-| 4 | The caller states the requirements; a requested value is allowed only on valued capabilities, and a duplicate requirement is an error | `evaluate_validation` fixes its own requirement set (model required, effort and network optional) | The desktop has no planner yet. Python's fixed set is unchanged. |
+| 4 | The caller states the requirements. A valued capability (`model_acceptance`, `reasoning_effort`) must be required with its value and no other capability may have one; a duplicate requirement is an error | `evaluate_validation` fixes its own requirement set: `model_acceptance` always for the named model, effort when given, network optionally | The desktop has no planner yet. Requiring the value keeps Python's meaning: a model is never "accepted" without saying which. |
 | 5 | No `validation.status`, `evidence_authenticated` or `dispatch_authorized` fields | Fields that are always false | A type that cannot say "authorized" is stricter than a field that must stay false. |
 | 6 | A coarse class (Advertised, Observed, Verified) for display | None | For a later interface. No class means enforced. |
 | 7 | Typed constructors: an invalid record or requirement cannot be built | Validates dictionaries against closed keys and sorts them | Same rules; the result does not depend on record order (tested). |
 | 8 | Not ported: `check_probe_authorization` and the gate's control attestations, validity windows and platform table | Present | Probe authorization reads the filesystem and belongs with a future, separately approved process boundary. The gate is not changed, copied or bypassed. |
+| 9 | Documentation records count toward the 64-record limit | No documentation records | A caller combining many probe records with documentation can hit the limit sooner. Fail closed. |
 
 ## Static boundary
 
-`config.test.ts` checks the compiled `src/agents*` files, listed in `scripts/native-sources.json` and verified against the compiler's dep-info by `verify-native-boundary.mjs`. Comments are dropped and string literals emptied first, so documentation text is never read as code. The rules:
+`config.test.ts` checks the compiled `src/agents*` files, listed in `scripts/native-sources.json` and verified against the compiler's dep-info by `verify-native-boundary.mjs`. Before the rules apply:
+
+- comments are dropped;
+- string, character and byte literals are emptied, so documentation text is never read as code and a quote character cannot hide code;
+- spaces around `::` are removed.
+
+The rules:
 
 - **No operating system access:** no `std`, `core` or `alloc` path, and therefore no process, file, network, environment, clock or thread.
 - **No hidden state or foreign code:** no global or lazily initialized state, no interior mutability, no `unsafe`, `extern` or linkage attribute, no `#[path]`.
 - **Nothing reachable from the webview:** no Tauri, serde, serde_json, libc or rfd.
-- **No escape from the module:** no import from elsewhere in the crate, and no item visible outside it.
-- **No way to name something to run:** no field or identifier for an argument vector, a path or a search location, and no raw string.
+- **No escape from the module:** no `crate` path, no sibling module name, no `super` in `agents.rs` (where it is the crate root), and only `super::catalog` or `super::evidence` in the two submodules. No item is visible outside the crate.
+- **No way to name something to run:** no identifier containing path, argv, args, dir, directory, search, location, candidate, command, launch or invoke (compound names such as `executable_path` included), and no raw string of any kind (`r`, `br`, `cr`).
 - **Only one macro:** `matches!`.
 
-Fixtures show each rule catches its bypass, and that text in strings and comments does not trip it. Further pins:
+Fixtures show each rule catches its bypass, including those found in independent review: the crate root through `super`, a renamed `crate`, spaced paths, code between quote characters, byte and C raw strings, and compound identifiers. Another fixture shows that text in strings and comments does not trip any rule. Further pins:
 
 - `lib.rs` declares `mod agents;` and names it nowhere else.
 - No other compiled production file mentions it.
 - The ten commands, their grants, the generated permissions and the direct dependency set are unchanged; their existing tests pass without modification.
 
-The module is compiled into release builds as inert data and functions; `#[cfg_attr(not(test), allow(dead_code))]` silences the unused-code warning outside tests only. The documentation URLs are therefore present in the binary as text; nothing reads them at run time.
+The module is compiled into release builds as inert data and functions; `#[cfg_attr(not(test), allow(dead_code))]` silences the unused-code warning outside tests only. The documentation URLs may therefore be present in the binary as text, unless the linker removes the unused data; nothing reads them at run time.
 
 ## Tests
 
 - `src/agents/catalog/tests.rs`: stable identifiers and near misses, inherited adapter ids, one claim per feature, references and dates, the pinned uncertainties, provider-sandbox wording, and no local path in the catalog.
-- `src/agents/evidence/tests.rs`: tokens and hashes, the closed record schema, requirement and record limits, ceilings for every capability and source, no promotion of documentation, the real catalog satisfying nothing, unknown and unsupported, conflict order, failure persistence in any order and at any time, stale and unbound evidence, documentation bound to its provider, and parity with `runtime_validation.py` (vocabulary, minimum levels, token and hash patterns, status order and rules), read as text.
+- `src/agents/evidence/tests.rs`:
+  - **Validation:** tokens and hashes, the closed record schema (documentation is a pass only), requirement and record limits, valued requirements needing a value.
+  - **Ceilings:** ceilings for every capability and source, no promotion of documentation, and the real catalog satisfying nothing.
+  - **Statuses:** unknown and unsupported, and conflict order, including a mismatch with no requested value.
+  - **Persistence and order:** failure persistence in any order and at any time, and identical results for reordered records.
+  - **Identity:** stale and unbound evidence (a record differing in both counts as stale), and documentation bound to its provider.
+  - **Parity:** parity with `runtime_validation.py` (vocabulary, minimum levels, token and hash patterns, status order and rules), read as text.
 
 No test starts a process or reads anything but the two inherited Python files named above.
 
