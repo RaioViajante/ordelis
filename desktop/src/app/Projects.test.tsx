@@ -540,6 +540,24 @@ describe("Home, sidebar and persistence", () => {
     expect(screen.getByRole("note", { name: "Sample data notice" })).toBeInTheDocument();
   });
 
+  it("never summarises a sample project as having sessions running (#103)", async () => {
+    native();
+    const user = userEvent.setup();
+    renderApp("projects", { sample: true });
+    const sample = await main().findByRole("group", { name: "Sample projects" });
+    const atlas = within(sample).getByRole("button", { name: /atlas-api/ });
+    expect(atlas).toHaveTextContent("4 sample tasks · 2 sample sessions");
+    expect(sample.textContent).not.toMatch(/running|paused/);
+
+    await user.click(atlas);
+    await main().findByRole("heading", { level: 2, name: "atlas-api" });
+    const stage = main().getByText("Sessions", { selector: ".stage-i b" }).parentElement as HTMLElement;
+    expect(stage).toHaveTextContent("2 sample sessions, none started");
+    // Per-worktree states stay as layout examples, in a section labelled as sample like Context.
+    const workspace = main().getByRole("heading", { level: 2, name: "Workspace" }).parentElement as HTMLElement;
+    expect(within(workspace).getByText("sample")).toBeInTheDocument();
+  });
+
   it("is a clean preview outside the desktop app: no native call, Add disabled with its reason", async () => {
     mockIPC(() => {
       throw new Error("must not be called");

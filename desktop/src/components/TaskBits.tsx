@@ -68,13 +68,14 @@ export const draftsText = (n: number) => `${n} ${n === 1 ? "draft" : "drafts"}`;
 
 /**
  * One saved task in a lifecycle list (Product states board): glyph, title, project and date, and its status pill. On
- * its own project's page the project is not repeated.
+ * its own project's page the project is not repeated, and the date goes under the title: that column is too narrow
+ * for one line, and the title is what must stay readable (#103).
  */
 export function TaskRow({ task, inProject = false }: { task: TaskSummary; inProject?: boolean }) {
   const project = useProjectLabel(task.project);
   return (
     <li>
-      <a className="trow" href={hrefFor("tasks", task.id)}>
+      <a className={`trow${inProject ? " trow--stack" : ""}`} href={hrefFor("tasks", task.id)}>
         <i className={`g ${task.status === "draft" ? "g-wait" : "g-arch"} trow__g`} aria-hidden="true" />
         <span className="trow__t bidi" dir="auto">
           {task.title}
