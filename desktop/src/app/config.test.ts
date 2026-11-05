@@ -76,6 +76,92 @@ function projectContentViolations(files: Record<string, string>): string[] {
   return violations;
 }
 
+// The production files of the provider catalog and evidence vocabulary (issue #109), as listed (and compiler-verified)
+// above, keyed by path under src-tauri/src.
+function agentSources(): Record<string, string> {
+  const production = new Set(
+    ["default", "release", "dev-runtime"].flatMap((c) => nativeSources.configurations[c]).filter((f) => f.startsWith("src/agents")),
+  );
+  return Object.fromEntries([...production].map((f) => [f.slice("src/".length), read(`src-tauri/${f}`)]));
+}
+
+// Rust code with comments removed and every string and character literal emptied, so that documentation text (URLs,
+// flag names in notes) is never mistaken for code and code is never hidden in a comment or behind a quote character.
+// Path separators lose their surrounding spaces (`crate :: x` is `crate::x`). Raw strings are refused separately.
+const CHAR_LITERAL = /'(?:\\u\{[0-9A-Fa-f]{1,6}\}|\\x[0-9A-Fa-f]{2}|\\.|[^\\'\n])'/y;
+function rustCodeOnly(text: string): string {
+  let out = "";
+  for (let i = 0; i < text.length; ) {
+    CHAR_LITERAL.lastIndex = i;
+    if (text.startsWith("//", i)) {
+      const end = text.indexOf("\n", i);
+      i = end < 0 ? text.length : end;
+    } else if (text.startsWith("/*", i)) {
+      // Block comments nest in Rust: the comment ends at the */ that closes the first /*.
+      let depth = 0;
+      do {
+        if (text.startsWith("/*", i)) {
+          depth++;
+          i += 2;
+        } else if (text.startsWith("*/", i)) {
+          depth--;
+          i += 2;
+        } else {
+          i++;
+        }
+      } while (depth > 0 && i < text.length);
+      out += " ";
+    } else if (text[i] === "'" && CHAR_LITERAL.test(text)) {
+      // A character or byte literal; a lifetime such as 'static has no closing quote and is kept as code.
+      out += "''";
+      i = CHAR_LITERAL.lastIndex;
+    } else if (text[i] === '"') {
+      let j = i + 1;
+      while (j < text.length && text[j] !== '"') j += text[j] === "\\" ? 2 : 1;
+      out += '""';
+      i = j + 1;
+    } else {
+      out += text[i++];
+    }
+  }
+  return out.replace(/\s*::\s*/g, "::");
+}
+
+// Content rules for the provider catalog and evidence vocabulary: pure data and pure functions. No process, file,
+// network, environment, clock, thread, global state, FFI, unsafe code or included file; no Tauri, serde or libc; no
+// command; nothing visible outside the crate; no path into the rest of the crate (agents.rs names no `super`, and its
+// two modules reach only each other); no identifier that could hold a path, a search location, an argument vector or
+// a command; and no macro other than matches!.
+function agentContentViolations(files: Record<string, string>): string[] {
+  const violations: string[] = [];
+  for (const [file, text] of Object.entries(files)) {
+    if (/(?<![A-Za-z0-9_])[bc]?r#*"/.test(text)) violations.push(`${file}: raw string`);
+    const code = rustCodeOnly(text);
+    const forbidden = [
+      /\b(?:std|core|alloc)::/,
+      /\b(?:Command|process|spawn|fork|execve?|execvp|kill|signal|Child|Stdio|Output)\b/,
+      /\b(?:fs|File|OpenOptions|DirBuilder|Path|PathBuf|read_dir|read_to_string|metadata|canonicalize|symlink_metadata)\b/,
+      /\b(?:net|TcpStream|TcpListener|UdpSocket|UnixStream|SocketAddr|IpAddr)\b/,
+      /\b(?:env|var_os|SystemTime|Instant|UNIX_EPOCH|now|thread|sleep)\b/,
+      /\bstatic\s+mut\b|\b(?:thread_local|OnceLock|OnceCell|LazyLock|LazyCell|lazy_static|Cell|RefCell|Mutex|RwLock|Arc|Rc)\b|\bAtomic\w*/,
+      /\b(?:unsafe|extern)\b|#\s*!?\s*\[\s*(?:link|no_mangle|export_name|path|used|link_section)\b/,
+      /\b(?:tauri|serde|serde_json|libc|rfd)\b|invoke_handler|generate_handler/,
+      // The rest of the crate: by `crate`, by the sibling modules' names, or through `super` from agents.rs (where it
+      // is the crate root). catalog.rs and evidence.rs may name only each other through `super`.
+      /(?<!pub\()\bcrate\b|\b(?:runtime_bridge|store|projects|tasks|lib|main)\b/,
+      file === "agents.rs" ? /\bsuper\b/ : /\bsuper\b(?!::(?:catalog|evidence)\b)/,
+      /\bpub\s+(?!\((?:crate|super)\))/,
+      /\b\w*(?:path|argv|args|arguments|dirs?(?![a-z])|director|search|location|candidate|command|cmd|launch|invoke|program|exe(?!cutable)|binar|template|flag)\w*\b/i,
+    ];
+    for (const pattern of forbidden) {
+      const hit = code.match(pattern);
+      if (hit) violations.push(`${file}: ${hit[0]}`);
+    }
+    for (const m of code.matchAll(/\b(\w+)\s*!\s*[([{]/g)) if (m[1] !== "matches") violations.push(`${file}: ${m[1]}!`);
+  }
+  return violations;
+}
+
 describe("desktop trust boundary", () => {
   const conf = JSON.parse(read("src-tauri/tauri.conf.json"));
 
@@ -326,6 +412,88 @@ describe("desktop trust boundary", () => {
     for (const [name, files] of Object.entries(bypasses)) {
       expect(projectContentViolations(files), name).not.toEqual([]);
     }
+  });
+
+  // D3.2a (#109, design #108): cataloguing a provider authorizes nothing. The catalog and evidence vocabulary are
+  // compiled in, but no command, module or initializer reaches them, and they can neither find nor run anything.
+  it("keeps the provider catalog and evidence vocabulary pure and unreachable from the interface", () => {
+    const files = agentSources();
+    expect(Object.keys(files).sort()).toEqual(["agents.rs", "agents/catalog.rs", "agents/evidence.rs"]);
+    expect(agentContentViolations(files)).toEqual([]);
+    // Each file ends with its test module declaration; tests live in their own files.
+    for (const file of ["agents/catalog.rs", "agents/evidence.rs"]) expect(files[file]).toMatch(/\n#\[cfg\(test\)\]\nmod tests;\n$/);
+    // lib.rs declares the module, silences dead-code warnings outside tests only, and names it nowhere else.
+    const lib = read("src-tauri/src/lib.rs");
+    const production = rustCodeOnly(lib.slice(0, lib.indexOf("#[cfg(test)]")));
+    expect(production.match(/\bagents\b/g)).toEqual(["agents"]);
+    expect(lib).toMatch(/\n#\[cfg_attr\(not\(test\), allow\(dead_code\)\)\]\nmod agents;\nmod projects;\n/);
+    // No other compiled production file uses it.
+    const others = ["default", "release", "dev-runtime"]
+      .flatMap((c) => nativeSources.configurations[c])
+      .filter((f) => !f.startsWith("src/agents") && f !== "src/lib.rs");
+    for (const file of new Set(others)) expect(rustCodeOnly(read(`src-tauri/${file}`)), file).not.toMatch(/\bagents\b/);
+    // The vocabulary has no field that could mean authorized, dispatched or enforced.
+    const evidence = rustCodeOnly(files["agents/evidence.rs"]);
+    expect(evidence).not.toMatch(/\b\w*(?:authori[sz]ed?|dispatch\w*|enforced|Enforced)\b/);
+  });
+
+  it("finds prohibited operations in the provider catalog and evidence vocabulary", () => {
+    const actual = agentSources();
+    const add = (file: string, text: string) => ({ ...actual, [file]: actual[file] + "\n" + text });
+    const bypasses: Record<string, Record<string, string>> = {
+      "a process": add("agents/catalog.rs", 'fn a() { let _ = std::process::Command::new("codex"); }'),
+      "an imported process type": add("agents/evidence.rs", "use std::process::Command;"),
+      "a file read": add("agents/catalog.rs", 'fn b() { let _ = std::fs::read("/opt/homebrew/bin/codex"); }'),
+      "a path type": add("agents/catalog.rs", "struct C { at: PathBuf }"),
+      "a network call": add("agents/evidence.rs", 'fn d() { let _ = std::net::TcpStream::connect("127.0.0.1:1"); }'),
+      "an environment read": add("agents/catalog.rs", 'fn e() { let _ = std::env::var("PATH"); }'),
+      "an environment macro": add("agents/catalog.rs", 'const F: &str = env!("HOME");'),
+      "an included file": add("agents/catalog.rs", 'const G: &str = include_str!("/etc/paths");'),
+      "a clock": add("agents/evidence.rs", "fn h() { let _ = std::time::SystemTime::now(); }"),
+      "global mutable state": add("agents/evidence.rs", "static mut I: u8 = 0;"),
+      "lazy initialization": add("agents/catalog.rs", "static J: OnceLock<u8> = OnceLock::new();"),
+      "unsafe code": add("agents/evidence.rs", "fn k() { unsafe {} }"),
+      "foreign code": add("agents/evidence.rs", 'extern "C" { fn getpid() -> i32; }'),
+      "libc": add("agents/evidence.rs", "fn l() -> i32 { libc::getpid() }"),
+      "a command": add("agents/catalog.rs", "#[tauri::command]\nfn m() {}"),
+      "serialization for IPC": add("agents/catalog.rs", "#[derive(serde::Serialize)]\nstruct N;"),
+      "another module of the crate": add("agents/evidence.rs", "use crate::store;"),
+      "a public item": add("agents/catalog.rs", "pub fn o() {}"),
+      "an argument vector": add("agents/catalog.rs", "struct P { argv: &'static [&'static str] }"),
+      "a search location": add("agents/catalog.rs", "const SEARCH_PATHS: [&str; 0] = []; struct Q { candidates: u8 }"),
+      "a raw string": add("agents/catalog.rs", 'const R: &str = r"--version";'),
+      "another macro": add("agents/evidence.rs", 'fn s() { println!("x"); }'),
+      "a module from another file": add("agents.rs", '#[path = "../store.rs"]\nmod t;'),
+      // Independent review of #110: escapes into the rest of the crate, code behind a quote character, byte and C raw
+      // strings, and compound identifiers.
+      "the crate root through super in agents.rs": add("agents.rs", "pub(crate) fn v() { let _ = super::runtime_bridge::query(); }"),
+      "a sibling module imported through super": add("agents.rs", "use super::store;"),
+      "a crate path with spaces": add("agents/catalog.rs", "fn w() { let _ = crate :: runtime_bridge :: query(); }"),
+      "the crate renamed": add("agents/catalog.rs", "use crate as root;"),
+      "super of super renamed": add("agents/evidence.rs", "use super::super as root;"),
+      "a root import through super": add("agents/evidence.rs", "#[derive(super::Serialize)]\nstruct X;"),
+      "a root type through super": add("agents/evidence.rs", "fn y(_: super::State<'_, u8>) {}"),
+      "code between quote characters": add("agents/evidence.rs", "fn z() { let _q = '\"'; let _ = std::process::Command::new(\"sh\"); let _r = '\"'; }"),
+      "code between escaped quote characters": add("agents/catalog.rs", "fn aa() { let _q = b'\\\"'; let _ = std::fs::read(\"x\"); let _r = '\\\"'; }"),
+      "a byte raw string": add("agents/catalog.rs", 'const AB: &[u8] = br"\\"; fn ac() { let _ = std::fs::read(br"\\"); }'),
+      "a C raw string": add("agents/catalog.rs", 'const AD: &str = cr"x";'),
+      "compound identifiers": add("agents/catalog.rs", "struct AE { executable_path: &'static str, launch_args: &'static [&'static str], search_dirs: u8 }"),
+      "a command template": add("agents/catalog.rs", "const VERSION_COMMAND: [&str; 0] = [];"),
+      // Re-review of #110: nested block comments, and other names for something to run.
+      "code after a nested block comment": add("agents/evidence.rs", 'fn af() { /* /* */ " */ let _ = std::env::var(""); /* " */ }'),
+      "a cmd field": add("agents/catalog.rs", "struct AG { cmd: u8 }"),
+      "a program field": add("agents/catalog.rs", "struct AH { program: u8 }"),
+      "an exec constant": add("agents/catalog.rs", 'const EXEC: [&str; 2] = ["exec", "--json"];'),
+      "a binary field": add("agents/catalog.rs", "struct AI { binary: u8 }"),
+      "a version flag": add("agents/catalog.rs", 'const VERSION_FLAG: &str = "--version";'),
+      "an argument template": add("agents/catalog.rs", "struct AJ { template: u8 }"),
+    };
+    for (const [name, files] of Object.entries(bypasses)) {
+      expect(agentContentViolations(files), name).not.toEqual([]);
+    }
+    // Documentation text is data: a string or a comment that mentions a process or a path is not code.
+    const text = add("agents/catalog.rs", 'const U: &str = "std::process::Command::new(\\"codex\\") in /usr/bin"; // std::fs::read');
+    expect(agentContentViolations(text)).toEqual([]);
   });
 
   // Reviewed in issue #40: the frontend may depend on @tauri-apps/api, and only to call get_runtime_status.

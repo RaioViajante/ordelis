@@ -3,6 +3,9 @@
 // commands (see projects.rs) and four saved-task commands (see tasks.rs), none of which takes a path.
 // Authorization is enforced by the app manifest in build.rs plus capabilities/default.json.
 // See docs/implementation/desktop-architecture.md.
+// The provider catalog and evidence vocabulary (agents.rs) are pure data with no command and no caller yet.
+#[cfg_attr(not(test), allow(dead_code))]
+mod agents;
 mod projects;
 mod runtime_bridge;
 #[cfg(target_os = "macos")]

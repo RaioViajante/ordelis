@@ -1,7 +1,10 @@
 {
-  "_comment": "Every file rustc reads when compiling the desktop library crate, per macOS build configuration, relative to src-tauri/. verify-native-boundary.mjs compares this with the compiler's own dep-info, so a module added through any declaration form, a path attribute or an include macro fails until it is listed here. config.test.ts applies the storage content rules to the listed src/projects, src/store and src/tasks files. Changing this list is a security review decision.",
+  "_comment": "Every file rustc reads when compiling the desktop library crate, per macOS build configuration, relative to src-tauri/. verify-native-boundary.mjs compares this with the compiler's own dep-info, so a module added through any declaration form, a path attribute or an include macro fails until it is listed here. config.test.ts applies the storage content rules to the listed src/projects, src/store and src/tasks files, and the purity rules to the src/agents files. Changing this list is a security review decision.",
   "configurations": {
     "default": [
+      "src/agents.rs",
+      "src/agents/catalog.rs",
+      "src/agents/evidence.rs",
       "src/lib.rs",
       "src/projects.rs",
       "src/projects/folder.rs",
@@ -12,6 +15,9 @@
       "src/tasks/records.rs"
     ],
     "release": [
+      "src/agents.rs",
+      "src/agents/catalog.rs",
+      "src/agents/evidence.rs",
       "src/lib.rs",
       "src/projects.rs",
       "src/projects/folder.rs",
@@ -22,6 +28,9 @@
       "src/tasks/records.rs"
     ],
     "dev-runtime": [
+      "src/agents.rs",
+      "src/agents/catalog.rs",
+      "src/agents/evidence.rs",
       "src/lib.rs",
       "src/projects.rs",
       "src/projects/folder.rs",
@@ -36,6 +45,11 @@
       "Cargo.toml",
       "build.rs",
       "capabilities/default.json",
+      "src/agents.rs",
+      "src/agents/catalog.rs",
+      "src/agents/catalog/tests.rs",
+      "src/agents/evidence.rs",
+      "src/agents/evidence/tests.rs",
       "src/lib.rs",
       "src/projects.rs",
       "src/projects/folder.rs",

@@ -11,7 +11,7 @@ Nothing here is a release commitment, a delivery date or a version number.
 | Group | State today | Specification |
 | --- | --- | --- |
 | [A. Workspace and projects](#a-workspace-and-projects) | **Prototype** pages (mostly sample data); **Foundation** project registry (macOS) | [Overview](../architecture/overview.md) |
-| [B. Agent integrations](#b-agent-integrations) | **Working** in the inherited CLI; nothing in the desktop | [Agents](../architecture/agents.md) |
+| [B. Agent integrations](#b-agent-integrations) | **Working** in the inherited CLI; **Foundation** provider catalog in the desktop, with no discovery or execution | [Agents](../architecture/agents.md) |
 | [C. Planning and task delegation](#c-planning-and-task-delegation) | **Working** saved tasks in the desktop (native acceptance pending); **Prototype** task preview; **Working** non-dispatching plan on the command line (added since the fork) | [Orchestration](../architecture/orchestration.md) |
 | [D. Orchestration and execution](#d-orchestration-and-execution) | **Working** in the inherited CLI; **Foundation** safety gate; nothing in the desktop | [Execution](../architecture/execution.md) |
 | [E. Git and worktree isolation](#e-git-and-worktree-isolation) | **Planned** | [Worktrees](../architecture/worktrees.md) |
@@ -66,8 +66,9 @@ Providers do not expose the same capabilities. Ordelis does not assume they do.
 
 - *Working, inherited CLI.* Built-in adapters, including Claude Code, Codex CLI and OpenCode, and a way to configure additional agents. `mco doctor` checks installation and authentication readiness, and `mco agent list`, `check` and `models` inspect agents. See the [provider reference](../reference/providers.md), whose adapter count is out of date; the [MVP plan](../implementation/synapse-mvp-plan.md#inherited-capability-audit) treats the source registry as authoritative.
 - *Working, command line, added since the fork.* `mco context inspect-codex` runs only `--version` and help commands against Codex and records the version and advertised options, with no task and no model call: [guide](../guides/codex-cli-capability-inspection.md).
-- *Not present.* A Kimi adapter. Two options are documented and neither is validated: the [Kimi decision gate](../implementation/synapse-mvp-plan.md#kimi-integration-decision-gate).
-- *Prototype.* The Agents page states that nothing was checked and shows every fact as unknown.
+- *Foundation, desktop.* A provider catalog and evidence vocabulary in Rust ([D3.2a](../implementation/desktop-agents.md)): what each vendor's documentation claims about Codex, Claude Code, OpenCode and Kimi, kept at *advertised*. Nothing calls it; it does not locate, run or authenticate any agent.
+- *Not present.* A Kimi adapter. Two options are documented and neither is validated: the [Kimi decision gate](../implementation/synapse-mvp-plan.md#kimi-integration-decision-gate). Discovery of installed agents in the desktop is not implemented, and probing them is not authorized.
+- *Prototype.* The Agents page states that nothing was checked and shows every fact as unknown. It does not show installed agents.
 
 ## C. Planning and task delegation
 
