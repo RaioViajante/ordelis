@@ -33,7 +33,7 @@ Even "measured" figures are invented; the page says so.
 
 ## Responsive
 
-Rows keep five columns until 900 px, then drop Project and Worktree. The filter bar wraps. The two-column detail collapses at 1100 px. Timeline text wraps anywhere. The 900 px comparison table scrolls inside its own container. No transition or animation was added, so reduced motion needs no extra rule.
+Rows keep five columns above 1240 px, drop Worktree at 1240 px, and drop Project too at 1100 px. Below those widths the fixed columns left the Task column no room: native acceptance at 1024 px showed the Task and Project headers overlapping and task text wrapping one word per line ([#103](https://github.com/RaioViajante/ordelis/issues/103)). The header reads "5 sample sessions · none started"; it never counts samples as running or paused. Each row keeps its state as a layout example inside the list labelled as sample. The filter bar wraps. The two-column detail collapses at 1100 px. Timeline text wraps anywhere. The 900 px comparison table scrolls inside its own container. No transition or animation was added, so reduced motion needs no extra rule.
 
 ## Not done
 

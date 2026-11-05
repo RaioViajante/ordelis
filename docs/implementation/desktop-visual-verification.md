@@ -42,7 +42,7 @@ Not compared: reference pages 7–18 and 20 (task flow, inbox, workflows) are ou
 
 ## Resizing
 
-At 900 px the sessions table drops its Project and Worktree columns, the task table drops project and agents, stage strips go two-up, and grids become single column. The pick-up comparison table keeps its 900 px width and scrolls horizontally inside its own container. At the 760 px minimum the sample notice takes about 14% of the window height, while the page content scrolls in a separate region above it. Compact vertical spacing keeps the composer and the next section heading visible without overlap. No layout was checked below 760 px because the window cannot be smaller.
+The sessions table drops its Worktree column at 1240 px and its Project column at 1100 px ([#103](https://github.com/RaioViajante/ordelis/issues/103)). At 900 px the task table drops project and agents, stage strips go two-up, and grids become single column. The pick-up comparison table keeps its 900 px width and scrolls horizontally inside its own container. At the 760 px minimum the sample notice takes about 14% of the window height, while the page content scrolls in a separate region above it. Compact vertical spacing keeps the composer and the next section heading visible without overlap. No layout was checked below 760 px because the window cannot be smaller.
 
 ## Missing fonts, spacing and elements
 
