@@ -1482,10 +1482,31 @@
   }
 
   /* Narrower windows */
+  /* Sessions drop columns early: five fixed columns need about 1240 px beside the rail, or Task gets no room (#103). */
+  @media (max-width: 1240px) {
+    .srow,
+    .hdr {
+      grid-template-columns: 150px minmax(0, 1fr) 120px 170px;
+    }
+    .srow > :nth-child(5),
+    .hdr > :nth-child(5) {
+      display: none;
+    }
+  }
   @media (max-width: 1100px) {
     .split,
     .grid2 {
       grid-template-columns: minmax(0, 1fr);
+    }
+    .srow,
+    .hdr {
+      grid-template-columns: 130px minmax(0, 1fr) 150px;
+    }
+    .srow > :nth-child(3),
+    .srow > :nth-child(5),
+    .hdr > :nth-child(3),
+    .hdr > :nth-child(5) {
+      display: none;
     }
   }
   @media (max-width: 1000px) {
@@ -1518,19 +1539,9 @@
       padding-left: 0;
       border-left: 0;
     }
-    .srow,
-    .hdr {
-      grid-template-columns: 130px minmax(0, 1fr) 150px;
-    }
     .tl__i {
       grid-template-columns: 52px 60px minmax(0, 1fr);
       gap: 8px;
-    }
-    .srow > :nth-child(3),
-    .srow > :nth-child(5),
-    .hdr > :nth-child(3),
-    .hdr > :nth-child(5) {
-      display: none;
     }
     .rule,
     .hdr3 {
@@ -1965,6 +1976,14 @@
   .trow__p--warn > :first-child {
     color: var(--att);
   }
+  /* Title on the first line, date under it: for a narrow column, where the one-line grid gives the title no room. */
+  .trow--stack {
+    grid-template-columns: 18px minmax(0, 1fr) auto;
+  }
+  .trow--stack .trow__p {
+    grid-column: 2 / 4;
+    grid-row: 2;
+  }
   @media (max-width: 900px) {
     .trow {
       grid-template-columns: 18px minmax(0, 1fr) auto;
@@ -2026,7 +2045,8 @@
     gap: 28px;
     align-items: start;
   }
-  @media (max-width: 1000px) {
+  /* Below 1100 px the form beside the aside is too narrow for one row of actions (#103). */
+  @media (max-width: 1100px) {
     .tk-lay {
       grid-template-columns: minmax(0, 1fr);
     }
@@ -2086,6 +2106,12 @@
     flex-wrap: wrap;
     align-items: center;
     gap: 10px;
+  }
+  .tk-actions__go {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-left: auto;
   }
   .tk-aside {
     padding: 18px 20px;

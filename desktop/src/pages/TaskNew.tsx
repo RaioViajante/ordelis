@@ -86,17 +86,19 @@ export function TaskNew({ go }: { go: Go }) {
               Back to Tasks
             </a>
             <DiscardDraft composer={composer} onDiscarded={() => form.current?.querySelector("input")?.focus()} />
-            <span className="sp" />
-            <Button reason={NO_PLAN}>Draft plan</Button>
-            {composer.blocked ? (
-              <Button variant="go" reason={composer.blocked}>
-                {composer.saving ? "Saving…" : "Save task"}
-              </Button>
-            ) : (
-              <button type="submit" className="btn btn--go">
-                Save task
-              </button>
-            )}
+            {/* The forward actions wrap together, on the right, never Save task alone (#103). */}
+            <div className="tk-actions__go">
+              <Button reason={NO_PLAN}>Draft plan</Button>
+              {composer.blocked ? (
+                <Button variant="go" reason={composer.blocked}>
+                  {composer.saving ? "Saving…" : "Save task"}
+                </Button>
+              ) : (
+                <button type="submit" className="btn btn--go">
+                  Save task
+                </button>
+              )}
+            </div>
           </div>
           <p className="cap">
             This is the same draft as on Home. It stays while you move around Ordelis, until you save or discard it; it isn’t

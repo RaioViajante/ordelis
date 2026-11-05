@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { clearMocks, mockIPC } from "@tauri-apps/api/mocks";
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -919,6 +921,39 @@ describe("Home composer", () => {
     expect(main().getByRole("textbox", { name: /^Title/ })).toHaveFocus();
     expect(count("create_task")).toBe(0);
   });
+
+  it("keeps Draft plan and Save task together when Discard draft… appears, in the same tab order (#103)", async () => {
+    const user = userEvent.setup();
+    native();
+    renderApp("#/tasks/new", false);
+    await screen.findByRole("option", { name: "atlas-api" });
+    await user.type(main().getByRole("textbox", { name: /^Title/ }), "Kept");
+
+    const save = main().getByRole("button", { name: "Save task" });
+    const plan = main().getByRole("button", { name: "Draft plan" });
+    // Native acceptance at 1024 px: the four actions shared one wrapping row, so Save task alone fell to a second line.
+    // The two forward actions now wrap as one group, which stays on the right.
+    const go = save.closest(".tk-actions__go");
+    expect(go).not.toBeNull();
+    expect(plan.closest(".tk-actions__go")).toBe(go);
+    const bar = save.closest(".tk-actions") as HTMLElement;
+    expect([...bar.querySelectorAll("a, button")].map((el) => el.textContent)).toEqual([
+      "Back to Tasks",
+      "Discard draft…",
+      "Draft plan",
+      "Save task",
+    ]);
+    await user.click(main().getByRole("textbox", { name: /^Description/ }));
+    await user.tab();
+    expect(main().getByRole("link", { name: "Back to Tasks" })).toHaveFocus();
+    await user.tab();
+    expect(main().getByRole("button", { name: "Discard draft…" })).toHaveFocus();
+
+    const css = readFileSync(join(__dirname, "..", "styles", "index.css"), "utf8");
+    expect(css).toMatch(/\.tk-actions__go\s*{\s*display:\s*flex;\s*align-items:\s*center;\s*gap:\s*10px;\s*margin-left:\s*auto;\s*}/);
+    // The aside moves below the form while the form would be too narrow for one row of actions beside it.
+    expect(css).toMatch(/@media \(max-width: 1100px\)\s*{\s*\.tk-lay\s*{\s*grid-template-columns:\s*minmax\(0, 1fr\);/);
+  });
 });
 
 describe("project pages and counts", () => {
@@ -955,6 +990,28 @@ describe("project pages and counts", () => {
     expect(rail().getByRole("link", { name: /^Tasks, 2 drafts$/ })).toBeInTheDocument();
     await user.click(main().getByRole("link", { name: "atlas-api" }));
     expect(await within(await main().findByRole("region", { name: "Tasks" })).findByText("0 drafts · 2 archived")).toBeInTheDocument();
+  });
+
+  it("gives each task title its own line in a project's task list, which is a narrow column (#103)", async () => {
+    const user = userEvent.setup();
+    native();
+    projects = [{ id: "p1", name: "atlas-api" }];
+    seed("Title that must stay visible", { project: { id: "p1", registered_at_ms: 1 } });
+    renderApp("#/projects/p1", false);
+
+    const region = await main().findByRole("region", { name: "Tasks" });
+    const row = within(within(region).getByRole("list", { name: "Drafts in atlas-api" })).getByRole("link", { name: /Title that must stay visible/ });
+    expect(within(row).getByText("Title that must stay visible")).toHaveClass("trow__t");
+    // Native acceptance at 1024 px: next to the project list this column is about 400 px wide, and the one-line grid
+    // grew its date track first and left the title track 0 px wide. Here the date goes on a second line instead.
+    expect(row).toHaveClass("trow--stack");
+    const css = readFileSync(join(__dirname, "..", "styles", "index.css"), "utf8");
+    expect(css).toMatch(/\.trow--stack\s*{\s*grid-template-columns:\s*18px minmax\(0, 1fr\) auto;\s*}/);
+    expect(css).toMatch(/\.trow--stack \.trow__p\s*{\s*grid-column:\s*2 \/ 4;\s*grid-row:\s*2;\s*}/);
+
+    // The full-width Tasks list keeps its one-line rows.
+    await user.click(rail().getByRole("link", { name: /^Tasks/ }));
+    expect(await main().findByRole("link", { name: /Title that must stay visible/ })).not.toHaveClass("trow--stack");
   });
 
   it("starts a task in the project, and checks the project again before saving", async () => {

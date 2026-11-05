@@ -365,7 +365,7 @@ function SampleDetail({ cur }: { cur: MockProject }) {
 
       <div className="grid2">
         <section className="min-w-0">
-          <SecHead title="Workspace" />
+          <SecHead title="Workspace" meta="sample" />
           <dl className="kv2">
             <dt>Repository</dt>
             <dd>{cur.repo}</dd>

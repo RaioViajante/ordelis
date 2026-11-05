@@ -19,9 +19,6 @@ export function Sessions() {
   const filtered = filter.state !== "all" || filter.project !== "all" || filter.query.trim() !== "";
   // A selection the filters hide is not shown as selected, and has no comparison below.
   const cur = shown.find((s) => s.id === session);
-  const tally = STATES.filter((st) => all.some((s) => s.state === st))
-    .map((st) => `${all.filter((s) => s.state === st).length} ${st}`)
-    .join(" · ");
 
   return (
     <div className="col col--1300">
@@ -30,7 +27,8 @@ export function Sessions() {
           Sessions
         </PageTitle>
         <span className="sp" />
-        <span className="meta">{on ? `sample · ${tally}` : "0 sessions"}</span>
+        {/* A summary never counts samples as running or paused (#103); each row shows its state as a layout example. */}
+        <span className="meta">{on ? `${all.length} sample sessions · examples only` : "0 sessions"}</span>
       </div>
 
       {!on ? (

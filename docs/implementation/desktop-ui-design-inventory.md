@@ -69,7 +69,7 @@ Everything in the references is invented illustration (`atlas-api`, `Cérebro`, 
 | Reference content | In this build |
 | --- | --- |
 | Projects, tasks, sessions, worktrees, vault, notes, token counts, waiting items | Local fixtures in `src/fixtures/mock.ts`, shown behind a "Sample data" notice, switchable off |
-| Running or paused agents, "1 running" | Only inside sample data; no live indicator exists outside it, and the sample notice says nothing is running |
+| Running or paused agents | Only as per-item states inside lists and sections labelled as sample; no live indicator exists outside sample data, the sample notice says nothing is running, and no summary or count calls a sample running or paused ([#103](https://github.com/RaioViajante/ordelis/issues/103)) |
 | Agent installed versions, sign-in state, models, 9 verified capabilities | **Not reproduced.** Every fact is "unknown"; a note says nothing was checked |
 | Security policy v3 and authorized runs | **Not reproduced.** Replaced by the real restrictions of this build (every sensitive action is simply unavailable) |
 | Vault read-only access | Shown as "by design", not as verified |
