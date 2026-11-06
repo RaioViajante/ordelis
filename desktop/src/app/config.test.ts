@@ -176,17 +176,17 @@ function pureContentViolations(files: Record<string, string>, superRule: (file: 
 }
 
 // The only references to the rest of the crate that the lifecycle model may make (D3.2b decision 12.8): these two
-// imports, each exactly once, as whole lines of lifecycle/model.rs. Everything else is held to the agents rules, with
-// no `super` at all (b-1 has no sibling modules), no name of the agents module, and no name that could mean
-// authorized, dispatched, enforced or terminated.
+// imports, as whole lines, adjacent and in this order, as the first lines of code of lifecycle/model.rs (only line
+// comments come before them, so nothing such as `pub(crate)` can prefix them). Anything else, including another copy,
+// is held to the agents rules, with no `super` at all (b-1 has no sibling modules), no name of the agents module, and
+// no identifier that could mean authorized, dispatched, enforced or terminated anywhere in it.
 const LIFECYCLE_IMPORTS = ["use crate::agents::catalog::ProviderId;", "use crate::agents::evidence::{Sha256, Token};"];
 function withoutLifecycleImports(file: string, text: string): string {
   if (file !== "lifecycle/model.rs") return text;
   const lines = text.split("\n");
-  for (const line of LIFECYCLE_IMPORTS) {
-    const at = lines.indexOf(line);
-    if (at >= 0) lines.splice(at, 1);
-  }
+  const first = lines.findIndex((line) => !line.startsWith("//"));
+  if (lines[first] !== LIFECYCLE_IMPORTS[0] || lines[first + 1] !== LIFECYCLE_IMPORTS[1]) return text;
+  lines.splice(first, 2);
   return lines.join("\n");
 }
 function lifecycleContentViolations(files: Record<string, string>): string[] {
@@ -194,7 +194,7 @@ function lifecycleContentViolations(files: Record<string, string>): string[] {
   const violations = pureContentViolations(stripped, () => /\bsuper\b/);
   for (const [file, text] of Object.entries(stripped)) {
     const code = rustCodeOnly(text);
-    for (const pattern of [/\bagents\b/, /\b\w*(?:authori[sz]ed?|dispatch\w*|enforced|terminate\w*|execute_now)\b/i]) {
+    for (const pattern of [/\bagents\b/, /\w*(?:authori[sz]|dispatch|enforc|terminat|execute_now)\w*/i]) {
       const hit = code.match(pattern);
       if (hit) violations.push(`${file}: ${hit[0]}`);
     }
@@ -580,14 +580,22 @@ describe("desktop trust boundary", () => {
       "a glob import": add("lifecycle/model.rs", "use crate::agents::evidence::*;"),
       "a grouped import naming more": model(LIFECYCLE_IMPORTS[1], "use crate::agents::evidence::{Sha256, Token, Record};"),
       "a re-export": model(LIFECYCLE_IMPORTS[0], "pub(crate) use crate::agents::catalog::ProviderId;"),
+      "a re-export split over two lines": model(LIFECYCLE_IMPORTS[0], `pub(crate)\n${LIFECYCLE_IMPORTS[0]}`),
+      "a reviewed import after other code": model(LIFECYCLE_IMPORTS[0], `const A0: u8 = 0;\n${LIFECYCLE_IMPORTS[0]}`),
+      "the reviewed imports swapped": model(`${LIFECYCLE_IMPORTS[0]}\n${LIFECYCLE_IMPORTS[1]}`, `${LIFECYCLE_IMPORTS[1]}\n${LIFECYCLE_IMPORTS[0]}`),
       "a spaced path": model(LIFECYCLE_IMPORTS[0], "use crate :: agents :: catalog :: ProviderId;"),
       "a second copy of a reviewed import": add("lifecycle/model.rs", LIFECYCLE_IMPORTS[0]),
       "a reviewed import in the module root": add("lifecycle.rs", LIFECYCLE_IMPORTS[0]),
       "a full path to the agents module": add("lifecycle/model.rs", "fn k(_: crate::agents::evidence::Record) {}"),
       "the agents module by name": add("lifecycle/model.rs", "use self::agents;"),
       "an authority field": add("lifecycle/model.rs", "struct L { authorized: bool }"),
+      "an authority prefix": add("lifecycle/model.rs", "enum L2 { AuthorizedStart }"),
+      "an authority word inside a name": add("lifecycle/model.rs", "struct L3 { pre_authorized_grant: bool, authorized_by: u8 }"),
+      "an authorization type": add("lifecycle/model.rs", "struct Authorization;"),
       "a dispatch state": add("lifecycle/model.rs", "enum M { Dispatched }"),
+      "an enforced limit": add("lifecycle/model.rs", "struct EnforcedLimit;"),
       "a termination method": add("lifecycle/model.rs", "fn terminate_child() {}"),
+      "a terminating state": add("lifecycle/model.rs", "enum M2 { Terminating }"),
       "a search location": add("lifecycle/model.rs", "struct N { executable_path: u8 }"),
     };
     for (const [name, files] of Object.entries(bypasses)) {

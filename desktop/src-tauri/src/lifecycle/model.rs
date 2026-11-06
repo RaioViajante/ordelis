@@ -254,6 +254,9 @@ impl LiveEpoch {
 // ---------------------------------------------------------------------------------------------------------------
 // The run specification. It is immutable: any change is a new run.
 
+/// The digest of a run specification's canonical encoding, computed outside the core (the core compares, never hashes).
+pub(crate) type SpecDigest = Sha256;
+
 /// The task as it was when the run was created. Identity is by both halves, so a reused id is detected.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct TaskRef {
@@ -264,8 +267,8 @@ pub(crate) struct TaskRef {
 
 impl TaskRef {
     pub(crate) fn new(task: TaskId, created_at_ms: WallMs, revision: u64) -> Result<TaskRef, ModelError> {
-        // tasks.json v1 starts every task at revision 1.
-        if revision == 0 {
+        // tasks.json v1 starts every task at revision 1; revisions stay JSON-safe integers.
+        if revision == 0 || revision > MAX_WALL_MS {
             return Err(ModelError::InvalidNumber);
         }
         Ok(TaskRef { task, created_at_ms, revision })
@@ -518,7 +521,7 @@ pub(crate) fn classify(class: OperationClass, workspace: WorkspaceMode) -> RiskC
 /// What a grant is valid for, and nothing else. Every field is compared when a grant is consumed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Binding {
-    pub(crate) spec_digest: Sha256,
+    pub(crate) spec_digest: SpecDigest,
     pub(crate) target: BindingTarget,
     pub(crate) operation_class: OperationClass,
     pub(crate) operation_digest: Sha256,
@@ -918,19 +921,19 @@ pub(crate) enum RepairCause {
     IncompleteTail,
 }
 
-/// That bytes after the last valid frame were moved, unchanged, to sidecar `sidecar`.
+/// That bytes after the last valid frame were moved, unchanged, to sidecar `sidecar`: the `JournalRepaired` body.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct RepairRecord {
+pub(crate) struct JournalRepair {
     sidecar: u32,
     removed_bytes: u32,
     removed_crc32c: u32,
     cause: RepairCause,
 }
 
-impl RepairRecord {
-    pub(crate) fn new(sidecar: u32, removed_bytes: u32, removed_crc32c: u32, cause: RepairCause) -> Result<RepairRecord, ModelError> {
+impl JournalRepair {
+    pub(crate) fn new(sidecar: u32, removed_bytes: u32, removed_crc32c: u32, cause: RepairCause) -> Result<JournalRepair, ModelError> {
         if (1..=MAX_TAIL_BYTES).contains(&removed_bytes) {
-            Ok(RepairRecord { sidecar, removed_bytes, removed_crc32c, cause })
+            Ok(JournalRepair { sidecar, removed_bytes, removed_crc32c, cause })
         } else {
             Err(ModelError::InvalidNumber)
         }
@@ -1065,7 +1068,7 @@ impl EventKind {
 /// A fact as recorded in a run's journal (r5 section 4.2). Bodies hold no wall-clock time.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum EventBody {
-    RunCreated { spec: RunSpec, spec_digest: Sha256 },
+    RunCreated { spec: RunSpec, spec_digest: SpecDigest },
     AttemptCreated { attempt: AttemptNo, continuation: Continuation },
     ApprovalRequested(ApprovalRequest),
     ApprovalDecided { approval: ApprovalId, decision: Decision, provenance: DecisionProvenance },
@@ -1074,19 +1077,19 @@ pub(crate) enum EventBody {
     ApprovalVoided { approval: ApprovalId, reason: VoidReason },
     ApprovalConsumed { approval: ApprovalId, binding: Binding },
     StartBegun { attempt: AttemptNo, approval: ApprovalId, binding: Binding },
-    AttemptStarted { attempt: AttemptNo, identity: OsIdentity },
+    AttemptStarted { attempt: AttemptNo, os_identity: OsIdentity },
     StartFailed { attempt: AttemptNo, code: StartFailCode },
     StopRequested { attempt: AttemptNo, reason: StopReason },
     CancelRequested { scope: CancelScope },
     AttemptExited { attempt: AttemptNo, status: ExitStatus },
     AttemptInterrupted { attempt: AttemptNo, observation: InterruptObservation },
-    AttemptNotStarted { attempt: AttemptNo, cause: NotStartedCause },
+    AttemptNotStarted { attempt: AttemptNo, reason: NotStartedCause },
     ProviderSessionObserved { attempt: AttemptNo, session: Token },
     Progress { attempt: AttemptNo, kind: ProgressKind },
     ProviderOutcomeClaimed { attempt: AttemptNo, claim: OutcomeClaim },
     RunClosed { reason: CloseReason },
     AttentionResolved(ConcernResolution),
-    JournalRepaired(RepairRecord),
+    JournalRepaired(JournalRepair),
 }
 
 /// What an event is about, used to detect duplicates: at most one event per key in a journal.

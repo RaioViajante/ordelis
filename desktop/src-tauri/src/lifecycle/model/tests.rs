@@ -82,19 +82,19 @@ fn every_body() -> Vec<EventBody> {
         EventBody::ApprovalVoided { approval: approval(1), reason: VoidReason::WriteUncertain },
         EventBody::ApprovalConsumed { approval: approval(2), binding: binding(OperationClass::ShellRun) },
         EventBody::StartBegun { attempt: attempt(1), approval: approval(1), binding: binding(OperationClass::Start) },
-        EventBody::AttemptStarted { attempt: attempt(1), identity: OsIdentity::new(4242, token("start-17"), hash('a')).unwrap() },
+        EventBody::AttemptStarted { attempt: attempt(1), os_identity: OsIdentity::new(4242, token("start-17"), hash('a')).unwrap() },
         EventBody::StartFailed { attempt: attempt(1), code: StartFailCode::EffectNotPerformed },
         EventBody::StopRequested { attempt: attempt(1), reason: StopReason::Deadline(DeadlineKind::Stall) },
         EventBody::CancelRequested { scope: CancelScope::Run },
         EventBody::AttemptExited { attempt: attempt(1), status: ExitStatus::new(Some(0), None).unwrap() },
         EventBody::AttemptInterrupted { attempt: attempt(1), observation: InterruptObservation::EvidenceLost },
-        EventBody::AttemptNotStarted { attempt: attempt(1), cause: NotStartedCause::SupervisionLost },
+        EventBody::AttemptNotStarted { attempt: attempt(1), reason: NotStartedCause::SupervisionLost },
         EventBody::ProviderSessionObserved { attempt: attempt(1), session: token("session-1") },
         EventBody::Progress { attempt: attempt(1), kind: ProgressKind::Heartbeat },
         EventBody::ProviderOutcomeClaimed { attempt: attempt(1), claim: OutcomeClaim::Failure },
         EventBody::RunClosed { reason: CloseReason::ByUser },
         EventBody::AttentionResolved(ConcernResolution::new(orphan(1), Resolution::StoppedOutsideOrdelis, provenance()).unwrap()),
-        EventBody::JournalRepaired(RepairRecord::new(0, 17, 0xdead_beef, RepairCause::IncompleteTail).unwrap()),
+        EventBody::JournalRepaired(JournalRepair::new(0, 17, 0xdead_beef, RepairCause::IncompleteTail).unwrap()),
     ])
 }
 
@@ -143,6 +143,7 @@ fn task_revisions_start_at_one() {
     let at = WallMs::new(T0).unwrap();
     let task = TaskId::parse("t1").unwrap();
     assert_eq!(TaskRef::new(task, at, 0), Err(ModelError::InvalidNumber));
+    assert_eq!(TaskRef::new(task, at, MAX_WALL_MS + 1), Err(ModelError::InvalidNumber));
     let task_ref = TaskRef::new(task, at, 3).unwrap();
     assert_eq!((task_ref.task(), task_ref.created_at_ms(), task_ref.revision()), (task, at, 3));
 }
@@ -151,7 +152,7 @@ fn task_revisions_start_at_one() {
 fn limits_enforce_every_bound_and_never_clamp() {
     let ok = limits();
     assert_eq!((ok.start_ms(), ok.run_ms(), ok.stall_ms(), ok.approval_ttl_ms(), ok.stop_grace_ms()), (60_000, 3_600_000, 120_000, 300_000, 5_000));
-    // The inclusive edges are accepted.
+    // The inclusive edges are accepted (the stall limit never exceeds the run limit).
     assert!(Limits::new(1_000, 1_000, 30_000, 1_000, 0).is_err(), "stall above run");
     assert!(Limits::new(1_000, 30_000, 30_000, 1_000, 0).is_ok());
     assert!(Limits::new(600_000, 86_400_000, 86_400_000, 900_000, 60_000).is_ok());
@@ -320,28 +321,44 @@ fn the_provider_relay_can_decide_consume_end_or_resolve_nothing() {
 #[test]
 fn semantic_keys_identify_one_fact_each() {
     let keys: Vec<Vec<SemanticKey>> = every_body().iter().map(EventBody::semantic_keys).collect();
-    // StartBegun begins the attempt and consumes the start grant; Progress is coalesced instead of keyed.
-    assert_eq!(keys[8], [SemanticKey::AttemptBegin(attempt(1)), SemanticKey::ApprovalEnd(approval(1))]);
-    assert!(keys[17].is_empty());
-    for (i, k) in keys.iter().enumerate() {
-        if i != 8 && i != 17 {
-            assert_eq!(k.len(), 1, "{:?}", EventKind::ALL[i]);
-        }
-    }
-    // A decision, an expiry and a withdrawal are mutually exclusive; a void, a consumption and a begin share the end.
-    assert_eq!(keys[3], [SemanticKey::ApprovalDecision(approval(1))]);
-    assert_eq!(keys[4], keys[3]);
-    assert_eq!(keys[5], keys[3]);
-    assert_eq!(keys[6], [SemanticKey::ApprovalEnd(approval(1))]);
-    assert_eq!(keys[8][1], keys[6][0]);
-    // Every way an attempt ends occupies the same key, so two terminal events can never both be recorded.
-    for i in [10, 13, 14, 15] {
-        assert_eq!(keys[i], [SemanticKey::AttemptEnd(attempt(1))], "{:?}", EventKind::ALL[i]);
+    let (n, k) = (attempt(1), approval(1));
+    let expected: [Vec<SemanticKey>; 22] = [
+        Vec::from([SemanticKey::Run]),
+        Vec::from([SemanticKey::Attempt(n)]),
+        Vec::from([SemanticKey::Approval(k)]),
+        // A decision, an expiry and a withdrawal are mutually exclusive outcomes of one request.
+        Vec::from([SemanticKey::ApprovalDecision(k)]),
+        Vec::from([SemanticKey::ApprovalDecision(k)]),
+        Vec::from([SemanticKey::ApprovalDecision(k)]),
+        // A void and a consumption are mutually exclusive ends of one grant.
+        Vec::from([SemanticKey::ApprovalEnd(k)]),
+        Vec::from([SemanticKey::ApprovalEnd(approval(2))]),
+        // StartBegun begins the attempt and consumes the start grant.
+        Vec::from([SemanticKey::AttemptBegin(n), SemanticKey::ApprovalEnd(k)]),
+        Vec::from([SemanticKey::AttemptStart(n)]),
+        // Every way an attempt ends occupies one key, so two terminal events can never both be recorded.
+        Vec::from([SemanticKey::AttemptEnd(n)]),
+        // A stop is not an end: a stop and its exit are both recorded.
+        Vec::from([SemanticKey::AttemptStop(n)]),
+        Vec::from([SemanticKey::CancelRun]),
+        Vec::from([SemanticKey::AttemptEnd(n)]),
+        Vec::from([SemanticKey::AttemptEnd(n)]),
+        Vec::from([SemanticKey::AttemptEnd(n)]),
+        Vec::from([SemanticKey::AttemptSession(n, token("session-1"))]),
+        // Progress is coalesced instead of keyed.
+        Vec::new(),
+        Vec::from([SemanticKey::AttemptClaim(n)]),
+        Vec::from([SemanticKey::RunClose]),
+        Vec::from([SemanticKey::Attention(orphan(1))]),
+        Vec::from([SemanticKey::Repair(0)]),
+    ];
+    for (i, expected) in expected.iter().enumerate() {
+        assert_eq!(&keys[i], expected, "{:?}", EventKind::ALL[i]);
     }
     // Different sessions of one attempt, and cancels of different scopes, are different facts.
-    let session = |s| EventBody::ProviderSessionObserved { attempt: attempt(1), session: token(s) }.semantic_keys();
+    let session = |s| EventBody::ProviderSessionObserved { attempt: n, session: token(s) }.semantic_keys();
     assert_ne!(session("s1"), session("s2"));
-    assert_ne!(EventBody::CancelRequested { scope: CancelScope::Attempt(attempt(1)) }.semantic_keys(), keys[12]);
+    assert_eq!(EventBody::CancelRequested { scope: CancelScope::Attempt(n) }.semantic_keys(), [SemanticKey::CancelAttempt(n)]);
 }
 
 #[test]
@@ -481,9 +498,9 @@ fn a_concern_names_an_attempt_exactly_when_its_kind_is_about_one() {
 
 #[test]
 fn a_repair_removes_at_most_one_frame_worth_of_bytes() {
-    assert_eq!(RepairRecord::new(0, 0, 0, RepairCause::IncompleteTail), Err(ModelError::InvalidNumber));
-    assert_eq!(RepairRecord::new(0, MAX_TAIL_BYTES + 1, 0, RepairCause::IncompleteTail), Err(ModelError::InvalidNumber));
-    let record = RepairRecord::new(3, MAX_TAIL_BYTES, 7, RepairCause::IncompleteTail).unwrap();
+    assert_eq!(JournalRepair::new(0, 0, 0, RepairCause::IncompleteTail), Err(ModelError::InvalidNumber));
+    assert_eq!(JournalRepair::new(0, MAX_TAIL_BYTES + 1, 0, RepairCause::IncompleteTail), Err(ModelError::InvalidNumber));
+    let record = JournalRepair::new(3, MAX_TAIL_BYTES, 7, RepairCause::IncompleteTail).unwrap();
     assert_eq!((record.sidecar(), record.removed_bytes(), record.removed_crc32c(), record.cause()), (3, MAX_TAIL_BYTES, 7, RepairCause::IncompleteTail));
 }
 
