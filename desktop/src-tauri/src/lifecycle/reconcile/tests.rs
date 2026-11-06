@@ -592,6 +592,18 @@ fn an_orphan_anywhere_blocks_every_start_whatever_the_run_id_or_project() {
 }
 
 #[test]
+fn a_supervision_ahead_of_its_summary_still_reports_its_orphan() {
+    // r7 summarized from disk with attempt 1 in flight; then reconciled and opened. The supervision owns the summarized
+    // history, so the attempt is excused, but the orphan its opening frame raised exists only in the supervision.
+    let history = verified(&running());
+    let summary = locked(&history);
+    let frame = reconciled(&history, &[observe(Seen::PidAbsent)]).frame;
+    let live = opened(history, frame);
+    let inventory = enumerated(7, (1..=6).map(|number| (number, RunSummary::NeverCreated)).chain([(7, summary)]).collect());
+    assert_eq!(start_conflicts(&inventory, &[live.held()]), Vec::from([StartConflict::PossibleOrphan(rid(7), n(1))]));
+}
+
+#[test]
 fn quarantined_unverified_and_unreconciled_runs_block() {
     let clean = || (1, locked(&other_run(1, T0)));
     let cases = [

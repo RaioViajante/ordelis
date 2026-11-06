@@ -12,8 +12,9 @@
 // A grant is consent made usable for recording one consumption. It is never Execution Safety Gate satisfaction, and
 // nothing here, or anywhere in the lifecycle module, turns it or a staged frame into a process start.
 use super::model::{
-    ApprovalId, ApprovalKind, ApprovalRequest, ApprovalState, AttemptNo, AttemptState, Decision, Event, EventBody,
-    EventDraft, EventKind, ExpiryBasis, JournalSize, LiveEpoch, MonoMs, OperationDescription, Producer, Rejection, RunId,
+    ApprovalId, ApprovalKind, ApprovalRequest, ApprovalState, AttemptNo, AttemptState, ConcernRef, Decision, Event,
+    EventBody, EventDraft, EventKind, ExpiryBasis, JournalSize, LiveEpoch, MonoMs, OperationDescription, Producer,
+    Rejection, RunId,
     StopReason, SupervisorDraft, VoidReason, WallMs, DeadlineKind, GRANT_USE_MS, MAX_APPROVAL_LIFETIME_MS, MAX_EVENTS,
     MAX_WALL_MS, RESERVED_EVENTS,
 };
@@ -234,6 +235,11 @@ impl SupervisedRun<'_> {
     /// Whether this supervision's recorded history starts with `events`: it recorded what was summarized.
     pub(crate) fn extends(&self, events: &[Event]) -> bool {
         self.live.projection.events().starts_with(events)
+    }
+
+    /// The unresolved blocking concerns this supervision holds, which may be newer than any summary of the run.
+    pub(crate) fn blocking(&self) -> Vec<ConcernRef> {
+        self.live.projection.concerns().iter().filter(|concern| concern.is_unresolved_blocking()).map(|concern| concern.concern()).collect()
     }
 }
 

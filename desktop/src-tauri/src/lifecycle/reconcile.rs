@@ -506,9 +506,10 @@ pub(crate) enum StartConflict {
 /// supervisions hold; each entry borrows an opened `LiveSupervision`, so a pending or dropped supervision cannot be
 /// claimed. A supervision excuses a run's attempt in flight only if its own recorded history extends the summarized
 /// one; a supervision that does not (one opened under a reused id, for example) is `Contradictory` and excuses nothing.
-/// That it is the run's only supervisor remains the adapter's lock. Nothing here orders events across journals. An empty result says only that the supplied data
-/// shows no conflict: it permits nothing, and the future execution boundary must still refuse to record a start while
-/// any conflict exists and apply its own policy and the Execution Safety Gate.
+/// A supervision's own unresolved blocking concerns are conflicts too, since it may be ahead of every summary. That a
+/// supervision is the run's only one remains the adapter's lock. Nothing here orders events across journals. An empty
+/// result says only that the supplied data shows no conflict: it permits nothing, and the future execution boundary
+/// must still refuse to record a start while any conflict exists and apply its own policy and the Execution Safety Gate.
 pub(crate) fn start_conflicts(inventory: &RunInventory, supervised: &[SupervisedRun<'_>]) -> Vec<StartConflict> {
     let claimed = |run: &RunId| supervised.iter().filter(|held| held.run() == *run).collect::<Vec<_>>();
     let RunInventory::Enumerated { allocated, summaries } = inventory else { return Vec::from([StartConflict::InventoryUnknown]) };
@@ -562,6 +563,14 @@ pub(crate) fn start_conflicts(inventory: &RunInventory, supervised: &[Supervised
     for held in supervised {
         if !seen.contains(&held.run()) {
             conflicts.push(StartConflict::Contradictory(held.run()));
+        }
+        // A supervision may be ahead of every summary (an orphan its opening frame just raised, for example): its own
+        // unresolved blocking concerns count too. This only ever adds conflicts.
+        for concern in held.blocking() {
+            conflicts.push(match concern.attempt() {
+                Some(attempt) => StartConflict::PossibleOrphan(held.run(), attempt),
+                None => StartConflict::BlockingConcern(held.run()),
+            });
         }
     }
     // Allocated ids with no summary, as ranges.
