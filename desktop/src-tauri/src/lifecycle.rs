@@ -22,3 +22,9 @@ pub(crate) mod live;
 // reconcile: conservative crash reconciliation and cross-run start conflicts (D3.2b-3). History in, history out: it
 // proposes an opening frame and inert recommendations, and never stops, starts or permits anything.
 pub(crate) mod reconcile;
+// codec: the canonical ORDJ1 journal codec (D3.2b-4, issue #118): framing, CRC-32C, canonical JSON through its own wire
+// types, classification of damaged bytes, the audit scan and the byte-exact check of an uncertain write. Bytes and
+// values only: it reads and writes no file and repairs nothing. The only lifecycle file that names serde.
+pub(crate) mod codec;
+// replay: full deterministic replay of a decoded journal through the reducer (D3.2b-4). History, never authority.
+pub(crate) mod replay;

@@ -260,6 +260,12 @@ impl LiveEpoch {
 /// The digest of a run specification's canonical encoding, computed outside the core (the core compares, never hashes).
 pub(crate) type SpecDigest = Sha256;
 
+/// The three shared value types under lifecycle names, for the codec (D3.2b-4): only this file may import them from
+/// the provider catalog and evidence vocabulary (decision 12.8), and the codec must build them from their text.
+pub(crate) type CatalogId = ProviderId;
+pub(crate) type Digest = Sha256;
+pub(crate) type ShortToken = Token;
+
 /// The task as it was when the run was created. Identity is by both halves, so a reused id is detected.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct TaskRef {
