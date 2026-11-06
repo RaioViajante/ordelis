@@ -476,13 +476,12 @@ impl LiveSupervision {
             .collect();
         // A frame that brings the journal to a ceiling leaves no room for what may follow (the end of the attempt it
         // stops, for example): the supervision faults now, whether the frame is then confirmed or abandoned (review of
-        // #120). Bytes are counted at the largest a frame of these events can take.
+        // #120). Bytes are counted at the largest a frame of these events can take: each event at its largest with its
+        // separator, the payload's brackets, and the frame's header and newline.
         let stated = self.stated(size);
         let count = u32::try_from(applied.events.len()).unwrap_or(u32::MAX);
-        let after = JournalSize {
-            events: stated.events.saturating_add(count),
-            bytes: stated.bytes.saturating_add(u64::from(count) * u64::from(MAX_EVENT_BYTES) + u64::from(MAX_TAIL_BYTES - MAX_FRAME_BYTES)),
-        };
+        let largest = u64::from(count) * (u64::from(MAX_EVENT_BYTES) + 1) + 1 + u64::from(MAX_TAIL_BYTES - MAX_FRAME_BYTES);
+        let after = JournalSize { events: stated.events.saturating_add(count), bytes: stated.bytes.saturating_add(largest) };
         if after.exhausted() {
             self.capacity_fault = true;
         }
