@@ -482,6 +482,11 @@ function liveAuthorityViolations(files: Record<string, string>): string[] {
   for (const assignment of assignments) if (!REVIEWED_FAULT_ASSIGNMENTS.includes(assignment)) violations.push(`live.rs: ${assignment}`);
   // Re-review of #122: every mention of a guarded field is counted, so no new site (a destructuring, a compound
   // assignment, a mutable borrow, a `ref mut` pattern) can lower one; the size and the monotonic floor too.
+  // Second re-review of #122: no wholesale reset either. The private constructor is named by its declaration and the
+  // two doors only, nothing assigns through `*self`, and no `ref mut` pattern exists in live.rs.
+  if ((live.match(/\bsupervision\(/g) ?? []).length !== 3 || /\*\s*self\s*=(?!=)/.test(live) || /\bref\s+mut\b/.test(live)) {
+    violations.push("live.rs: a supervision reset or rebound in place");
+  }
   for (const [field, count] of Object.entries(GUARDED_FIELD_MENTIONS)) {
     const found = (live.match(new RegExp(`\\b${field}\\b`, "g")) ?? []).length;
     if (found !== count) violations.push(`live.rs: ${field} named ${found} times, reviewed ${count}`);
@@ -1130,6 +1135,8 @@ describe("desktop trust boundary", () => {
       "a ref mut pattern": add("lifecycle/live.rs", "impl LiveSupervision { fn d(&mut self) { match self.poisoned { ref mut p => *p = false } } }"),
       "a lowered size": add("lifecycle/live.rs", "impl LiveSupervision { fn d(&mut self, committed: &[u8]) { self.known_bytes = committed.len() as u64; } }"),
       "a lowered monotonic floor": add("lifecycle/live.rs", "impl LiveSupervision { fn d(&mut self) { self.last_mono = MonoMs::new(0); } }"),
+      "a supervision reset in place": add("lifecycle/live.rs", "impl LiveSupervision { fn recover(&mut self) { *self = supervision(self.epoch, self.projection.clone(), MonoMs::new(0)); } }"),
+      "a count-balanced ref mut": add("lifecycle/live.rs", "impl LiveSupervision { fn heal(&mut self, p: &mut bool) { match p { ref mut q => **q = false } } }"),
       "a poison flag swapped": add("lifecycle/live.rs", "impl LiveSupervision { fn swap(&mut self, other: &mut bool) { std::mem::swap(&mut self.poisoned, other); } }"),
       "an alias of the outcome": add("lifecycle/live.rs", "type O = WriteOutcome;"),
     };
