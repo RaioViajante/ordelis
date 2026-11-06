@@ -428,12 +428,12 @@ fn a_replayed_history_reconciles_opens_and_its_opening_frame_replays() {
     );
     assert_eq!(reconciliation.blocking.len(), 1);
     // Unreconciled, the run blocks every start.
-    let inventory = RunInventory::Enumerated { allocated: 7, summaries: Vec::new() };
+    let inventory = RunInventory::Enumerated { allocated: 7, summaries: Vec::new(), observed: Vec::new() };
     assert!(!start_conflicts(&inventory, &[]).is_empty());
     let summaries = |history: &RecordedHistory| {
-        let mut all: Vec<_> = (1..7).map(|k| (RunId::new(k).unwrap(), crate::lifecycle::reconcile::RunSummary::NeverCreated)).collect();
+        let mut all: Vec<_> = (1..7).map(|k| (RunId::new(k).unwrap(), crate::lifecycle::reconcile::tests::never(k))).collect();
         all.push((run_id(), summarize(history, ReadBasis::Locked)));
-        RunInventory::Enumerated { allocated: 7, summaries: all }
+        RunInventory::Enumerated { allocated: 7, summaries: all, observed: Vec::new() }
     };
     assert_eq!(start_conflicts(&summaries(&history), &[]), [StartConflict::Unreconciled(run_id(), n(1))]);
     let size = JournalSize { events: history.projection().events().len() as u32, bytes: 0 };
@@ -462,9 +462,9 @@ fn a_quarantined_replay_is_never_reconciled_or_opened_and_blocks_every_start() {
     let reconciliation = reconcile(&history, &[], input(history.projection())).unwrap();
     assert!(reconciliation.frame.drafts().is_empty());
     let summary = summarize(&history, ReadBasis::Locked);
-    let mut summaries: Vec<_> = (1..7).map(|k| (RunId::new(k).unwrap(), crate::lifecycle::reconcile::RunSummary::NeverCreated)).collect();
+    let mut summaries: Vec<_> = (1..7).map(|k| (RunId::new(k).unwrap(), crate::lifecycle::reconcile::tests::never(k))).collect();
     summaries.push((run_id(), summary));
-    let conflicts = start_conflicts(&RunInventory::Enumerated { allocated: 7, summaries }, &[]);
+    let conflicts = start_conflicts(&RunInventory::Enumerated { allocated: 7, summaries, observed: Vec::new() }, &[]);
     assert_eq!(conflicts, [StartConflict::Quarantined(run_id(), QuarantineReason::Fault(JournalFault::Codec))]);
     let size = JournalSize { events: 0, bytes: 0 };
     let refused = begin_reconciled(EPOCH, history, reconciliation.frame, MonoMs::new(MONO), size).err();
@@ -559,7 +559,9 @@ fn a_landed_uncertain_decision_is_adopted_without_a_grant() {
     let mut file = committed.clone();
     file.extend_from_slice(&attempted);
     assert_eq!(verify_persisted(&file, &committed, &attempted), PersistCheck::Landed);
-    live.adopt(abandoned).unwrap();
+    let outcome = live.verify_write(&abandoned, &committed, &file).unwrap();
+    assert_eq!(outcome.check(), PersistCheck::Landed);
+    live.adopt(abandoned, outcome).unwrap();
     assert_eq!(live.projection().approval(a(1)).unwrap().state(), ApprovalState::Granted);
     assert!(live.stage(&[begin(1, 1, T0 + 3_000)], None, mono(3_000), size(&live)).is_err());
     // The adopted projection is exactly what the file replays to.
@@ -662,9 +664,9 @@ fn near_exhaustion_a_run_still_stops_reconciles_and_resolves_its_orphan() {
     let bytes = stream(&frames);
     assert_eq!(replayed(&bytes).projection(), live.projection());
     let reopened = RecordedHistory::from_replay(replayed(&bytes), evidence(mark_after(&frames, frames.len()), Vec::new())).unwrap();
-    let mut summaries: Vec<_> = (1..7).map(|k| (RunId::new(k).unwrap(), crate::lifecycle::reconcile::RunSummary::NeverCreated)).collect();
+    let mut summaries: Vec<_> = (1..7).map(|k| (RunId::new(k).unwrap(), crate::lifecycle::reconcile::tests::never(k))).collect();
     summaries.push((run_id(), summarize(&reopened, ReadBasis::Locked)));
-    assert_eq!(start_conflicts(&RunInventory::Enumerated { allocated: 7, summaries }, &[]), []);
+    assert_eq!(start_conflicts(&RunInventory::Enumerated { allocated: 7, summaries, observed: Vec::new() }, &[]), []);
 }
 
 #[test]
@@ -715,9 +717,9 @@ fn reopen_after_tear(journal_frames: &[Vec<Event>], bytes: &[u8], cut: usize, hi
     }
     let clean = stream(&frames);
     let reopened = RecordedHistory::from_replay(replayed(&clean), evidence(mark_after(&frames, frames.len()), Vec::new())).unwrap();
-    let mut summaries: Vec<_> = (1..7).map(|k| (RunId::new(k).unwrap(), crate::lifecycle::reconcile::RunSummary::NeverCreated)).collect();
+    let mut summaries: Vec<_> = (1..7).map(|k| (RunId::new(k).unwrap(), crate::lifecycle::reconcile::tests::never(k))).collect();
     summaries.push((run_id(), summarize(&reopened, ReadBasis::Locked)));
-    (kinds, start_conflicts(&RunInventory::Enumerated { allocated: 7, summaries }, &[]))
+    (kinds, start_conflicts(&RunInventory::Enumerated { allocated: 7, summaries, observed: Vec::new() }, &[]))
 }
 
 #[test]
@@ -765,7 +767,76 @@ fn a_tail_past_the_repair_cap_is_refused_for_quarantine() {
     let history = RecordedHistory::from_replay(replayed(&bytes), evidence(mark_after(&journal.frames, journal.frames.len()), Vec::from([tail_repair(MAX_REPAIRS + 1, tail)]))).unwrap();
     assert_eq!(reconcile(&history, &[], input(history.projection())).err(), Some(crate::lifecycle::reconcile::ReconcileRefused::TooManyRepairs));
     // The run stays unreconciled and blocks every start.
-    let mut summaries: Vec<_> = (1..7).map(|k| (RunId::new(k).unwrap(), crate::lifecycle::reconcile::RunSummary::NeverCreated)).collect();
+    let mut summaries: Vec<_> = (1..7).map(|k| (RunId::new(k).unwrap(), crate::lifecycle::reconcile::tests::never(k))).collect();
     summaries.push((run_id(), summarize(&history, ReadBasis::Locked)));
-    assert!(!start_conflicts(&RunInventory::Enumerated { allocated: 7, summaries }, &[]).is_empty());
+    assert!(!start_conflicts(&RunInventory::Enumerated { allocated: 7, summaries, observed: Vec::new() }, &[]).is_empty());
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Live evidence against real bytes (D3.2c-2, issue #122)
+
+#[test]
+fn a_live_torn_write_and_its_repair_replay_to_the_live_history_and_size() {
+    let mono = MonoMs::new;
+    // Every size the caller states here is zero: the live layer derives its own.
+    let none = JournalSize { events: 0, bytes: 0 };
+    let pending = begin_new(EPOCH, run_id(), created(T0), mono(0)).unwrap();
+    let mut file = encode_frame(pending.events()).unwrap();
+    let mut live = open(pending);
+    let staged = live.stage(&attempt_pair(1, 1, T0 + 1_000), None, mono(1_000), none).map_err(|r| r.refusal).unwrap();
+    file.extend_from_slice(staged.bytes());
+    assert!(live.confirm(staged).unwrap().is_empty());
+    // The decision's write is torn after 20 bytes.
+    let staged = live.stage(&[decide(1, Decision::Granted, T0 + 2_000)], None, mono(2_000), none).map_err(|r| r.refusal).unwrap();
+    let attempted = staged.bytes().to_vec();
+    let abandoned = live.abandon(staged).unwrap();
+    let torn_file = [&file[..], &attempted[..20]].concat();
+    // Had the process crashed here, replay would count the tail too, and an opening would verify with its repair.
+    assert_eq!(replayed(&torn_file).journal_bytes(), torn_file.len() as u64);
+    let committed_mark = MarkReading::Read { last_seq: live.projection().events().len() as u64, byte_length: file.len() as u64 };
+    let crashed = RecordedHistory::from_replay(replayed(&torn_file), evidence(committed_mark, Vec::from([tail_repair(1, &attempted[..20])]))).unwrap();
+    assert_eq!((crashed.status(), crashed.journal_bytes()), (HistoryStatus::Verified, torn_file.len() as u64));
+    let outcome = live.verify_write(&abandoned, &file, &torn_file).unwrap();
+    let shown = live.discard(abandoned, outcome).unwrap().unwrap();
+    assert_eq!(live.journal_size().bytes, torn_file.len() as u64);
+    // The adapter moves the tail to sidecar 1 and truncates (neither is done here): the file is the committed bytes.
+    let staged = live.stage_repair(&shown, 1, &file, &file, T0 + 2_500, mono(2_500), none).unwrap();
+    file.extend_from_slice(staged.bytes());
+    assert!(live.confirm(staged).unwrap().is_empty());
+    let staged = live.stage(&[decide(1, Decision::Granted, T0 + 3_000)], None, mono(3_000), none).map_err(|r| r.refusal).unwrap();
+    file.extend_from_slice(staged.bytes());
+    assert_eq!(live.confirm(staged).unwrap().len(), 1);
+    // The live size is the file's; the file replays to the live projection, and verifies with the sidecar it names.
+    assert_eq!(live.journal_size(), JournalSize { events: live.projection().events().len() as u32, bytes: file.len() as u64 });
+    let replay = replayed(&file);
+    assert_eq!(replay.projection(), live.projection());
+    assert_eq!(replay.journal_bytes(), file.len() as u64);
+    let mark = MarkReading::Read { last_seq: live.projection().events().len() as u64, byte_length: file.len() as u64 };
+    let history = RecordedHistory::from_replay(replay, evidence(mark, Vec::from([tail_repair(1, &attempted[..20])]))).unwrap();
+    assert_eq!(history.status(), HistoryStatus::Verified);
+    assert_eq!(history.journal_bytes(), file.len() as u64);
+    let conflicts = start_conflicts(
+        &RunInventory::Enumerated {
+            allocated: 7,
+            summaries: (1..7).map(|k| (RunId::new(k).unwrap(), crate::lifecycle::reconcile::tests::never(k))).chain([(run_id(), summarize(&history, ReadBasis::Locked))]).collect(),
+            observed: Vec::new(),
+        },
+        &[live.held()],
+    );
+    assert_eq!(conflicts, []);
+}
+
+#[test]
+fn a_frame_the_reducer_accepts_is_staged_with_exactly_its_canonical_bytes() {
+    // Every frame of the golden fixtures, staged live, carries the bytes the codec encodes and replay accepts.
+    let mono = MonoMs::new;
+    let pending = begin_new(EPOCH, run_id(), created(T0), mono(0)).unwrap();
+    let first = encode_frame(pending.events()).unwrap();
+    let mut live = open(pending);
+    let staged = live.stage(&attempt_pair(1, 1, T0 + 1_000), None, mono(1_000), JournalSize { events: 0, bytes: 0 }).map_err(|r| r.refusal).unwrap();
+    assert_eq!(staged.bytes(), &encode_frame(staged.events()).unwrap()[..]);
+    let file = [&first[..], staged.bytes()].concat();
+    assert_eq!(decode_stream(&file).end(), StreamEnd::Clean);
+    assert!(live.confirm(staged).unwrap().is_empty());
+    assert_eq!(replayed(&file).projection(), live.projection());
 }

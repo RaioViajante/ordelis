@@ -50,6 +50,8 @@ pub(crate) struct RecordedHistory {
     projection: RunProjection,
     status: HistoryStatus,
     unrecorded_repairs: Vec<JournalRepair>,
+    /// The journal's bytes as replayed (D3.2c-2): the floor of every size it is checked against.
+    bytes: u64,
 }
 
 /// What only the future storage adapter can see when it opens a run (r5 5.7), stated by it: whether a quarantine marker
@@ -82,14 +84,14 @@ pub(crate) enum HistoryRefused {
 }
 
 impl RecordedHistory {
-    fn assemble(projection: RunProjection, status: HistoryStatus, unrecorded_repairs: Vec<JournalRepair>) -> RecordedHistory {
-        RecordedHistory { projection, status, unrecorded_repairs }
+    fn assemble(projection: RunProjection, status: HistoryStatus, unrecorded_repairs: Vec<JournalRepair>, bytes: u64) -> RecordedHistory {
+        RecordedHistory { projection, status, unrecorded_repairs, bytes }
     }
 
     /// Test builds only: a history with a stated status, as b-3's tests state it.
     #[cfg(test)]
     pub(crate) fn new(projection: RunProjection, status: HistoryStatus, unrecorded_repairs: Vec<JournalRepair>) -> RecordedHistory {
-        RecordedHistory::assemble(projection, status, unrecorded_repairs)
+        RecordedHistory::assemble(projection, status, unrecorded_repairs, 0)
     }
 
     /// The recorded history of a replay, with its status derived, in this order: a reported quarantine marker
@@ -99,11 +101,12 @@ impl RecordedHistory {
     /// sees the repair and never concludes "not started" for an attempt whose start may have been in the lost bytes.
     /// Only then is the history `Verified`. Nothing here grants, opens or repairs anything.
     pub(crate) fn from_replay(replayed: ReplayedHistory, evidence: OpeningEvidence) -> Result<RecordedHistory, HistoryRefused> {
+        let bytes = replayed.journal_bytes();
         if evidence.marker == MarkerState::Present {
-            return Ok(RecordedHistory::assemble(replayed.into_projection(), HistoryStatus::Quarantined(QuarantineReason::Marker), evidence.repairs));
+            return Ok(RecordedHistory::assemble(replayed.into_projection(), HistoryStatus::Quarantined(QuarantineReason::Marker), evidence.repairs, bytes));
         }
         if let Some(fault) = replayed.fault() {
-            return Ok(RecordedHistory::assemble(replayed.into_projection(), HistoryStatus::Quarantined(QuarantineReason::Fault(fault)), evidence.repairs));
+            return Ok(RecordedHistory::assemble(replayed.into_projection(), HistoryStatus::Quarantined(QuarantineReason::Fault(fault)), evidence.repairs, bytes));
         }
         replayed.check_mark(evidence.mark).map_err(HistoryRefused::Mark)?;
         if replayed.projection().spec().is_none() {
@@ -130,7 +133,7 @@ impl RecordedHistory {
                 return Err(HistoryRefused::TailNotRepaired);
             }
         }
-        Ok(RecordedHistory::assemble(replayed.into_projection(), HistoryStatus::Verified, evidence.repairs))
+        Ok(RecordedHistory::assemble(replayed.into_projection(), HistoryStatus::Verified, evidence.repairs, bytes))
     }
 
     pub(crate) fn projection(&self) -> &RunProjection {
@@ -143,6 +146,17 @@ impl RecordedHistory {
 
     pub(crate) fn unrecorded_repairs(&self) -> &[JournalRepair] {
         &self.unrecorded_repairs
+    }
+
+    /// The journal's bytes as replayed, a torn tail included (D3.2c-2).
+    pub(crate) const fn journal_bytes(&self) -> u64 {
+        self.bytes
+    }
+
+    /// The size this history is checked against: never below its own events and bytes, whatever a caller states.
+    pub(crate) fn floor(&self, stated: JournalSize) -> JournalSize {
+        let held = u32::try_from(self.projection.events().len()).unwrap_or(u32::MAX);
+        stated.raised(JournalSize { events: held, bytes: self.bytes })
     }
 }
 
@@ -267,6 +281,8 @@ pub(crate) struct ReconciledFrame {
     basis: RunProjection,
     repairs: Vec<JournalRepair>,
     drafts: Vec<EventDraft>,
+    /// The size the frame was computed against (D3.2c-2); opening checks it against no less.
+    size: JournalSize,
 }
 
 impl ReconciledFrame {
@@ -281,6 +297,10 @@ impl ReconciledFrame {
 
     pub(crate) const fn mono(&self) -> MonoMs {
         self.mono
+    }
+
+    pub(crate) const fn size(&self) -> JournalSize {
+        self.size
     }
 
     /// Whether this frame was computed for exactly this history: the same status, projection and missing repairs.
@@ -409,7 +429,7 @@ pub(crate) fn reconcile(history: &RecordedHistory, observations: &[AttemptObserv
     let after = if drafts.is_empty() {
         projection.clone()
     } else {
-        apply(projection, &drafts, input.size).map_err(ReconcileRefused::Rejected)?.projection
+        apply(projection, &drafts, history.floor(input.size)).map_err(ReconcileRefused::Rejected)?.projection
     };
     if let Some(record) = projection.current_attempt() {
         let retry = after.attempt(record.attempt()).map(AttemptRecord::state)
@@ -429,6 +449,7 @@ pub(crate) fn reconcile(history: &RecordedHistory, observations: &[AttemptObserv
         basis: projection.clone(),
         repairs: history.unrecorded_repairs.clone(),
         drafts,
+        size: history.floor(input.size),
     };
     Ok(Reconciliation { frame, findings, recommendations, blocking, informational })
 }
@@ -512,19 +533,47 @@ pub(crate) struct VerifiedRun {
     /// An unresolved blocking concern about the run rather than one attempt (none exists in v1).
     run_blocked: bool,
     in_flight: Option<AttemptNo>,
-    repairs_pending: bool,
+    /// Repair records the journal still lacks: reported but not recorded with the same content, or a sidecar reported
+    /// twice (which `reconcile` refuses).
+    repairs_owed: Vec<JournalRepair>,
     /// The recorded events summarized, so that a supervision claiming the run can be checked against them.
     events: Vec<Event>,
+}
+
+/// That an allocated run id was never created, shown by evidence (D3.2c-2, S4). Built only by `never_created`; there is
+/// no other constructor, and no run id or flag becomes one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct NeverCreatedRun {
+    run: RunId,
 }
 
 /// The closed summary of one allocated run id (F3).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum RunSummary {
-    /// The id was allocated and nothing was ever written (mark `(0, 0)` and the never-created marker).
-    NeverCreated,
+    /// The id was allocated and nothing was ever written: an empty journal, a `(0, 0)` mark and the never-created marker.
+    NeverCreated(NeverCreatedRun),
     Quarantined(QuarantineReason),
     Unverified(Unverified),
     Verified(VerifiedRun),
+}
+
+/// Summarizes a run whose journal holds no `RunCreated` (D3.2c-2, S4; F6). It is `NeverCreated` only when the replay of
+/// the run's bytes has no frame, no fault and no tail, the mark reads `(0, 0)`, and the adapter reports the
+/// never-created marker present (`marker`). Anything else blocks: a mark that is not `(0, 0)` is `MarkMismatch`, and any other
+/// shortfall `NoRunCreated`. The core cannot authenticate the marker, the mark or that the bytes are the whole file:
+/// those are the adapter's reads under the run's lock. It only refuses evidence that is missing or inconsistent.
+pub(crate) fn never_created(replayed: &ReplayedHistory, mark: MarkReading, marker: MarkerState) -> RunSummary {
+    if mark != (MarkReading::Read { last_seq: 0, byte_length: 0 }) {
+        return RunSummary::Unverified(Unverified::MarkMismatch);
+    }
+    let empty = replayed.projection().events().is_empty()
+        && replayed.fault().is_none()
+        && replayed.tail().is_none()
+        && replayed.journal_bytes() == 0;
+    if !empty || marker != MarkerState::Present {
+        return RunSummary::Unverified(Unverified::NoRunCreated);
+    }
+    RunSummary::NeverCreated(NeverCreatedRun { run: replayed.projection().run() })
 }
 
 /// Summarizes one recorded history read as `read`.
@@ -544,20 +593,28 @@ pub(crate) fn summarize(history: &RecordedHistory, read: ReadBasis) -> RunSummar
         run_blocked: blocking.iter().any(|concern| concern.attempt().is_none()),
         in_flight: projection.current_attempt().map(AttemptRecord::attempt),
         // A repair not recorded with the same content, or a sidecar reported twice (which `reconcile` refuses), is owed.
-        repairs_pending: history.unrecorded_repairs.iter().enumerate().any(|(index, repair)| {
-            recorded_repair(projection, repair.sidecar()) != Some(*repair)
-                || history.unrecorded_repairs[..index].iter().any(|earlier| earlier.sidecar() == repair.sidecar())
-        }),
+        repairs_owed: history
+            .unrecorded_repairs
+            .iter()
+            .enumerate()
+            .filter(|(index, repair)| {
+                recorded_repair(projection, repair.sidecar()) != Some(**repair)
+                    || history.unrecorded_repairs[..*index].iter().any(|earlier| earlier.sidecar() == repair.sidecar())
+            })
+            .map(|(_, repair)| *repair)
+            .collect(),
         events: projection.events().to_vec(),
     })
 }
 
 /// Every run the caller knows of, enumerated from the run-id counter: ids `r1` to `r<allocated>`, each with exactly one
 /// summary. `Unknown` when the counter or the marks could not be read. Never a directory listing or a cached index.
+/// `observed` (D3.2c-2) lists every run id for which the adapter saw any artifact (journal, mark, marker, lock or
+/// sidecar): it can only add conflicts, so that a counter that understates what exists is caught.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum RunInventory {
     Unknown,
-    Enumerated { allocated: u64, summaries: Vec<(RunId, RunSummary)> },
+    Enumerated { allocated: u64, summaries: Vec<(RunId, RunSummary)>, observed: Vec<RunId> },
 }
 
 /// One reason that no start may happen now, anywhere. Global in v1 (r5 12.18): a blocking condition in any run stops
@@ -568,7 +625,8 @@ pub(crate) enum StartConflict {
     /// Allocated ids with no summary.
     Unaccounted { from: RunId, through: RunId },
     /// A summary that contradicts the inventory: a second one for an id, an id the counter never allocated, a summary
-    /// of another run, or a supervised run that is missing from the inventory or said never to have been created.
+    /// of another run, a supervised run that is missing from the inventory or said never to have been created, or an
+    /// observed artifact of an id that is above the counter or has no summary.
     Contradictory(RunId),
     Quarantined(RunId, QuarantineReason),
     Unverified(RunId, Unverified),
@@ -585,19 +643,25 @@ pub(crate) enum StartConflict {
     /// The run is held by a capacity-faulted supervision (D3.2c-1): its journal may be unable to record a stop, an end or
     /// a repair, so nothing about it is settled while it is held.
     CapacityExhausted(RunId),
+    /// The run is held by a poisoned supervision (D3.2c-2): an uncertain append diverged, could not be judged, or
+    /// followed another uncertain one, so the journal is not trusted while it is held.
+    JournalPoisoned(RunId),
 }
 
 /// Every start conflict in `inventory`, sorted and without repeats. `supervised` names the runs the caller's own live
 /// supervisions hold; each entry borrows an opened `LiveSupervision`, so a pending or dropped supervision cannot be
 /// claimed. A supervision excuses a run's attempt in flight only if its own recorded history extends the summarized
 /// one; a supervision that does not (one opened under a reused id, for example) is `Contradictory` and excuses nothing.
-/// A supervision's own unresolved blocking concerns are conflicts too, since it may be ahead of every summary. That a
+/// A supervision's own unresolved blocking concerns are conflicts too, since it may be ahead of every summary. A healthy
+/// owning supervision (not capacity-faulted, not poisoned) supersedes an older summary (D3.2c-2): the summary's orphans
+/// and blocking concerns are then taken from the supervision, and its owed repairs count only if the supervision has
+/// not recorded them since. A missing or contradictory summary, or an unhealthy claim, stays conservative. That a
 /// supervision is the run's only one remains the adapter's lock. Nothing here orders events across journals. An empty
 /// result says only that the supplied data shows no conflict: it permits nothing, and the future execution boundary
 /// must still refuse to record a start while any conflict exists and apply its own policy and the Execution Safety Gate.
 pub(crate) fn start_conflicts(inventory: &RunInventory, supervised: &[SupervisedRun<'_>]) -> Vec<StartConflict> {
     let claimed = |run: &RunId| supervised.iter().filter(|held| held.run() == *run).collect::<Vec<_>>();
-    let RunInventory::Enumerated { allocated, summaries } = inventory else { return Vec::from([StartConflict::InventoryUnknown]) };
+    let RunInventory::Enumerated { allocated, summaries, observed } = inventory else { return Vec::from([StartConflict::InventoryUnknown]) };
     let allocated = *allocated;
     if allocated > 0 && RunId::new(allocated).is_err() {
         return Vec::from([StartConflict::InventoryUnknown]);
@@ -615,8 +679,8 @@ pub(crate) fn start_conflicts(inventory: &RunInventory, supervised: &[Supervised
             conflicts.push(StartConflict::Contradictory(*run));
         }
         match summary {
-            RunSummary::NeverCreated if held => conflicts.push(StartConflict::Contradictory(*run)),
-            RunSummary::NeverCreated => {}
+            RunSummary::NeverCreated(proof) if held || proof.run != *run => conflicts.push(StartConflict::Contradictory(*run)),
+            RunSummary::NeverCreated(_) => {}
             RunSummary::Quarantined(reason) => conflicts.push(StartConflict::Quarantined(*run, *reason)),
             RunSummary::Unverified(why) => conflicts.push(StartConflict::Unverified(*run, *why)),
             RunSummary::Verified(verified) => {
@@ -626,21 +690,25 @@ pub(crate) fn start_conflicts(inventory: &RunInventory, supervised: &[Supervised
                 if verified.read != ReadBasis::Locked {
                     conflicts.push(StartConflict::UnverifiedRead(*run));
                 }
-                for attempt in &verified.orphans {
-                    conflicts.push(StartConflict::PossibleOrphan(*run, *attempt));
-                }
-                if verified.run_blocked {
-                    conflicts.push(StartConflict::BlockingConcern(*run));
-                }
-                if verified.repairs_pending {
-                    conflicts.push(StartConflict::RepairPending(*run));
-                }
                 let owned = holders.len() == 1 && holders[0].extends(&verified.events);
                 if held && !owned {
                     conflicts.push(StartConflict::Contradictory(*run));
                 }
-                // A capacity-faulted supervision excuses nothing (D3.2c-1).
-                let excused = owned && !holders[0].capacity_faulted();
+                // A capacity-faulted (D3.2c-1) or poisoned (D3.2c-2) supervision excuses nothing.
+                let excused = owned && !holders[0].capacity_faulted() && !holders[0].poisoned();
+                // A healthy owner is newer than the summary: its own concerns are added below, and it has recorded or
+                // resolved what it no longer holds.
+                if !excused {
+                    for attempt in &verified.orphans {
+                        conflicts.push(StartConflict::PossibleOrphan(*run, *attempt));
+                    }
+                    if verified.run_blocked {
+                        conflicts.push(StartConflict::BlockingConcern(*run));
+                    }
+                }
+                if verified.repairs_owed.iter().any(|repair| !(excused && holders[0].records(repair))) {
+                    conflicts.push(StartConflict::RepairPending(*run));
+                }
                 if let (Some(attempt), false) = (verified.in_flight, excused) {
                     conflicts.push(StartConflict::Unreconciled(*run, attempt));
                 }
@@ -654,6 +722,12 @@ pub(crate) fn start_conflicts(inventory: &RunInventory, supervised: &[Supervised
         if held.capacity_faulted() {
             conflicts.push(StartConflict::CapacityExhausted(held.run()));
         }
+        if held.poisoned() {
+            conflicts.push(StartConflict::JournalPoisoned(held.run()));
+        }
+        if held.repair_owed() {
+            conflicts.push(StartConflict::RepairPending(held.run()));
+        }
         // A supervision may be ahead of every summary (an orphan its opening frame just raised, for example): its own
         // unresolved blocking concerns count too. This only ever adds conflicts.
         for concern in held.blocking() {
@@ -661,6 +735,12 @@ pub(crate) fn start_conflicts(inventory: &RunInventory, supervised: &[Supervised
                 Some(attempt) => StartConflict::PossibleOrphan(held.run(), attempt),
                 None => StartConflict::BlockingConcern(held.run()),
             });
+        }
+    }
+    // An artifact of an id above the counter, or of an id with no summary: the counter or the summaries understate.
+    for run in observed {
+        if run.number() > allocated || !seen.contains(run) {
+            conflicts.push(StartConflict::Contradictory(*run));
         }
     }
     // Allocated ids with no summary, as ranges.
@@ -686,4 +766,4 @@ pub(crate) fn start_conflicts(inventory: &RunInventory, supervised: &[Supervised
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

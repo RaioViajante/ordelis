@@ -3,6 +3,7 @@
 use super::*;
 use crate::lifecycle::model::*;
 use crate::lifecycle::reduce::tests::*;
+use crate::lifecycle::codec::{crc32c, encode_frame, PersistCheck, MAX_STREAM_BYTES};
 use crate::lifecycle::reduce::{apply_recorded, Concern, RunProjection};
 
 const EPOCH: LiveEpoch = LiveEpoch::new(1);
@@ -52,6 +53,39 @@ fn refusal(live: &mut LiveSupervision, drafts: Vec<EventDraft>, grant: Option<Li
         Ok(_) => panic!("staged"),
         Err(refused) => (refused.refusal, refused.grant),
     }
+}
+
+/// The supervision's journal as one frame per recorded event: `verify_write` compares events, not framing.
+fn committed(live: &LiveSupervision) -> Vec<u8> {
+    live.projection().events().iter().flat_map(|event| encode_frame(std::slice::from_ref(event)).unwrap()).collect()
+}
+
+/// Verifies `abandoned` against a file the closure builds from the committed bytes and the attempted frame.
+fn verified_write(live: &mut LiveSupervision, abandoned: &Abandoned, file: impl Fn(&[u8], &[u8]) -> Vec<u8>) -> WriteOutcome {
+    let committed = committed(live);
+    let file = file(&committed, &abandoned.bytes);
+    live.verify_write(abandoned, &committed, &file).unwrap()
+}
+
+/// The frame landed: the file is the committed bytes and exactly the frame.
+fn landed(live: &mut LiveSupervision, abandoned: &Abandoned) -> WriteOutcome {
+    let outcome = verified_write(live, abandoned, |committed, frame| [committed, frame].concat());
+    assert_eq!(outcome.check(), PersistCheck::Landed);
+    outcome
+}
+
+/// The frame is absent: the file is exactly the committed bytes.
+fn absent(live: &mut LiveSupervision, abandoned: &Abandoned) -> WriteOutcome {
+    let outcome = verified_write(live, abandoned, |committed, _| committed.to_vec());
+    assert_eq!(outcome.check(), PersistCheck::Absent { torn: None });
+    outcome
+}
+
+/// The frame was torn after `cut` bytes: the file is the committed bytes and that prefix.
+fn torn(live: &mut LiveSupervision, abandoned: &Abandoned, cut: usize) -> WriteOutcome {
+    let outcome = verified_write(live, abandoned, |committed, frame| [committed, &frame[..cut]].concat());
+    assert!(matches!(outcome.check(), PersistCheck::Absent { torn: Some(_) }));
+    outcome
 }
 
 fn single(mut grants: Vec<LiveGrant>) -> LiveGrant {
@@ -213,7 +247,8 @@ fn an_adopted_decision_is_history_and_mints_nothing() {
     assert_eq!(abandoned.events().len(), 1);
     // Nothing can be staged while the uncertain frame is unresolved (F8).
     assert_eq!(refusal(&mut live, Vec::from([cancel(CancelScope::Run, T0 + 2_100)]), None, 2_100).0, LiveRefusal::Unresolved);
-    assert!(live.adopt(abandoned).is_ok());
+    let outcome = landed(&mut live, &abandoned);
+    assert!(live.adopt(abandoned, outcome).is_ok());
     assert_eq!(approval_state(&live, 1), ApprovalState::Granted);
     // The approval is recorded as granted, but no grant exists: the start cannot be staged.
     assert_eq!(refusal(&mut live, Vec::from([begin(1, 1, T0 + 3_000)]), None, 3_000).0, LiveRefusal::GrantRequired);
@@ -229,7 +264,8 @@ fn an_adopted_grant_is_voided_by_its_use_window() {
     commit(&mut live, attempt_pair(1, 1, T0 + 1_000), None, 1_000);
     let staged = staged(&mut live, Vec::from([decide(1, Decision::Granted, T0 + 2_000)]), None, 2_000);
     let abandoned = live.abandon(staged).ok().unwrap();
-    live.adopt(abandoned).ok().unwrap();
+    let outcome = landed(&mut live, &abandoned);
+    live.adopt(abandoned, outcome).ok().unwrap();
     assert!(live.due(m(61_999), T0 + 2_000, size_of(&live)).drafts.is_empty());
     let due = live.due(m(62_000), T0 + 2_000, size_of(&live));
     assert_eq!(*due.drafts[0].body(), EventBody::ApprovalVoided { approval: a(1), reason: VoidReason::UseByPassed });
@@ -242,7 +278,8 @@ fn an_abandoned_consumption_drops_its_grant() {
     assert_eq!(refusal(&mut live, Vec::from([cancel(CancelScope::Run, T0 + 3_000)]), None, 3_000).0, LiveRefusal::InFlight);
     let abandoned = live.abandon(staged).ok().unwrap();
     // The start did not land: the frame is discarded, and the start can never be retried with that grant.
-    live.discard(abandoned).ok().unwrap();
+    let outcome = absent(&mut live, &abandoned);
+    assert!(live.discard(abandoned, outcome).ok().unwrap().is_none());
     assert_eq!(attempt_state(&live, 1), AttemptState::Approved);
     assert_eq!(refusal(&mut live, Vec::from([begin(1, 1, T0 + 3_000)]), None, 3_000).0, LiveRefusal::GrantRequired);
 }
@@ -302,10 +339,17 @@ fn a_monotonic_regression_leaves_only_safety_drafts() {
     commit(&mut live, due.drafts, None, 2_000);
     // F2: the child's identity can still be recorded and its exit observed.
     commit(&mut live, Vec::from([started(1, T0 + 5_000)]), None, 5_000);
-    commit(&mut live, Vec::from([exited(1, 0, T0 + 6_000)]), None, 6_000);
+    // The exit's write is torn: a repair can still be recorded (D3.2c-2: only with the verified tail), then the exit.
+    let staged = staged(&mut live, Vec::from([exited(1, 0, T0 + 6_000)]), None, 6_000);
+    let abandoned = live.abandon(staged).ok().unwrap();
+    let outcome = torn(&mut live, &abandoned, 10);
+    let evidence = live.discard(abandoned, outcome).ok().unwrap().unwrap();
+    let journal = committed(&live);
+    let repair = live.stage_repair(&evidence, 1, &journal, &journal, T0 + 6_500, m(6_500), size_of(&live)).ok().unwrap();
+    live.confirm(repair).ok().unwrap();
+    commit(&mut live, Vec::from([exited(1, 0, T0 + 7_000)]), None, 7_000);
     assert_eq!(attempt_state(&live, 1), AttemptState::Stopped(StoppedKind::ClockFault));
-    // A repair can be recorded; a new attempt cannot.
-    commit(&mut live, Vec::from([repaired(1, T0 + 7_000)]), None, 7_000);
+    // A new attempt cannot.
     assert_eq!(refusal(&mut live, attempt_pair(2, 2, T0 + 7_000), None, 7_000).0, LiveRefusal::ClockFault);
 }
 
@@ -459,6 +503,10 @@ struct World {
     wall: u64,
     minted: usize,
     granted_decisions: usize,
+    /// Whether the last append was uncertain: the driver never makes two in a row, which poisons (tested apart).
+    uncertain: bool,
+    /// The last sidecar a repair used.
+    sidecar: u32,
 }
 
 impl World {
@@ -466,7 +514,18 @@ impl World {
         let mut live = live();
         let frames = Vec::from([live.projection().events().to_vec()]);
         let _ = &mut live;
-        World { rng: Rng(seed), live, frames, grants: Vec::new(), mono: 1_000, wall: T0 + 1_000, minted: 0, granted_decisions: 0 }
+        World {
+            rng: Rng(seed),
+            live,
+            frames,
+            grants: Vec::new(),
+            mono: 1_000,
+            wall: T0 + 1_000,
+            minted: 0,
+            granted_decisions: 0,
+            uncertain: false,
+            sidecar: 0,
+        }
     }
 
     fn tick(&mut self) -> (u64, u64) {
@@ -631,7 +690,9 @@ impl World {
                     .filter(|e| matches!(e.body, EventBody::ApprovalDecided { decision: Decision::Granted, .. }))
                     .count();
                 let events = staged.events().to_vec();
-                match self.rng.below(100) {
+                let roll = if self.uncertain { 0 } else { self.rng.below(100) };
+                self.uncertain = roll > 84;
+                match roll {
                     0..=84 => {
                         let grants = self.live.confirm(staged).ok().unwrap();
                         // Grants come only from decisions this very frame recorded.
@@ -649,20 +710,52 @@ impl World {
                     85..=94 => {
                         let abandoned = self.live.abandon(staged).ok().unwrap();
                         assert_eq!(self.live.projection(), &before);
-                        self.live.adopt(abandoned).ok().unwrap();
-                        if !events.is_empty() {
+                        if events.is_empty() {
+                            // Nothing was to be written: the file is the committed bytes.
+                            let outcome = absent(&mut self.live, &abandoned);
+                            assert!(self.live.discard(abandoned, outcome).ok().unwrap().is_none());
+                        } else {
+                            let outcome = landed(&mut self.live, &abandoned);
+                            self.live.adopt(abandoned, outcome).ok().unwrap();
                             self.frames.push(events);
                         }
                     }
                     _ => {
                         let abandoned = self.live.abandon(staged).ok().unwrap();
-                        self.live.discard(abandoned).ok().unwrap();
-                        assert_eq!(self.live.projection(), &before);
+                        let len = abandoned.bytes.len();
+                        let repairs = self.live.projection().events().iter().filter(|e| e.body.kind() == EventKind::JournalRepaired).count();
+                        if len > 1 && repairs < 30 && self.rng.chance(50) {
+                            // Torn: the repair is owed, nothing else stages, and only the measured tail is recorded.
+                            let cut = 1 + self.rng.below(len as u64 - 1) as usize;
+                            let outcome = torn(&mut self.live, &abandoned, cut);
+                            let evidence = self.live.discard(abandoned, outcome).ok().unwrap().unwrap();
+                            assert_eq!(evidence.len() as usize, cut);
+                            assert_eq!(self.live.projection(), &before);
+                            assert_eq!(self.live.stage(&[], None, MonoMs::new(self.mono), size_of(&self.live)).err().map(|r| r.refusal), Some(LiveRefusal::RepairOwed));
+                            let journal = committed(&self.live);
+                            self.sidecar += 1;
+                            let repair = self
+                                .live
+                                .stage_repair(&evidence, self.sidecar, &journal, &journal, wall, MonoMs::new(self.mono), size_of(&self.live))
+                                .ok()
+                                .unwrap();
+                            let recorded = repair.events().to_vec();
+                            assert!(matches!(&recorded[0].body, EventBody::JournalRepaired(r) if r.removed_bytes() as usize == cut));
+                            self.live.confirm(repair).ok().unwrap();
+                            self.frames.push(recorded);
+                            self.uncertain = false;
+                        } else {
+                            let outcome = absent(&mut self.live, &abandoned);
+                            assert!(self.live.discard(abandoned, outcome).ok().unwrap().is_none());
+                        }
+                        assert_eq!(self.live.projection().events()[..before.events().len()], before.events()[..]);
                     }
                 }
             }
         }
-        if relay_only {
+        // A live repair recorded in this step is not the relay's.
+        let repaired = self.live.projection().events()[before.events().len()..].iter().any(|e| e.body.kind() == EventKind::JournalRepaired);
+        if relay_only && !repaired {
             check_relay_changed_nothing(&before, self.live.projection());
         }
         check_invariants(&before, self.live.projection());
@@ -857,6 +950,7 @@ use crate::lifecycle::reconcile::{
     is_quiescent, reconcile, start_conflicts, summarize, AttemptObservation, HistoryStatus, ReadBasis, ReconcileInput,
     Recommendation, RecordedHistory, RunInventory, RunSummary, Seen, StartConflict,
 };
+use crate::lifecycle::reconcile::tests::never;
 
 /// Seeds that failed during development, kept as regression fixtures.
 const CRASH_REGRESSION_SEEDS: [u64; 0] = [];
@@ -878,9 +972,9 @@ fn replay_frames(frames: &[Vec<Event>]) -> RunProjection {
 }
 
 fn inventory_with(summary: RunSummary) -> RunInventory {
-    let mut summaries: Vec<(RunId, RunSummary)> = (1..=6).map(|number| (RunId::new(number).unwrap(), RunSummary::NeverCreated)).collect();
+    let mut summaries: Vec<(RunId, RunSummary)> = (1..=6).map(|number| (RunId::new(number).unwrap(), never(number))).collect();
     summaries.push((run_id(), summary));
-    RunInventory::Enumerated { allocated: 7, summaries }
+    RunInventory::Enumerated { allocated: 7, summaries, observed: Vec::new() }
 }
 
 fn crash_and_reconcile(seed: u64, stats: &mut CrashStats) {
@@ -1035,6 +1129,16 @@ fn crash_and_reconcile(seed: u64, stats: &mut CrashStats) {
     // Keep going with the reopened supervision, still holding the dead supervision's grants.
     std::mem::swap(&mut world.live, &mut live);
     world.mono = mono;
+    world.uncertain = false;
+    world.sidecar = after
+        .events()
+        .iter()
+        .filter_map(|e| match &e.body {
+            EventBody::JournalRepaired(repair) => Some(repair.sidecar()),
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0);
     for _ in 0..world.rng.below(STEPS as u64 / 2) {
         world.step();
         assert!(world.live.outstanding.iter().all(|approval| approval.number() > old_approvals), "seed {seed}: an old approval became usable");
@@ -1071,4 +1175,407 @@ fn a_start_batched_with_anything_is_refused_and_the_grant_comes_back() {
     commit(&mut live, Vec::from([begin(1, 1, T0 + 3_000)]), grant, 3_000);
     commit(&mut live, Vec::from([started(1, T0 + 4_000)]), None, 4_000);
     assert_eq!(attempt_state(&live, 1), AttemptState::Running);
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Evidence-bound uncertain writes, repairs and sizes (D3.2c-2, issue #122)
+
+/// `running_live`, with the canonical bytes of its frames counted independently of the supervision.
+fn running_live_counted() -> (LiveSupervision, u64) {
+    let mut live = live();
+    let mut bytes = encode_frame(live.projection().events()).unwrap().len() as u64;
+    let mut take = |live: &mut LiveSupervision, drafts: Vec<EventDraft>, grant: Option<LiveGrant>, mono: u64| {
+        let staged = staged(live, drafts, grant, mono);
+        bytes += encode_frame(staged.events()).unwrap().len() as u64;
+        live.confirm(staged).ok().unwrap()
+    };
+    take(&mut live, attempt_pair(1, 1, T0 + 1_000), None, 1_000);
+    let grant = single(take(&mut live, Vec::from([decide(1, Decision::Granted, T0 + 2_000)]), None, 2_000));
+    take(&mut live, Vec::from([begin(1, 1, T0 + 3_000)]), Some(grant), 3_000);
+    take(&mut live, Vec::from([started(1, T0 + 4_000)]), None, 4_000);
+    (live, bytes)
+}
+
+/// `staged`, under a name a local binding cannot shadow.
+fn stage_one(live: &mut LiveSupervision, drafts: Vec<EventDraft>, grant: Option<LiveGrant>, mono: u64) -> Staged {
+    staged(live, drafts, grant, mono)
+}
+
+/// A supervision with attempt 1 proposed, and its decision staged and abandoned: the abandoned frame and its bytes.
+fn uncertain_decision() -> (LiveSupervision, Abandoned) {
+    let mut live = live();
+    commit(&mut live, attempt_pair(1, 1, T0 + 1_000), None, 1_000);
+    let staged = stage_one(&mut live, Vec::from([decide(1, Decision::Granted, T0 + 2_000)]), None, 2_000);
+    let abandoned = live.abandon(staged).ok().unwrap();
+    (live, abandoned)
+}
+
+#[test]
+fn an_outcome_resolves_only_its_own_frame_and_only_as_it_shows() {
+    // Absent cannot adopt: the projection does not move.
+    let (mut live, abandoned) = uncertain_decision();
+    let before = live.projection().clone();
+    let outcome = absent(&mut live, &abandoned);
+    let abandoned = match live.adopt(abandoned, outcome) {
+        Err(LiveRefusal::OutcomeMismatch) => None,
+        other => Some(other),
+    };
+    assert!(abandoned.is_none(), "adopted on Absent");
+    assert_eq!(live.projection(), &before);
+    // Landed cannot discard.
+    let (mut live, abandoned) = uncertain_decision();
+    let outcome = landed(&mut live, &abandoned);
+    assert_eq!(live.discard(abandoned, outcome).err(), Some(LiveRefusal::OutcomeMismatch));
+    assert_eq!(attempt_state(&live, 1), AttemptState::Proposed);
+    // An outcome another supervision made for its own identical frame (same run, other epoch) is refused.
+    let (mut live, abandoned) = uncertain_decision();
+    let mut other = live_with(LiveEpoch::new(2), created(T0));
+    commit(&mut other, attempt_pair(1, 1, T0 + 1_000), None, 1_000);
+    let theirs = stage_one(&mut other, Vec::from([decide(1, Decision::Granted, T0 + 2_000)]), None, 2_000);
+    let theirs = other.abandon(theirs).ok().unwrap();
+    assert_eq!(theirs.bytes, abandoned.bytes);
+    let foreign = landed(&mut other, &theirs);
+    assert_eq!(live.adopt(abandoned, foreign).err(), Some(LiveRefusal::OutcomeMismatch));
+    // So is an outcome of this supervision's earlier frame, presented for a later one.
+    let (mut live, abandoned) = uncertain_decision();
+    let stale = absent(&mut live, &abandoned);
+    let outcome = absent(&mut live, &abandoned);
+    live.discard(abandoned, outcome).ok().unwrap();
+    commit(&mut live, Vec::from([decide(1, Decision::Granted, T0 + 2_050)]), None, 2_050);
+    let staged = stage_one(&mut live, Vec::from([cancel(CancelScope::Run, T0 + 2_100)]), None, 2_100);
+    let later = live.abandon(staged).ok().unwrap();
+    assert_eq!(live.discard(later, stale).err(), Some(LiveRefusal::OutcomeMismatch));
+}
+
+#[test]
+fn the_committed_bytes_must_be_exactly_the_supervisions_frames() {
+    let (mut live, abandoned) = uncertain_decision();
+    let committed = committed(&live);
+    // Missing the last frame, an extra frame, and bytes that are not a clean stream.
+    let short = encode_frame(&live.projection().events()[..1]).unwrap();
+    let mut longer = committed.clone();
+    longer.extend_from_slice(&abandoned.bytes);
+    let mut torn_committed = committed.clone();
+    torn_committed.extend_from_slice(&abandoned.bytes[..5]);
+    for wrong in [short, longer, torn_committed, Vec::new()] {
+        assert_eq!(live.verify_write(&abandoned, &wrong, &committed).err(), Some(LiveRefusal::NotThisJournal));
+    }
+    assert!(!live.poisoned());
+    // A frame staged by another supervision is not this one's to verify.
+    let mut other = live_with(LiveEpoch::new(2), created(T0));
+    commit(&mut other, attempt_pair(1, 1, T0 + 1_000), None, 1_000);
+    let theirs = stage_one(&mut other, Vec::from([decide(1, Decision::Granted, T0 + 2_000)]), None, 2_000);
+    let theirs = other.abandon(theirs).ok().unwrap();
+    assert_eq!(live.verify_write(&theirs, &committed, &committed).err(), Some(LiveRefusal::NotThisSupervision));
+}
+
+#[test]
+fn a_diverged_or_unknown_outcome_poisons_for_good() {
+    let altered = |committed: &[u8], frame: &[u8]| {
+        let mut file = [committed, frame].concat();
+        file[3] ^= 1;
+        file
+    };
+    let foreign = |committed: &[u8], frame: &[u8]| [committed, frame, frame].concat();
+    let shortened = |committed: &[u8], _: &[u8]| committed[..committed.len() - 1].to_vec();
+    let corrupt = |committed: &[u8], frame: &[u8]| {
+        let mut tail = frame.to_vec();
+        tail[8] ^= 0x20;
+        [committed, &tail].concat()
+    };
+    let too_large = |committed: &[u8], _: &[u8]| [committed, &vec![b'x'; (MAX_STREAM_BYTES as usize) + 1]].concat();
+    let files: [&dyn Fn(&[u8], &[u8]) -> Vec<u8>; 5] = [&altered, &foreign, &shortened, &corrupt, &too_large];
+    for file in files {
+        let (mut live, abandoned) = uncertain_decision();
+        let outcome = verified_write(&mut live, &abandoned, file);
+        assert!(matches!(outcome.check(), PersistCheck::Diverged(_) | PersistCheck::Unknown(_)), "{:?}", outcome.check());
+        assert!(live.poisoned());
+        // Nothing resolves it, and nothing more stages.
+        assert_eq!(live.discard(abandoned, outcome).err(), Some(LiveRefusal::Poisoned));
+        assert_eq!(refusal(&mut live, Vec::from([cancel(CancelScope::Run, T0 + 3_000)]), None, 3_000).0, LiveRefusal::Poisoned);
+        // Its claim excuses nothing and blocks every start.
+        let conflicts = start_conflicts(&inventory_with(summarize(&RecordedHistory::new(live.projection().clone(), HistoryStatus::Verified, Vec::new()), ReadBasis::Locked)), &[live.held()]);
+        assert!(conflicts.contains(&StartConflict::JournalPoisoned(run_id())), "{conflicts:?}");
+    }
+}
+
+#[test]
+fn contradictory_verifications_of_one_frame_poison() {
+    // The same re-read twice is consistent, and the frame resolves.
+    let (mut live, abandoned) = uncertain_decision();
+    let first = absent(&mut live, &abandoned);
+    let again = absent(&mut live, &abandoned);
+    drop(first);
+    assert!(!live.poisoned());
+    live.discard(abandoned, again).ok().unwrap();
+    // Absent, then Landed for the same frame: a caller shopping for an outcome poisons the supervision.
+    let (mut live, abandoned) = uncertain_decision();
+    let absent_outcome = absent(&mut live, &abandoned);
+    let landed_outcome = landed(&mut live, &abandoned);
+    assert!(live.poisoned());
+    assert_eq!(live.adopt(abandoned, landed_outcome).err(), Some(LiveRefusal::Poisoned));
+    drop(absent_outcome);
+    // Landed, then a torn tail: poisoned too.
+    let (mut live, abandoned) = uncertain_decision();
+    let _ = landed(&mut live, &abandoned);
+    let _ = torn(&mut live, &abandoned, 5);
+    assert!(live.poisoned());
+}
+
+#[test]
+fn two_uncertain_appends_in_a_row_poison_and_a_durable_one_resets_the_count() {
+    // Abandon, discard, and abandon again: poisoned at the second, whatever its outcome would be.
+    let (mut live, abandoned) = uncertain_decision();
+    let outcome = absent(&mut live, &abandoned);
+    assert!(live.discard(abandoned, outcome).ok().unwrap().is_none());
+    assert!(!live.poisoned());
+    let staged = stage_one(&mut live, Vec::from([decide(1, Decision::Granted, T0 + 2_100)]), None, 2_100);
+    let abandoned = live.abandon(staged).ok().unwrap();
+    assert!(live.poisoned());
+    let committed = committed(&live);
+    assert_eq!(live.verify_write(&abandoned, &committed, &committed).err(), Some(LiveRefusal::Poisoned));
+    // Abandon, adopt (it landed, but the append was still uncertain), and abandon again: poisoned too.
+    let (mut live, abandoned) = uncertain_decision();
+    let outcome = landed(&mut live, &abandoned);
+    live.adopt(abandoned, outcome).ok().unwrap();
+    let staged = stage_one(&mut live, Vec::from([cancel(CancelScope::Run, T0 + 3_000)]), None, 3_000);
+    let _ = live.abandon(staged).ok().unwrap();
+    assert!(live.poisoned());
+    // Abandon, discard, confirm, abandon: the confirmed append ends the run of uncertain ones.
+    let (mut live, abandoned) = uncertain_decision();
+    let outcome = absent(&mut live, &abandoned);
+    live.discard(abandoned, outcome).ok().unwrap();
+    commit(&mut live, Vec::from([decide(1, Decision::Granted, T0 + 2_100)]), None, 2_100);
+    let staged = stage_one(&mut live, Vec::from([cancel(CancelScope::Run, T0 + 3_000)]), None, 3_000);
+    let abandoned = live.abandon(staged).ok().unwrap();
+    assert!(!live.poisoned());
+    let outcome = landed(&mut live, &abandoned);
+    live.adopt(abandoned, outcome).ok().unwrap();
+    assert_eq!(MAX_CONSECUTIVE_UNCERTAIN, 2);
+}
+
+#[test]
+fn adopting_mints_nothing_and_takes_exactly_the_landed_frame() {
+    let (mut live, abandoned) = uncertain_decision();
+    let expected = [live.projection().events(), abandoned.events()].concat();
+    let outcome = landed(&mut live, &abandoned);
+    live.adopt(abandoned, outcome).ok().unwrap();
+    assert_eq!(live.projection().events(), &expected[..]);
+    assert!(live.outstanding.is_empty());
+    assert_eq!(refusal(&mut live, Vec::from([begin(1, 1, T0 + 3_000)]), None, 3_000).0, LiveRefusal::GrantRequired);
+}
+
+#[test]
+fn a_torn_tail_is_owed_until_the_repair_of_exactly_its_bytes_is_confirmed() {
+    let (mut live, abandoned) = uncertain_decision();
+    let frame = abandoned.bytes.clone();
+    let base = live.journal_size().bytes;
+    let cut = 17;
+    let outcome = torn(&mut live, &abandoned, cut);
+    let evidence = live.discard(abandoned, outcome).ok().unwrap().unwrap();
+    assert_eq!((evidence.len() as usize, evidence.crc32c()), (cut, crc32c(&frame[..cut])));
+    let journal = committed(&live);
+    // While owed: the tail counts toward the size, nothing else stages, and the run blocks every start.
+    assert_eq!(live.journal_size().bytes, base + cut as u64);
+    assert_eq!(refusal(&mut live, Vec::from([cancel(CancelScope::Run, T0 + 3_000)]), None, 3_000).0, LiveRefusal::RepairOwed);
+    let history = || RecordedHistory::new(live.projection().clone(), HistoryStatus::Verified, Vec::new());
+    assert!(start_conflicts(&inventory_with(summarize(&history(), ReadBasis::Locked)), &[live.held()]).contains(&StartConflict::RepairPending(run_id())));
+    // The file must no longer hold the tail, and the committed bytes must be this supervision's.
+    let with_tail = [&journal[..], &frame[..cut]].concat();
+    assert_eq!(live.stage_repair(&evidence, 1, &journal, &with_tail, T0 + 3_000, m(3_000), size_of(&live)).err(), Some(LiveRefusal::RepairUnshown));
+    assert_eq!(live.stage_repair(&evidence, 1, &with_tail, &with_tail, T0 + 3_000, m(3_000), size_of(&live)).err(), Some(LiveRefusal::NotThisJournal));
+    // Evidence of another supervision's tail is not this one's.
+    let (mut other, theirs) = uncertain_decision();
+    let outcome = torn(&mut other, &theirs, cut);
+    let foreign = other.discard(theirs, outcome).ok().unwrap().unwrap();
+    let mut impostor = live_with(LiveEpoch::new(2), created(T0));
+    commit(&mut impostor, attempt_pair(1, 1, T0 + 1_000), None, 1_000);
+    let impostor_journal = committed(&impostor);
+    assert_eq!(impostor.stage_repair(&foreign, 1, &impostor_journal, &impostor_journal, T0 + 3_000, m(3_000), size_of(&impostor)).err(), Some(LiveRefusal::RepairUnshown));
+    // The record is built from the measured tail, never from the caller's figures.
+    let staged = live.stage_repair(&evidence, 1, &journal, &journal, T0 + 3_000, m(3_000), size_of(&live)).ok().unwrap();
+    assert_eq!(staged.events().len(), 1);
+    assert!(matches!(&staged.events()[0].body, EventBody::JournalRepaired(r) if r.sidecar() == 1 && r.removed_bytes() as usize == cut && r.removed_crc32c() == crc32c(&frame[..cut])));
+    assert_eq!(staged.durability(), Durability::Critical);
+    let repair_bytes = encode_frame(staged.events()).unwrap().len() as u64;
+    live.confirm(staged).ok().unwrap();
+    // Paid: the tail no longer counts, and the same evidence cannot record a second repair.
+    assert_eq!(live.journal_size().bytes, base + repair_bytes);
+    let journal = committed(&live);
+    assert_eq!(live.stage_repair(&evidence, 2, &journal, &journal, T0 + 3_100, m(3_100), size_of(&live)).err(), Some(LiveRefusal::RepairUnshown));
+    commit(&mut live, Vec::from([decide(1, Decision::Granted, T0 + 3_200)]), None, 3_200);
+}
+
+#[test]
+fn a_repair_needs_a_new_sidecar_and_never_stages_as_a_plain_draft() {
+    let mut live = running_live();
+    // A journal draft through `stage` is refused, whatever its figures (N7).
+    assert_eq!(refusal(&mut live, Vec::from([repaired(1, T0 + 5_000)]), None, 5_000).0, LiveRefusal::RepairUnshown);
+    // Two torn writes, each repaired; the second must use a sidecar above the first.
+    for wall in [T0 + 6_000, T0 + 7_000] {
+        let sidecar = 4;
+        let next = live.projection().approvals().len() as u64 + 1;
+        let staged = stage_one(&mut live, Vec::from([operation(next, 1, wall)]), None, wall - T0);
+        let abandoned = live.abandon(staged).ok().unwrap();
+        let outcome = torn(&mut live, &abandoned, 3);
+        let evidence = live.discard(abandoned, outcome).ok().unwrap().unwrap();
+        let journal = committed(&live);
+        let result = live.stage_repair(&evidence, sidecar, &journal, &journal, wall, m(wall - T0), size_of(&live));
+        if live.projection().events().iter().any(|e| matches!(&e.body, EventBody::JournalRepaired(r) if r.sidecar() == 4)) {
+            assert_eq!(result.err(), Some(LiveRefusal::RepairUnshown));
+            let staged = live.stage_repair(&evidence, 5, &journal, &journal, wall, m(wall - T0), size_of(&live)).ok().unwrap();
+            live.confirm(staged).ok().unwrap();
+        } else {
+            live.confirm(result.ok().unwrap()).ok().unwrap();
+        }
+    }
+    let sidecars: Vec<u32> = live.projection().events().iter().filter_map(|e| match &e.body {
+        EventBody::JournalRepaired(r) => Some(r.sidecar()),
+        _ => None,
+    }).collect();
+    assert_eq!(sidecars, [4, 5]);
+}
+
+#[test]
+fn the_size_is_derived_from_the_frames_and_a_caller_can_only_raise_it() {
+    let mut live = live();
+    let mut frames = Vec::from([live.projection().events().to_vec()]);
+    let encoded = |frames: &[Vec<Event>]| frames.iter().map(|f| encode_frame(f).unwrap().len() as u64).sum::<u64>();
+    assert_eq!(live.journal_size(), JournalSize { events: 1, bytes: encoded(&frames) });
+    let staged = stage_one(&mut live, attempt_pair(1, 1, T0 + 1_000), None, 1_000);
+    assert_eq!(staged.bytes(), &encode_frame(staged.events()).unwrap()[..]);
+    frames.push(staged.events().to_vec());
+    live.confirm(staged).ok().unwrap();
+    assert_eq!(live.journal_size(), JournalSize { events: 3, bytes: encoded(&frames) });
+    // An empty frame (a duplicate) has no bytes and adds none.
+    let duplicate = stage_one(&mut live, attempt_pair(1, 1, T0 + 1_000), None, 1_100);
+    assert!(duplicate.events().is_empty() && duplicate.bytes().is_empty());
+    live.confirm(duplicate).ok().unwrap();
+    assert_eq!(live.journal_size().bytes, encoded(&frames));
+    // An understated size cannot hide what the supervision holds: at the ceiling it faults (c-1's second defense).
+    live.bytes = MAX_JOURNAL_BYTES + SAFETY_JOURNAL_BYTES;
+    assert_eq!(refusal(&mut live, Vec::from([decide(1, Decision::Granted, T0 + 2_000)]), None, 2_000).0, LiveRefusal::CapacityFault);
+    assert!(live.in_capacity_fault());
+    // In the reserve by bytes alone, `due` proposes the journal-full stop with a size of zero stated.
+    let mut running = running_live();
+    running.bytes = MAX_JOURNAL_BYTES - RESERVED_JOURNAL_BYTES;
+    let due = running.due(m(5_000), T0 + 5_000, JournalSize { events: 0, bytes: 0 });
+    assert_eq!(*due.drafts[0].body(), EventBody::StopRequested { attempt: n(1), reason: StopReason::JournalFull });
+}
+
+#[test]
+fn a_frame_is_as_durable_as_its_strictest_event_generated_consequences_included() {
+    let mut live = live();
+    let staged = stage_one(&mut live, attempt_pair(1, 1, T0 + 1_000), None, 1_000);
+    assert_eq!(staged.durability(), Durability::Critical);
+    live.confirm(staged).ok().unwrap();
+    let staged = stage_one(&mut live, Vec::from([decide(1, Decision::Granted, T0 + 2_000)]), None, 2_000);
+    assert_eq!(staged.durability(), Durability::EffectGate);
+    let grant = single(live.confirm(staged).ok().unwrap());
+    // A cancel ends the attempt and voids its grant as generated consequences: the frame is critical.
+    let staged = stage_one(&mut live, Vec::from([cancel(CancelScope::Attempt(n(1)), T0 + 2_500)]), None, 2_500);
+    assert!(staged.events().len() > 1);
+    assert_eq!(staged.durability(), Durability::Critical);
+    let _ = live.abandon(staged).ok().unwrap();
+    drop(grant);
+    // The start is an effect gate on its own frame.
+    let (mut live, grant) = approved_live();
+    let staged = stage_one(&mut live, Vec::from([begin(1, 1, T0 + 3_000)]), Some(grant), 3_000);
+    assert_eq!(staged.durability(), Durability::EffectGate);
+    live.confirm(staged).ok().unwrap();
+    commit(&mut live, Vec::from([started(1, T0 + 4_000)]), None, 4_000);
+    // Progress alone is advisory; mixed with nothing stricter it stays so.
+    let staged = stage_one(&mut live, Vec::from([progress(1, T0 + 5_000)]), None, 5_000);
+    assert_eq!(staged.durability(), Durability::Advisory);
+}
+
+/// D3.2c-2 property: random sequences of uncertain appends and outcomes never let a frame be adopted or discarded
+/// against what the file shows, never mint through adoption, and poison at the second uncertain append in a row or on
+/// any divergence. The live size always equals the canonical bytes of the frames it took, plus an owed tail.
+#[test]
+fn seeded_uncertain_writes_follow_the_file_and_poison_as_specified() {
+    let mut poisoned = 0;
+    let mut adopted = 0;
+    let mut repaired = 0;
+    for seed in 0..200 {
+        let mut rng = Rng(seed ^ 0xc2_0bad);
+        let (mut live, mut expected) = running_live_counted();
+        let mut mono = 5_000;
+        let mut run = 0u32;
+        let mut sidecar = 0;
+        for step in 0..40u64 {
+            mono += 10;
+            let next = live.projection().approvals().len() as u64 + 1;
+            let pending = live.projection().approvals().iter().find(|r| r.state() == ApprovalState::Pending).map(|r| r.id().number());
+            let draft = match (pending, step % 3) {
+                (_, 0) => progress(1, T0 + mono),
+                (Some(k), _) => decide(k, Decision::Denied, T0 + mono),
+                (None, _) => operation(next, 1, T0 + mono),
+            };
+            let staged = match try_stage(&mut live, Vec::from([draft]), None, mono) {
+                Ok(staged) => staged,
+                Err(refused) => panic!("seed {seed} step {step}: {:?}", refused.refusal),
+            };
+            let bytes = staged.bytes().len() as u64;
+            if rng.chance(50) {
+                live.confirm(staged).ok().unwrap();
+                expected += bytes;
+                run = 0;
+                continue;
+            }
+            let before = live.projection().clone();
+            let abandoned = live.abandon(staged).ok().unwrap();
+            run += 1;
+            assert_eq!(live.poisoned(), run >= 2);
+            if live.poisoned() {
+                poisoned += 1;
+                break;
+            }
+            let frame = abandoned.bytes.clone();
+            if frame.is_empty() {
+                // A coalesced report: nothing was to be written, and nothing landed.
+                let outcome = absent(&mut live, &abandoned);
+                assert!(live.discard(abandoned, outcome).ok().unwrap().is_none());
+                continue;
+            }
+            match rng.below(4) {
+                0 => {
+                    let outcome = landed(&mut live, &abandoned);
+                    live.adopt(abandoned, outcome).ok().unwrap();
+                    assert!(live.outstanding.is_empty());
+                    expected += bytes;
+                    adopted += 1;
+                }
+                1 => {
+                    let outcome = absent(&mut live, &abandoned);
+                    assert!(live.discard(abandoned, outcome).ok().unwrap().is_none());
+                    assert_eq!(live.projection(), &before);
+                }
+                2 => {
+                    let cut = 1 + rng.below(frame.len() as u64 - 1) as usize;
+                    let outcome = torn(&mut live, &abandoned, cut);
+                    let evidence = live.discard(abandoned, outcome).ok().unwrap().unwrap();
+                    assert_eq!(live.journal_size().bytes, expected + cut as u64);
+                    let journal = committed(&live);
+                    sidecar += 1;
+                    let staged = live.stage_repair(&evidence, sidecar, &journal, &journal, T0 + mono, m(mono), size_of(&live)).ok().unwrap();
+                    expected += staged.bytes().len() as u64;
+                    live.confirm(staged).ok().unwrap();
+                    run = 0;
+                    repaired += 1;
+                }
+                _ => {
+                    let outcome = verified_write(&mut live, &abandoned, |committed, frame| [committed, &frame[..frame.len() - 1], b"X"].concat());
+                    assert!(matches!(outcome.check(), PersistCheck::Diverged(_)));
+                    assert!(live.poisoned());
+                    assert_eq!(live.adopt(abandoned, outcome).err(), Some(LiveRefusal::Poisoned));
+                    poisoned += 1;
+                    break;
+                }
+            }
+            // The derived size is exactly the canonical bytes of the frames taken (no tail owed here).
+            assert_eq!(live.journal_size().bytes, expected, "seed {seed}");
+        }
+    }
+    assert!(poisoned > 50 && adopted > 50 && repaired > 50, "poisoned {poisoned} adopted {adopted} repaired {repaired}");
 }

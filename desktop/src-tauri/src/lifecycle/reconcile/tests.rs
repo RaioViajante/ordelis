@@ -402,6 +402,7 @@ fn begin_reconciled_refuses_another_history_epoch_or_time() {
         basis: history.projection().clone(),
         repairs: history.unrecorded_repairs().to_vec(),
         drafts,
+        size: JournalSize { events: 0, bytes: 0 },
     };
     let running_history = verified(&running());
     let empty_frame = forged(&running_history, Vec::new());
@@ -566,7 +567,13 @@ fn holding(history: RecordedHistory) -> LiveSupervision {
 }
 
 fn enumerated(allocated: u64, summaries: Vec<(u64, RunSummary)>) -> RunInventory {
-    RunInventory::Enumerated { allocated, summaries: summaries.into_iter().map(|(number, summary)| (rid(number), summary)).collect() }
+    RunInventory::Enumerated { allocated, summaries: summaries.into_iter().map(|(number, summary)| (rid(number), summary)).collect(), observed: Vec::new() }
+}
+
+/// A never-created summary, through its only constructor: an empty journal, a `(0, 0)` mark and the marker.
+pub(crate) fn never(number: u64) -> RunSummary {
+    let empty = crate::lifecycle::replay::replay(rid(number), &crate::lifecycle::codec::decode_stream(&[]));
+    never_created(&empty, MarkReading::Read { last_seq: 0, byte_length: 0 }, MarkerState::Present)
 }
 
 fn locked(history: &RecordedHistory) -> RunSummary {
@@ -578,7 +585,7 @@ fn an_orphan_anywhere_blocks_every_start_whatever_the_run_id_or_project() {
     // r7 holds an unresolved orphan. r1 (same project, registered again later) and r2 (the run about to start, held by
     // this caller) are clean. The conflict is global: a new run id or a re-registered project does not escape it.
     let mut summaries = Vec::from([(1, locked(&other_run(1, T0 + 9_000))), (2, locked(&other_run(2, T0)))]);
-    summaries.extend((3..=6).map(|number| (number, RunSummary::NeverCreated)));
+    summaries.extend((3..=6).map(|number| (number, never(number))));
     summaries.push((7, locked(&orphaned())));
     let conflicts = start_conflicts(&enumerated(7, summaries.clone()), &[holding(other_run(2, T0)).held()]);
     assert_eq!(conflicts, Vec::from([StartConflict::PossibleOrphan(rid(7), n(1))]));
@@ -599,7 +606,7 @@ fn a_supervision_ahead_of_its_summary_still_reports_its_orphan() {
     let summary = locked(&history);
     let frame = reconciled(&history, &[observe(Seen::PidAbsent)]).frame;
     let live = opened(history, frame);
-    let inventory = enumerated(7, (1..=6).map(|number| (number, RunSummary::NeverCreated)).chain([(7, summary)]).collect());
+    let inventory = enumerated(7, (1..=6).map(|number| (number, never(number))).chain([(7, summary)]).collect());
     assert_eq!(start_conflicts(&inventory, &[live.held()]), Vec::from([StartConflict::PossibleOrphan(rid(7), n(1))]));
 }
 
@@ -627,7 +634,7 @@ fn quarantined_unverified_and_unreconciled_runs_block() {
     let staged = owner.stage(&attempt_pair(1, 1, T0 + 1_000), None, MonoMs::new(1), journal_size).ok().unwrap();
     assert!(owner.confirm(staged).ok().unwrap().is_empty());
     let in_flight = RecordedHistory::new(owner.projection().clone(), HistoryStatus::Verified, Vec::new());
-    let inventory = enumerated(7, (1..=6).map(|number| (number, RunSummary::NeverCreated)).chain([(7, locked(&in_flight))]).collect());
+    let inventory = enumerated(7, (1..=6).map(|number| (number, never(number))).chain([(7, locked(&in_flight))]).collect());
     assert_eq!(start_conflicts(&inventory, &[]), Vec::from([StartConflict::Unreconciled(rid(7), n(1))]));
     assert_eq!(start_conflicts(&inventory, &[owner.held()]), Vec::new());
     // A supervision opened under the same id that did not record it excuses nothing, nor do two claims for one run.
@@ -635,7 +642,7 @@ fn quarantined_unverified_and_unreconciled_runs_block() {
     assert_eq!(start_conflicts(&inventory, &[impostor.held()]), Vec::from([StartConflict::Contradictory(rid(7)), StartConflict::Unreconciled(rid(7), n(1))]));
     assert_eq!(start_conflicts(&inventory, &[owner.held(), impostor.held()]), Vec::from([StartConflict::Contradictory(rid(7)), StartConflict::Unreconciled(rid(7), n(1))]));
     let running_history = verified(&running());
-    let recorded = enumerated(7, (1..=6).map(|number| (number, RunSummary::NeverCreated)).chain([(7, locked(&running_history))]).collect());
+    let recorded = enumerated(7, (1..=6).map(|number| (number, never(number))).chain([(7, locked(&running_history))]).collect());
     assert_eq!(start_conflicts(&recorded, &[supervising(7).held()]), Vec::from([StartConflict::Contradictory(rid(7)), StartConflict::Unreconciled(rid(7), n(1))]));
     // A repair the journal still lacks blocks until it is recorded; so does a recorded sidecar reported twice.
     let pending = RecordedHistory::new(other_run(1, T0).projection().clone(), HistoryStatus::Verified, Vec::from([repair(1)]));
@@ -647,7 +654,7 @@ fn quarantined_unverified_and_unreconciled_runs_block() {
     assert_eq!(start_conflicts(&enumerated(1, Vec::from([(1, locked(&reported_twice))])), &[]), Vec::from([StartConflict::RepairPending(rid(1))]));
     // A lock-free or index read can still add conflicts.
     let indexed = summarize(&orphaned(), ReadBasis::DerivedIndex);
-    let inventory = enumerated(7, (1..=6).map(|number| (number, RunSummary::NeverCreated)).chain([(7, indexed)]).collect());
+    let inventory = enumerated(7, (1..=6).map(|number| (number, never(number))).chain([(7, indexed)]).collect());
     assert_eq!(start_conflicts(&inventory, &[]), Vec::from([StartConflict::UnverifiedRead(rid(7)), StartConflict::PossibleOrphan(rid(7), n(1))]));
 }
 
@@ -655,9 +662,9 @@ fn quarantined_unverified_and_unreconciled_runs_block() {
 fn an_unknown_or_incomplete_inventory_is_never_an_empty_safe_set() {
     assert_eq!(start_conflicts(&RunInventory::Unknown, &[]), Vec::from([StartConflict::InventoryUnknown]));
     assert_eq!(start_conflicts(&enumerated(0, Vec::new()), &[]), Vec::new());
-    assert_eq!(start_conflicts(&RunInventory::Enumerated { allocated: 10_000_000_000, summaries: Vec::new() }, &[]), Vec::from([StartConflict::InventoryUnknown]));
+    assert_eq!(start_conflicts(&RunInventory::Enumerated { allocated: 10_000_000_000, summaries: Vec::new(), observed: Vec::new() }, &[]), Vec::from([StartConflict::InventoryUnknown]));
     // The counter allocated r1 to r6; only r2 and r5 are accounted for.
-    let inventory = enumerated(6, Vec::from([(2, RunSummary::NeverCreated), (5, RunSummary::NeverCreated)]));
+    let inventory = enumerated(6, Vec::from([(2, never(2)), (5, never(5))]));
     assert_eq!(
         start_conflicts(&inventory, &[]),
         Vec::from([
@@ -674,15 +681,15 @@ fn an_unknown_or_incomplete_inventory_is_never_an_empty_safe_set() {
 fn contradictory_inventories_block() {
     let clean = locked(&other_run(1, T0));
     // A second summary for an id, an id the counter never allocated, a summary of another run under this id.
-    let duplicate = enumerated(1, Vec::from([(1, clean.clone()), (1, RunSummary::NeverCreated)]));
+    let duplicate = enumerated(1, Vec::from([(1, clean.clone()), (1, never(1))]));
     assert_eq!(start_conflicts(&duplicate, &[]), Vec::from([StartConflict::Contradictory(rid(1))]));
-    let beyond = enumerated(1, Vec::from([(1, clean.clone()), (2, RunSummary::NeverCreated)]));
+    let beyond = enumerated(1, Vec::from([(1, clean.clone()), (2, never(2))]));
     assert_eq!(start_conflicts(&beyond, &[]), Vec::from([StartConflict::Contradictory(rid(2))]));
-    let renamed = enumerated(2, Vec::from([(1, RunSummary::NeverCreated), (2, clean.clone())]));
+    let renamed = enumerated(2, Vec::from([(1, never(1)), (2, clean.clone())]));
     assert_eq!(start_conflicts(&renamed, &[]), Vec::from([StartConflict::Contradictory(rid(2))]));
     // A supervised run that is not in the inventory, or that is said never to have been created.
     assert_eq!(start_conflicts(&enumerated(1, Vec::from([(1, clean)])), &[supervising(3).held()]), Vec::from([StartConflict::Contradictory(rid(3))]));
-    assert_eq!(start_conflicts(&enumerated(1, Vec::from([(1, RunSummary::NeverCreated)])), &[supervising(1).held()]), Vec::from([StartConflict::Contradictory(rid(1))]));
+    assert_eq!(start_conflicts(&enumerated(1, Vec::from([(1, never(1))])), &[supervising(1).held()]), Vec::from([StartConflict::Contradictory(rid(1))]));
 }
 
 #[test]
@@ -692,8 +699,8 @@ fn start_conflicts_depend_on_no_order_across_journals() {
         (2, RunSummary::Quarantined(QuarantineReason::Marker)),
         (3, RunSummary::Unverified(Unverified::HeldElsewhere)),
         (4, locked(&other_run(4, T0))),
-        (5, RunSummary::NeverCreated),
-        (6, RunSummary::NeverCreated),
+        (5, never(5)),
+        (6, never(6)),
         (7, locked(&orphaned())),
     ]);
     let forward = start_conflicts(&enumerated(7, summaries.clone()), &[holding(other_run(4, T0)).held()]);
@@ -722,7 +729,7 @@ fn informational_concerns_never_block_a_start() {
     // A failed run whose workspace concern is unresolved: informational, so it blocks nothing.
     let failed = verified(&with(running(), exited(1, 3, T0 + 5_000)));
     assert!(failed.projection().concerns().iter().any(|c| c.concern().kind() == ConcernKind::WorkspaceUnknown && c.resolution().is_none()));
-    let inventory = enumerated(7, (1..=6).map(|number| (number, RunSummary::NeverCreated)).chain([(7, locked(&failed))]).collect());
+    let inventory = enumerated(7, (1..=6).map(|number| (number, never(number))).chain([(7, locked(&failed))]).collect());
     assert_eq!(start_conflicts(&inventory, &[]), Vec::new());
 }
 
@@ -772,7 +779,7 @@ fn inventory_with(frames: &[Vec<Event>]) -> RunInventory {
     let projection = frames.iter().fold(RunProjection::empty(run_id()), |p, frame| apply_recorded(&p, frame).unwrap());
     let r7 = locked(&RecordedHistory::new(projection, HistoryStatus::Verified, Vec::new()));
     let mut summaries = Vec::from([(1, locked(&other_run(1, T0 + 9_000)))]);
-    summaries.extend((2..=6).map(|number| (number, RunSummary::NeverCreated)));
+    summaries.extend((2..=6).map(|number| (number, never(number))));
     summaries.push((7, r7));
     summaries.push((8, locked(&other_run(8, T0))));
     enumerated(8, summaries)
@@ -872,7 +879,7 @@ fn a_run_opened_at_the_ceiling_opens_faulted() {
     let frame = reconciled(&history, &[]).frame;
     let Ok(Opening::Ready(live)) = begin_reconciled(EPOCH, history, frame, MonoMs::new(MONO), EXHAUSTED) else { panic!("not ready") };
     assert!(live.in_capacity_fault());
-    let mut summaries: Vec<(u64, RunSummary)> = (1..=6).map(|number| (number, RunSummary::NeverCreated)).collect();
+    let mut summaries: Vec<(u64, RunSummary)> = (1..=6).map(|number| (number, never(number))).collect();
     summaries.push((7, locked(&other_run(7, T0))));
     assert_eq!(start_conflicts(&enumerated(7, summaries), &[live.held()]), Vec::from([StartConflict::CapacityExhausted(run_id())]));
 }
@@ -907,4 +914,108 @@ fn an_oversized_batch_is_a_caller_error_not_a_capacity_fault() {
     let refused = live.stage(&stops, None, MonoMs::new(7_000), size(live.projection())).err().map(|r| r.refusal);
     assert_eq!(refused, Some(LiveRefusal::Rejected(Rejection::LimitExceeded)));
     assert!(!live.in_capacity_fault());
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Evidence-derived never-created runs, observed artifacts and summary freshness (D3.2c-2, issue #122)
+
+#[test]
+fn never_created_needs_an_empty_journal_a_zero_mark_and_the_marker() {
+    use crate::lifecycle::codec::{decode_stream, encode_frame};
+    use crate::lifecycle::replay::replay;
+    let zero = MarkReading::Read { last_seq: 0, byte_length: 0 };
+    let empty = replay(rid(3), &decode_stream(&[]));
+    assert_eq!(never_created(&empty, zero, MarkerState::Present), RunSummary::NeverCreated(NeverCreatedRun { run: rid(3) }));
+    // No marker, or any mark but (0, 0), blocks.
+    assert_eq!(never_created(&empty, zero, MarkerState::Absent), RunSummary::Unverified(Unverified::NoRunCreated));
+    for mark in [MarkReading::Missing, MarkReading::Unreadable, MarkReading::Read { last_seq: 1, byte_length: 90 }, MarkReading::Read { last_seq: 0, byte_length: 1 }] {
+        assert_eq!(never_created(&empty, mark, MarkerState::Present), RunSummary::Unverified(Unverified::MarkMismatch));
+    }
+    // A journal with a frame, with only a torn tail, or with damage is not "never created", whatever the marker says.
+    let created_frame = encode_frame(other_run(3, T0).projection().events()).unwrap();
+    let torn = &created_frame[..created_frame.len() - 1];
+    let damaged = b"garbage that is not a frame\n";
+    for bytes in [&created_frame[..], torn, &damaged[..]] {
+        assert_eq!(never_created(&replay(rid(3), &decode_stream(bytes)), zero, MarkerState::Present), RunSummary::Unverified(Unverified::NoRunCreated));
+    }
+    // A proof made for one id never stands for another, and a held run is never "never created".
+    let inventory = enumerated(2, Vec::from([(1, locked(&other_run(1, T0))), (2, never(1))]));
+    assert_eq!(start_conflicts(&inventory, &[holding(other_run(1, T0)).held()]), Vec::from([StartConflict::Contradictory(rid(2))]));
+    let inventory = enumerated(1, Vec::from([(1, never(1))]));
+    assert_eq!(start_conflicts(&inventory, &[supervising(1).held()]), Vec::from([StartConflict::Contradictory(rid(1))]));
+}
+
+#[test]
+fn an_artifact_the_counter_or_the_summaries_do_not_cover_conflicts() {
+    // The counter says 2, but the adapter saw r3's journal: the counter understates, and nothing is complete.
+    let summaries = || Vec::from([(1, never(1)), (2, never(2))]);
+    let with_observed = |observed: Vec<u64>| match enumerated(2, summaries()) {
+        RunInventory::Enumerated { allocated, summaries, .. } => RunInventory::Enumerated { allocated, summaries, observed: observed.into_iter().map(rid).collect() },
+        RunInventory::Unknown => unreachable!(),
+    };
+    assert_eq!(start_conflicts(&with_observed(Vec::from([1, 2])), &[]), Vec::new());
+    assert_eq!(start_conflicts(&with_observed(Vec::from([3])), &[]), Vec::from([StartConflict::Contradictory(rid(3))]));
+    // An observed id inside the counter with no summary is both unaccounted and contradictory.
+    let partial = RunInventory::Enumerated { allocated: 2, summaries: Vec::from([(rid(1), never(1))]), observed: Vec::from([rid(2)]) };
+    assert_eq!(start_conflicts(&partial, &[]), Vec::from([StartConflict::Unaccounted { from: rid(2), through: rid(2) }, StartConflict::Contradictory(rid(2))]));
+}
+
+#[test]
+fn a_healthy_owner_supersedes_an_older_summary() {
+    // r7 summarized while its tail repair was still owed and attempt 1 was in flight; then reconciled and opened: the
+    // opening frame recorded the repair and ended the attempt. The summary is older than the owner.
+    let history = RecordedHistory::new(running().replayed(), HistoryStatus::Verified, Vec::from([repair(1)]));
+    let stale = locked(&history);
+    let frame = reconciled(&history, &[observe(Seen::PidAbsent)]).frame;
+    let mut live = opened(history, frame);
+    let inventory = enumerated(7, (1..=6).map(|number| (number, never(number))).chain([(7, stale.clone())]).collect());
+    // The owner recorded the repair: only the orphan its opening raised remains.
+    assert_eq!(start_conflicts(&inventory, &[live.held()]), Vec::from([StartConflict::PossibleOrphan(rid(7), n(1))]));
+    // Once the user resolves the orphan in the owner, the older summary's view of it does not survive.
+    let concern = orphan(live.projection(), 1);
+    let resolution = resolve(concern, Resolution::ConfirmedGone, AT + 1_000);
+    let journal_size = JournalSize { events: live.projection().events().len() as u32, bytes: 0 };
+    let staged = live.stage(&[resolution], None, MonoMs::new(MONO + 1_000), journal_size).ok().unwrap();
+    live.confirm(staged).ok().unwrap();
+    assert_eq!(start_conflicts(&inventory, &[live.held()]), Vec::new());
+    // Without the owner, the stale summary keeps blocking.
+    assert_eq!(start_conflicts(&inventory, &[]), Vec::from([StartConflict::Unreconciled(rid(7), n(1)), StartConflict::RepairPending(rid(7))]));
+}
+
+#[test]
+fn a_poisoned_owner_excuses_nothing_and_keeps_the_summary_conservative() {
+    use crate::lifecycle::codec::encode_frame;
+    // r7 opened clean, then an uncertain decision whose re-read diverged: poisoned.
+    let history = verified(&running());
+    let summary = locked(&history);
+    let frame = reconciled(&history, &[observe(Seen::PidAbsent)]).frame;
+    let mut live = opened(history, frame);
+    let committed: Vec<u8> = live.projection().events().iter().flat_map(|e| encode_frame(std::slice::from_ref(e)).unwrap()).collect();
+    let concern = orphan(live.projection(), 1);
+    let journal_size = JournalSize { events: live.projection().events().len() as u32, bytes: 0 };
+    let staged = live.stage(&[resolve(concern, Resolution::ConfirmedGone, AT + 1_000)], None, MonoMs::new(MONO + 1_000), journal_size).ok().unwrap();
+    let abandoned = live.abandon(staged).ok().unwrap();
+    let mut altered = committed.clone();
+    altered[0] ^= 1;
+    let outcome = live.verify_write(&abandoned, &committed, &altered).ok().unwrap();
+    assert!(live.poisoned());
+    drop((abandoned, outcome));
+    let inventory = enumerated(7, (1..=6).map(|number| (number, never(number))).chain([(7, summary)]).collect());
+    assert_eq!(
+        start_conflicts(&inventory, &[live.held()]),
+        Vec::from([StartConflict::PossibleOrphan(rid(7), n(1)), StartConflict::Unreconciled(rid(7), n(1)), StartConflict::JournalPoisoned(rid(7))])
+    );
+}
+
+#[test]
+fn a_size_stated_below_the_history_is_raised_to_it() {
+    // The history's own events and replayed bytes are the floor (D3.2c-2); the frame carries the size it was computed
+    // against, and opening checks no less.
+    let history = verified(&running());
+    let floor = history.floor(JournalSize { events: 0, bytes: 0 });
+    assert_eq!(floor.events as usize, history.projection().events().len());
+    let raised = history.floor(JournalSize { events: 9_000, bytes: 5 });
+    assert_eq!((raised.events, raised.bytes), (9_000, history.journal_bytes().max(5)));
+    let reconciliation = reconcile(&history, &[observe(Seen::PidAbsent)], ReconcileInput { size: JournalSize { events: 0, bytes: 0 }, ..input(history.projection()) }).ok().unwrap();
+    assert_eq!(reconciliation.frame.size(), floor);
 }

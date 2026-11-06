@@ -28,6 +28,9 @@ pub(crate) const MAX_OPEN_APPROVALS: u8 = 4;
 pub(crate) const MAX_EVENTS: u32 = 4096;
 pub(crate) const RESERVED_EVENTS: u32 = 64;
 pub(crate) const SAFETY_EVENTS: u32 = 64;
+/// Consecutive uncertain appends (abandoned frames with no confirmed frame between them) after which a live supervision
+/// is poisoned for good (r5 5.4, D3.2c-2).
+pub(crate) const MAX_CONSECUTIVE_UNCERTAIN: u32 = 2;
 /// Repair records per run (D3.2c-1). Each records one torn tail moved to a sidecar; past this many the reducer refuses
 /// the next one and the run must be quarantined. Bounds what repairs can take from the safety tier.
 pub(crate) const MAX_REPAIRS: u32 = 40;
@@ -1098,6 +1101,52 @@ impl EventKind {
     }
 }
 
+/// How durable a frame must be before anything may follow it (D3.2c-2): the contract a future storage adapter implements
+/// with real barriers. Ordered from the weakest; a frame takes the strongest of its events, generated consequences
+/// included, so mixing a critical event with an advisory one never weakens it. Nothing here syncs anything.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Durability {
+    /// Losing it loses only advisory history (r5 5.2.2): progress and session reports may be batched.
+    Advisory,
+    /// Synced before the call returns, and the run's high-water mark updated (r5 5.2.2, 5.7).
+    Critical,
+    /// Announces an effect: the frame and the high-water mark must both be durable before the effect is performed (r5
+    /// 5.2.1, 5.2.3, F4). Run creation (before the run is opened), a start (before the exec), a decision (before it is
+    /// delivered to the provider), an operation consumption (before the operation proceeds).
+    EffectGate,
+}
+
+impl EventKind {
+    /// The durability one event of this kind requires (D3.2c-2).
+    pub(crate) const fn durability(self) -> Durability {
+        match self {
+            EventKind::Progress | EventKind::ProviderSessionObserved => Durability::Advisory,
+            EventKind::RunCreated | EventKind::StartBegun | EventKind::ApprovalDecided | EventKind::ApprovalConsumed => Durability::EffectGate,
+            EventKind::AttemptCreated
+            | EventKind::ApprovalRequested
+            | EventKind::ApprovalExpired
+            | EventKind::ApprovalWithdrawn
+            | EventKind::ApprovalVoided
+            | EventKind::AttemptStarted
+            | EventKind::StartFailed
+            | EventKind::StopRequested
+            | EventKind::CancelRequested
+            | EventKind::AttemptExited
+            | EventKind::AttemptInterrupted
+            | EventKind::AttemptNotStarted
+            | EventKind::ProviderOutcomeClaimed
+            | EventKind::RunClosed
+            | EventKind::AttentionResolved
+            | EventKind::JournalRepaired => Durability::Critical,
+        }
+    }
+}
+
+/// The durability a frame requires: the strongest of its events (D3.2c-2). An empty frame writes nothing: `Advisory`.
+pub(crate) fn frame_durability(events: &[Event]) -> Durability {
+    events.iter().map(|event| event.body.kind().durability()).max().unwrap_or(Durability::Advisory)
+}
+
 /// A fact as recorded in a run's journal (r5 section 4.2). Bodies hold no wall-clock time.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum EventBody {
@@ -1456,6 +1505,11 @@ impl JournalSize {
     /// At either absolute ceiling (D3.2c-1): nothing at all can be recorded.
     pub(crate) const fn exhausted(self) -> bool {
         self.events >= MAX_EVENTS + SAFETY_EVENTS || self.bytes >= MAX_JOURNAL_BYTES + SAFETY_JOURNAL_BYTES
+    }
+
+    /// The larger of each count (D3.2c-2): a size another can raise but never lower.
+    pub(crate) fn raised(self, other: JournalSize) -> JournalSize {
+        JournalSize { events: self.events.max(other.events), bytes: self.bytes.max(other.bytes) }
     }
 }
 

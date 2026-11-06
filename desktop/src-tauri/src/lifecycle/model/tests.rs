@@ -573,3 +573,19 @@ fn the_limits_fit_together() {
     assert_eq!(MAX_WALL_MS, crate::agents::evidence::MAX_TIMESTAMP_MS);
     assert_eq!(RECORD_VERSION, 1);
 }
+
+#[test]
+fn every_kind_has_one_durability_class_and_effects_gate_on_the_strictest() {
+    // D3.2c-2: exhaustive over the kinds (the match in `durability` has no wildcard, so a new kind cannot compile without
+    // a class). Effect gates: what creates the run, begins a start, or decides or consumes consent. Advisory: provider
+    // observations and progress, which change no state that guards an effect. Everything else is critical.
+    let class = |durability| EventKind::ALL.into_iter().filter(|k| k.durability() == durability).collect::<Vec<_>>();
+    assert_eq!(class(Durability::EffectGate), [EventKind::RunCreated, EventKind::ApprovalDecided, EventKind::ApprovalConsumed, EventKind::StartBegun]);
+    assert_eq!(class(Durability::Advisory), [EventKind::ProviderSessionObserved, EventKind::Progress]);
+    assert_eq!(class(Durability::Critical).len(), EventKind::ALL.len() - 6);
+    // Every safety and reserved kind is at least critical: none of them can ride in an advisory frame.
+    assert!(EventKind::ALL.into_iter().filter(|k| k.reserved() || k.safety()).all(|k| k.durability() >= Durability::Critical));
+    assert!(Durability::Advisory < Durability::Critical && Durability::Critical < Durability::EffectGate);
+    // An empty frame writes nothing and needs no barrier.
+    assert_eq!(frame_durability(&[]), Durability::Advisory);
+}

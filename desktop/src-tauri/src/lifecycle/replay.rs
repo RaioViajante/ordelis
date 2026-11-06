@@ -61,6 +61,12 @@ impl ReplayedHistory {
         self.boundaries.last().map_or(0, |boundary| boundary.end)
     }
 
+    /// The bytes the run is held to (D3.2c-2): the replayed frames and an incomplete tail, if any. A torn tail counts until
+    /// it is removed, so it can never lower the capacity the run is checked against.
+    pub(crate) fn journal_bytes(&self) -> u64 {
+        self.valid_end() + self.tail.map_or(0, |tail| u64::from(tail.len))
+    }
+
     /// Checks the run's high-water mark against the replayed prefix (r5 5.7 step 3). The mark `(last_seq, byte_length)`
     /// is written durably after every acknowledged critical frame, and `(0, 0)` before the journal exists. A prefix
     /// that ends before the mark, or no frame ending exactly at the mark with the mark's sequence number, means
