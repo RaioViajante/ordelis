@@ -4,9 +4,10 @@
 //
 // `LiveSupervision` owns the live projection of one run during one process lifetime. `LiveGrant` is the only value
 // that can consume an approval. Neither can be cloned, copied, defaulted, formatted, serialized or built outside this
-// file, and no event, projection or recorded frame can be turned into either: the only door to a `LiveSupervision`
-// in this increment is `begin_new` (D3.2b-3 adds `begin_reconciled`), and the only place a grant is made is
-// `confirm`, for a decision this supervision itself staged inside its monotonic window.
+// file, and no event, projection or recorded frame can be turned into either. There are two doors to a
+// `LiveSupervision`: `begin_new` for a new run, and `begin_reconciled` (D3.2b-3, issue #116) for a recorded run once
+// reconciliation has left it quiescent. Neither mints a grant. The only place a grant is made is `confirm`, for a
+// decision this supervision itself staged inside its monotonic window.
 //
 // A grant is consent made usable for recording one consumption. It is never Execution Safety Gate satisfaction, and
 // nothing here, or anywhere in the lifecycle module, turns it or a staged frame into a process start.
@@ -16,6 +17,7 @@ use super::model::{
     StopReason, SupervisorDraft, VoidReason, WallMs, DeadlineKind, GRANT_USE_MS, MAX_APPROVAL_LIFETIME_MS, MAX_EVENTS,
     MAX_WALL_MS, RESERVED_EVENTS,
 };
+use super::reconcile::{is_quiescent, HistoryStatus, QuarantineReason, ReconciledFrame, RecordedHistory};
 use super::reduce::{apply, RunProjection};
 
 /// The single grant made for one granted approval, consumed by value by `stage`.
@@ -140,8 +142,8 @@ pub(crate) enum LiveRefusal {
     GrantMismatch,
     /// A staged or abandoned frame that is not this supervision's outstanding one.
     NotThisSupervision,
-    /// A reconciler draft: a supervised run is never reconciled (r5 5.4); reconciliation opens a run instead
-    /// (D3.2b-3).
+    /// A reconciler draft: a supervised run is never reconciled (r5 5.4); reconciliation opens a run instead, through
+    /// `begin_reconciled`.
     Reconciliation,
 }
 
@@ -185,16 +187,12 @@ fn deadline(start: MonoMs, duration: u64) -> MonoMs {
     MonoMs::new(start.ms().checked_add(duration).unwrap_or(0))
 }
 
-/// Starts supervising a new run from its `RunCreated` draft. The result becomes live only through `open`, after the
-/// frame it holds is durable.
-pub(crate) fn begin_new(epoch: LiveEpoch, run: RunId, run_created: EventDraft, mono: MonoMs) -> Result<PendingSupervision, Rejection> {
-    if run_created.body().kind() != EventKind::RunCreated {
-        return Err(Rejection::InvalidTransition);
-    }
-    let applied = apply(&RunProjection::empty(run), &[run_created], JournalSize { events: 0, bytes: 0 })?;
-    let live = LiveSupervision {
+/// The one place a supervision is built: from a projection, with no clock, description or grant of any earlier
+/// supervision.
+fn supervision(epoch: LiveEpoch, projection: RunProjection, mono: MonoMs) -> LiveSupervision {
+    LiveSupervision {
         epoch,
-        projection: applied.projection,
+        projection,
         last_mono: mono,
         clock_fault: false,
         frames: 0,
@@ -204,8 +202,82 @@ pub(crate) fn begin_new(epoch: LiveEpoch, run: RunId, run_created: EventDraft, m
         attempts: Vec::new(),
         descriptions: Vec::new(),
         outstanding: Vec::new(),
+    }
+}
+
+/// The one place a pending supervision is built.
+fn pending(live: LiveSupervision, events: Vec<Event>) -> PendingSupervision {
+    PendingSupervision { live, events }
+}
+
+/// Starts supervising a new run from its `RunCreated` draft. The result becomes live only through `open`, after the
+/// frame it holds is durable.
+pub(crate) fn begin_new(epoch: LiveEpoch, run: RunId, run_created: EventDraft, mono: MonoMs) -> Result<PendingSupervision, Rejection> {
+    if run_created.body().kind() != EventKind::RunCreated {
+        return Err(Rejection::InvalidTransition);
+    }
+    let applied = apply(&RunProjection::empty(run), &[run_created], JournalSize { events: 0, bytes: 0 })?;
+    Ok(pending(supervision(epoch, applied.projection, mono), applied.events))
+}
+
+/// How a reconciled run opens: at once when reconciliation had nothing to record, or after its opening frame is
+/// durable (`open`; `drop_pending` if the write was uncertain or failed).
+pub(crate) enum Opening {
+    Ready(LiveSupervision),
+    Pending(PendingSupervision),
+}
+
+/// Why `begin_reconciled` refused to open a run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BeginRefused {
+    /// The history is quarantined: read-only, never opened.
+    Quarantined(QuarantineReason),
+    /// The history holds no `RunCreated`.
+    NoRun,
+    /// The frame was computed for another history or epoch, or the monotonic time went back since.
+    NotThisHistory,
+    /// A draft of the frame is neither a repair record nor a reconciler draft.
+    NotReconciliation,
+    /// The reducer refused the frame.
+    Rejected(Rejection),
+    /// After the frame something would still be in flight or owed: an attempt that is not terminal, a pending request,
+    /// an unused grant, or an unrecorded repair.
+    NotQuiescent,
+}
+
+/// Opens a recorded run for writing after reconciliation (r5 6.5 and 5.7 step 6). The history must be verified and hold
+/// its `RunCreated`; the frame must be the one `reconcile` computed for exactly this history and epoch; and the run must
+/// be quiescent after it. The frame is applied here, through the reducer, and never through `stage`, which keeps
+/// refusing reconciler drafts.
+///
+/// The new supervision starts with no approval clock, no description and no outstanding grant: nothing recorded
+/// before it, a granted decision included, can be consumed through it. Any later attempt needs a new request, a new
+/// decision staged and confirmed by this supervision, and only then a grant. This core cannot observe durability:
+/// the caller must call `open` only after the adapter reports the opening frame durable, and no such adapter exists yet.
+pub(crate) fn begin_reconciled(epoch: LiveEpoch, history: RecordedHistory, frame: ReconciledFrame, mono: MonoMs, size: JournalSize) -> Result<Opening, BeginRefused> {
+    if let HistoryStatus::Quarantined(reason) = history.status() {
+        return Err(BeginRefused::Quarantined(reason));
+    }
+    if history.projection().spec().is_none() {
+        return Err(BeginRefused::NoRun);
+    }
+    if frame.epoch() != epoch || mono < frame.mono() || !frame.computed_for(&history) {
+        return Err(BeginRefused::NotThisHistory);
+    }
+    if frame.drafts().iter().any(|draft| !matches!(draft.producer(), Producer::Journal | Producer::Reconciler)) {
+        return Err(BeginRefused::NotReconciliation);
+    }
+    let (projection, events) = if frame.drafts().is_empty() {
+        (history.projection().clone(), Vec::new())
+    } else {
+        let applied = apply(history.projection(), frame.drafts(), size).map_err(BeginRefused::Rejected)?;
+        (applied.projection, applied.events)
     };
-    Ok(PendingSupervision { live, events: applied.events })
+    if !is_quiescent(&projection, history.unrecorded_repairs()) {
+        return Err(BeginRefused::NotQuiescent);
+    }
+    let live = supervision(epoch, projection, mono);
+    Ok(if events.is_empty() { Opening::Ready(live) } else { Opening::Pending(pending(live, events)) })
 }
 
 impl PendingSupervision {

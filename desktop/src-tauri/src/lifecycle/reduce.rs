@@ -69,6 +69,11 @@ impl AttemptRecord {
     pub(crate) fn identity(&self) -> Option<&OsIdentity> {
         self.identity.as_ref()
     }
+
+    /// The event that put the attempt into its current state (reconciliation's repair guard, D3.2b-3).
+    pub(crate) const fn last_change(&self) -> Seq {
+        self.last_change
+    }
 }
 
 /// One approval request as recorded. A `Granted` state is history: it never makes anything usable.
