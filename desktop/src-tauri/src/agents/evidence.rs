@@ -250,6 +250,10 @@ impl Sha256 {
             Err(EvidenceError::InvalidSha256)
         }
     }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 /// What a record is about.

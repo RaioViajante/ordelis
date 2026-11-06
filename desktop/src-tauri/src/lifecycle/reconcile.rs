@@ -13,9 +13,10 @@
 use super::model::{
     AttemptNo, AttemptState, ConcernClass, ConcernRef, Event, EventBody, EventDraft, InterruptObservation, JournalDraft,
     JournalFault, JournalRepair, JournalSize, LiveEpoch, MonoMs, NotStartedCause, NotStartedReason, OsIdentity,
-    ReconcilerDraft, Rejection, RunId, RunState, MAX_OBSERVATION_AGE_MS,
+    ReconcilerDraft, Rejection, RepairCause, RunId, RunState, MAX_OBSERVATION_AGE_MS,
 };
 use super::live::SupervisedRun;
+use super::replay::{MarkProblem, MarkReading, ReplayedHistory};
 use super::reduce::{apply, AttemptRecord, RunProjection};
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -31,28 +32,105 @@ pub(crate) enum QuarantineReason {
     Marker,
 }
 
-/// How far the caller's replay of a journal can be trusted.
+/// How far a replayed journal can be trusted. Derived by `RecordedHistory::from_replay`, never stated by a caller
+/// (D3.2b-4).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum HistoryStatus {
-    /// The whole journal replayed without a fault, after the marker, high-water-mark and sidecar checks of r5 5.7
-    /// steps 1 to 5. The core cannot check this: it is the caller's statement.
+    /// The whole valid prefix replayed without a fault, no quarantine marker was reported, the high-water mark is
+    /// reached exactly at a frame boundary, and an incomplete tail, if any, is matched by the repair record that removes
+    /// it (r5 5.7 steps 1 to 5, as far as bytes can show them).
     Verified,
     Quarantined(QuarantineReason),
 }
 
-/// A run's recorded history as the caller (the future replay and storage adapter, b-4 and later) supplies it: a
-/// projection rebuilt from recorded frames, how far it can be trusted, and the repair records the journal still lacks.
-/// History only: it can be summarized and reconciled, and nothing turns it into supervision or a grant except
-/// `begin_reconciled`, which mints none.
+/// A run's recorded history: a projection rebuilt from recorded frames, how far it can be trusted, and the repair
+/// records the journal still lacks. History only: it can be summarized and reconciled, and nothing turns it into
+/// supervision or a grant except `begin_reconciled`, which mints none. Outside tests it is built only from a replay.
 pub(crate) struct RecordedHistory {
     projection: RunProjection,
     status: HistoryStatus,
     unrecorded_repairs: Vec<JournalRepair>,
 }
 
+/// What only the future storage adapter can see when it opens a run (r5 5.7), stated by it: whether a quarantine marker
+/// exists, the run's high-water mark, and every sidecar that has no `JournalRepaired` record yet, as repair records in
+/// sidecar order (the one it is about to make for an incomplete tail included). The core checks every part it can see
+/// in the bytes; it cannot see a marker or a sidecar, so a caller can hide those, never create a verified status.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct OpeningEvidence {
+    pub(crate) marker: MarkerState,
+    pub(crate) mark: MarkReading,
+    pub(crate) repairs: Vec<JournalRepair>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MarkerState {
+    Absent,
+    Present,
+}
+
+/// Why a replay cannot become a recorded history. The run then has no history to reconcile or summarize as verified:
+/// the adapter writes a quarantine marker (a mark problem), classifies a run with no `RunCreated` (gate-review finding
+/// F6), or repairs the tail first. Every one blocks every start until then.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HistoryRefused {
+    Mark(MarkProblem),
+    NoRunCreated,
+    /// The stream ends in an incomplete tail and no reported repair removes exactly those bytes (length and
+    /// CRC-32C). Without that record reconciliation could not know that a start may have been lost with them.
+    TailNotRepaired,
+}
+
 impl RecordedHistory {
-    pub(crate) fn new(projection: RunProjection, status: HistoryStatus, unrecorded_repairs: Vec<JournalRepair>) -> RecordedHistory {
+    fn assemble(projection: RunProjection, status: HistoryStatus, unrecorded_repairs: Vec<JournalRepair>) -> RecordedHistory {
         RecordedHistory { projection, status, unrecorded_repairs }
+    }
+
+    /// Test builds only: a history with a stated status, as b-3's tests state it.
+    #[cfg(test)]
+    pub(crate) fn new(projection: RunProjection, status: HistoryStatus, unrecorded_repairs: Vec<JournalRepair>) -> RecordedHistory {
+        RecordedHistory::assemble(projection, status, unrecorded_repairs)
+    }
+
+    /// The recorded history of a replay, with its status derived, in this order: a reported quarantine marker
+    /// quarantines (`Marker`); a replay fault quarantines (`Fault`, codec damage and newer versions included); the
+    /// high-water mark must be reached exactly at a frame boundary; the history must hold `RunCreated`; and an
+    /// incomplete tail must be matched by a reported repair of exactly its length and CRC-32C, so that reconciliation
+    /// sees the repair and never concludes "not started" for an attempt whose start may have been in the lost bytes.
+    /// Only then is the history `Verified`. Nothing here grants, opens or repairs anything.
+    pub(crate) fn from_replay(replayed: ReplayedHistory, evidence: OpeningEvidence) -> Result<RecordedHistory, HistoryRefused> {
+        if evidence.marker == MarkerState::Present {
+            return Ok(RecordedHistory::assemble(replayed.into_projection(), HistoryStatus::Quarantined(QuarantineReason::Marker), evidence.repairs));
+        }
+        if let Some(fault) = replayed.fault() {
+            return Ok(RecordedHistory::assemble(replayed.into_projection(), HistoryStatus::Quarantined(QuarantineReason::Fault(fault)), evidence.repairs));
+        }
+        replayed.check_mark(evidence.mark).map_err(HistoryRefused::Mark)?;
+        if replayed.projection().spec().is_none() {
+            return Err(HistoryRefused::NoRunCreated);
+        }
+        if let Some(tail) = replayed.tail() {
+            // The repair that removes this tail is a new one: no record holds its sidecar, and its sidecar comes after
+            // every recorded one. A recorded repair of equal size and checksum (two zero-filled blocks, for example)
+            // removed earlier bytes and would draft no new record (review of #118).
+            let projection = replayed.projection();
+            let highest = projection.events().iter().filter_map(|event| match &event.body {
+                EventBody::JournalRepaired(recorded) => Some(recorded.sidecar()),
+                _ => None,
+            });
+            let newest = highest.max();
+            let removes_tail = |repair: &JournalRepair| {
+                repair.cause() == RepairCause::IncompleteTail
+                    && repair.removed_bytes() == tail.len
+                    && repair.removed_crc32c() == tail.crc32c
+                    && recorded_repair(projection, repair.sidecar()).is_none()
+                    && newest.is_none_or(|recorded| repair.sidecar() > recorded)
+            };
+            if !evidence.repairs.iter().any(removes_tail) {
+                return Err(HistoryRefused::TailNotRepaired);
+            }
+        }
+        Ok(RecordedHistory::assemble(replayed.into_projection(), HistoryStatus::Verified, evidence.repairs))
     }
 
     pub(crate) fn projection(&self) -> &RunProjection {

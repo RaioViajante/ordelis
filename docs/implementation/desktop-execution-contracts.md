@@ -1,7 +1,7 @@
 # Execution lifecycle contracts
 
-**Status:** Foundation. Implemented for [D3.2b-1 (#112)](https://github.com/RaioViajante/ordelis/issues/112), [D3.2b-2 (#114)](https://github.com/RaioViajante/ordelis/issues/114) and [D3.2b-3 (#116)](https://github.com/RaioViajante/ordelis/issues/116), part of the [D3.2 design record (#108)](https://github.com/RaioViajante/ordelis/issues/108). Pure Rust in `desktop/src-tauri/src/lifecycle/`, with no command, no caller and no interface.
-**Scope:** the vocabulary of runs, attempts, approvals and journal events, the deterministic reducer of their state machines, the in-memory live authority of one supervised run, and conservative crash reconciliation with cross-run start conflicts. Nothing here starts, stops, finds or observes a process, reads a clock or a file, or persists anything.
+**Status:** Foundation. Implemented for [D3.2b-1 (#112)](https://github.com/RaioViajante/ordelis/issues/112), [D3.2b-2 (#114)](https://github.com/RaioViajante/ordelis/issues/114), [D3.2b-3 (#116)](https://github.com/RaioViajante/ordelis/issues/116) and [D3.2b-4 (#118)](https://github.com/RaioViajante/ordelis/issues/118), part of the [D3.2 design record (#108)](https://github.com/RaioViajante/ordelis/issues/108). Pure Rust in `desktop/src-tauri/src/lifecycle/`, with no command, no caller and no interface.
+**Scope:** the vocabulary of runs, attempts, approvals and journal events, the deterministic reducer of their state machines, the in-memory live authority of one supervised run, conservative crash reconciliation with cross-run start conflicts, and the canonical journal codec with full replay. Nothing here starts, stops, finds or observes a process, reads a clock or a file, or persists anything: the codec turns bytes it is given into values and values into bytes.
 **Related:** [Provider catalog and evidence vocabulary](desktop-agents.md) · [Execution Safety Gate](execution-safety-gate.md) · [Desktop architecture](desktop-architecture.md)
 
 ## Where execution contracts stand
@@ -12,7 +12,7 @@
 | **Domain types and validation (D3.2b-1)** | **Implemented here.** |
 | **Reducer and in-memory live authority (D3.2b-2)** | **Implemented here.** Compiled into every build, used by nothing outside its tests. |
 | **Reconciliation, `begin_reconciled` and cross-run start conflicts (D3.2b-3)** | **Implemented here.** Used by nothing outside its tests; it reads caller-supplied histories and synthetic observations only. |
-| Codec, framing, `replay` and `ReplayedHistory` (D3.2b-4) | Not authorized. |
+| **Codec, framing, `replay`, `ReplayedHistory` and `verify_persisted` (D3.2b-4)** | **Implemented here.** Used by nothing outside its tests; it reads caller-supplied bytes only. |
 | Journal persistence, approval interface, execution boundary | Not authorized; each needs its own decision. |
 
 No run can be created, stored or started today. A value of these types is a description, never permission. Live authority exists only in memory (`live.rs`), is never built from a recorded event, and never starts anything: a grant records consent for one consumption and is never Execution Safety Gate satisfaction.
@@ -132,7 +132,7 @@ Reconciliation is for a run that nobody supervises, after a restart. It reads a 
 
 ### Inputs
 
-- **`RecordedHistory`**: a projection rebuilt from recorded frames, a `HistoryStatus` (`Verified`, or `Quarantined(Fault(JournalFault) | Marker)`), and the repair records the journal still lacks. It stands in for b-4's `ReplayedHistory`: until the codec and replay exist, the caller states the status, and the core cannot check it.
+- **`RecordedHistory`**: a projection rebuilt from recorded frames, a `HistoryStatus` (`Verified`, or `Quarantined(Fault(JournalFault) | Marker)`), and the repair records the journal still lacks. Since D3.2b-4 it is built only from a replay, by `RecordedHistory::from_replay`, which derives the status (below); `RecordedHistory::new`, which states one, exists in test builds only.
 - **`AttemptObservation`**: the attempt, the identity the observer looked for, what it saw (`gone_confirmed`, `pid_absent`, `pid_reused`, `identity_matches`, `unobservable`), its epoch and its monotonic time. Untrusted: an observation can only choose between kinds of unknown.
 - **`ReconcileInput`**: the epoch of the supervision to open, its monotonic time (for observation age), the wall-clock reading its drafts state, and the journal size.
 
@@ -193,6 +193,96 @@ Reconciliation is for a run that nobody supervises, after a restart. It reads a 
 - A late `AttemptExited` after an interruption is refused as a `Conflict` (identity is checked before the terminal state, r5 4.4), where r5 7.3 says `AttemptTerminal`; a late relayed report is `AttemptTerminal`. Both are refused and change nothing.
 - `JournalFault` is ordered, so that conflicts sort deterministically; `AttemptRecord` exposes its last lifecycle event for the repair guard.
 
+## Journal codec (`lifecycle/codec.rs`, D3.2b-4)
+
+The codec turns events into bytes and bytes into a classified result. It reads and writes no file, repairs, truncates or moves nothing, and judges no transition: what decoded events mean is the reducer's, through `replay`. It is the only lifecycle file that names serde, through its own private wire types; no model type derives anything.
+
+### Frame
+
+```text
+ORDJ1 <payload length> <crc32c> <payload>\n
+```
+
+- **Header:** the literal `ORDJ1 `; the length as 1 to 5 decimal digits with no leading zero, at most `MAX_FRAME_BYTES` (17 408); one space; exactly 8 lowercase hexadecimal digits; one space. Anything else is corruption: another magic, a sign, a sixth digit, upper-case hex, a tab, two spaces.
+- **CRC-32C** (Castagnoli), pure and bitwise, no table, over `<length digits> <payload>`, so a damaged length is detected like a damaged payload. Pinned by `"123456789"` → `e3069283` and the RFC 3720 vectors.
+- **Payload:** a canonical JSON array of 1 to `MAX_BATCH` (8) records, one line: a canonical payload never holds a raw newline.
+
+### Canonical JSON v1
+
+- Every record is `{"v","run","seq","at_ms","clamped","producer","kind","body"}` in that order, with a body per kind whose fields have a fixed order.
+- Closed values are snake_case strings (`"provider_relay"`, `"deadline_run"`, `"incomplete_tail"`). Values with data are flat: a stop reason is `deadline_start | deadline_run | deadline_stall | journal_full | clock_fault`; a cancel scope is `{"scope":"attempt","attempt":n}` or `{"scope":"run","attempt":null}`; a continuation is `{"continuation":"fresh"|"resume","from_attempt","session"}`.
+- Every optional field is always present, `null` when absent. Numbers are integers; only the exit code may be negative.
+- An approval request records its `scope` and `risk`; decoding recomputes both (`once`, and the classification raised by the provider's claim) and refuses a record whose stored values differ, so a stored risk can never be lowered.
+- **Decoding**, in order: nesting at most 64 levels (the bound of every ORDJ1 payload), checked by a byte scan before serde parses anything; the version of every record (below); then the v1 limits, at most 8 records and 8 nesting levels; strict decoding into the wire types with unknown fields denied; every value through its model constructor; every integer at most 2^53 − 1; and the payload re-encoded from the model values must equal the input **byte for byte**. The re-encoding rejects whitespace, field order, escapes (`r`, `\/`), number forms (`-0`, `1.0`, `1e0`), omitted nulls, records written as arrays, and duplicate keys (an envelope duplicate fails strict decoding; a body is read through a JSON value that keeps one of two equal keys, and the re-encoding refuses it).
+- **Version first (F14).** Each record's `v` is read before strict decoding, through a type that ignores the rest. A valid frame holding a record above `RECORD_VERSION` ends the stream as `NewerVersion`, not as v1 corruption, whatever else the record holds within the bounds every ORDJ1 version keeps (the frame header and size, and 64 nesting levels): the v1 limits on records per frame and nesting apply only after the version is known to be 1. `v = 0`, a missing or non-integer `v`, and a `v` above 2^53 − 1 are corruption. Future versions must keep `v` an integer field of every record object. Only v1 exists, so there is no older version to upcast.
+- **Bounds:** `MAX_EVENT_BYTES` (2 048) per record, with a test that encodes the largest instance of every kind; `MAX_BATCH` records per frame; `MAX_FRAME_BYTES` per payload; and `MAX_STREAM_BYTES` (`MAX_JOURNAL_BYTES` + 1 MiB) per stream: a journal accepts no ordinary event at or above `MAX_JOURNAL_BYTES`, so beyond it only the frame that crossed it, repair records and one torn tail can follow. Nothing is allocated beyond a validated length, and decoding never panics.
+- **serde_json features:** the crate compiled for the app has `std`, `alloc`, `default` and `raw_value`. No crate enables `arbitrary_precision` (a test fails if one does); `unbounded_depth` is enabled only in the host copy that proc-macros use, and the nesting scan makes the bound independent of it.
+
+`encode_frame(events)` writes one frame of 1 to 8 contiguous events of one run at the current version; anything else is refused (a caller bug).
+
+### Classification (`decode_stream`)
+
+`decode_stream(bytes)` returns the valid frames, each with its byte range and events, and how the stream ends:
+
+| End | When | What may follow |
+| --- | --- | --- |
+| `Clean` | Every frame valid; the stream ends right after a newline. | Replay. |
+| `IncompleteTail { offset, len, crc32c }` | The bytes after the last valid frame hold **no newline at all** and are at most `MAX_TAIL_BYTES`, and are not a complete frame with a valid checksum and a wrong last byte: a cut header or payload, a complete frame whose newline is missing because the stream ends there, a short zero-filled extension. | Never interpreted. Only a future adapter may move it, unchanged, to a sidecar, only when the valid prefix reaches the high-water mark, and the repair record must match it exactly (below). |
+| `Corrupt { offset, reason }` | Everything else: a complete frame whose checksum is wrong (even the last one), a valid checksum with another byte where the newline belongs (`FrameEnd`, a CRLF included), a length past the end with a newline later (`CutFrame`), a newline-free tail longer than one frame (`TailTooLong`), a bad header, a payload that fails nesting, schema, integer, batch, size or canonical checks, a stream above `MAX_STREAM_BYTES`. | Quarantine. Nothing after the offset is interpreted, nothing is truncated, skipped or repaired. |
+| `NewerVersion { offset, v }` | A valid frame holding a record of a version this code does not know. | Quarantine, read-only, bytes untouched. |
+
+A corrupted frame in the middle stops decoding there: later frames are never skipped into the history. That the codec itself never turns bytes after a corruption into events rests on review of `codec.rs` (decoding stops at the first invalid frame, and the scan below holds no event); the static pins keep every other file from reading unverified frames. `scan_after_corruption(bytes, offset)` lists, for audit only, the frame-shaped lines after the corruption (at most 1 024, with a flag when more exist): each `UnverifiedFrame` carries its offset, its length, whether its checksum matches and the kinds it would name, and **no event**, so it can never be applied, replayed or reconciled.
+
+## Replay (`lifecycle/replay.rs`, D3.2b-4)
+
+`replay(run, &decoded)` rebuilds the run's projection from the empty one, frame by frame, through the reducer's `apply_recorded`, the same transition function as the live path. The first fault stops it, and nothing after it is applied:
+
+- every reducer fault of a recorded frame (`WrongRun`, `SeqNotFirst`, `SeqGap`, `TimeDecreased`, `ClampedMisused`, `VersionDecreased`, `ProducerNotAllowed` for a forged label, `ConsequenceMismatch` for generated consequences that are not exactly the generated ones, `DuplicateKey` for a repeated or conflicting terminal event, `InvalidTransition`, `CoalesceViolated`, `MixedProducerFrame`, `LimitExceeded`);
+- `Codec` for a `Corrupt` end, with the codec's reason kept for display;
+- `NewerVersion` for a `NewerVersion` end.
+
+`ReplayedHistory` is read-only: its projection (the state after the last valid record), its fault, the codec's reason, the incomplete tail if the stream ended in one, and the frame boundaries. It holds no supervision, no grant and no clock, has no mutable method, and nothing but `RecordedHistory::from_replay` consumes it. Replay is deterministic: the same bytes give the same history, and the bytes of a live journal replay to its live projection after every frame (tested as a property, and through `stage`/`confirm` of a live supervision).
+
+`check_mark(mark)` checks the run's high-water mark against the replayed prefix (r5 5.7 step 3): `(0, 0)` vouches for nothing having been acknowledged; otherwise a frame must end exactly at `byte_length` with `last_seq`, inside the prefix. A missing, unreadable or invalid mark, a prefix that ends before it (acknowledged frames lost at a frame boundary, which a clean decode alone cannot see), or a mark that is not a frame boundary of that sequence number is a `MarkProblem`.
+
+## Recorded histories from replay
+
+`RecordedHistory::from_replay(replayed, evidence)` is the only production way to build the history reconciliation reads. `OpeningEvidence` is what only the future adapter can see: whether a quarantine marker exists, the high-water mark as read, and every sidecar without a `JournalRepaired` record (as repair records in sidecar order, the one about to be made for a tail included). In order:
+
+1. a reported marker → `Quarantined(Marker)`;
+2. a replay fault → `Quarantined(Fault(fault))`, codec damage and newer versions included;
+3. a mark problem → refused (`HistoryRefused::Mark`): the adapter writes a marker;
+4. no `RunCreated` → refused (`NoRunCreated`): the adapter's never-created path (F6);
+5. an incomplete tail → refused (`TailNotRepaired`) unless a reported repair of cause `incomplete_tail` removes exactly its length and CRC-32C **into a new sidecar**: one that no `JournalRepaired` record holds, numbered after every recorded one. A recorded repair of equal size and checksum (two zero-filled blocks have the same CRC-32C) removed earlier bytes and would draft no new record, so it never vouches for a new tail;
+6. otherwise `Verified`.
+
+Step 5 is what keeps a torn tail from becoming "not started": the matched repair record goes into the opening frame first, so reconciliation ends a `proposed` or `approved` attempt as `interrupted{evidence_lost}`. With a clean stream the same attempt is `not_started{supervision_lost}`, which is correct only because frames beyond the high-water mark were never acknowledged (write-ahead, r5 5.2): a property test cuts journals at random offsets under random marks (25 per fixture, 64 fixtures) and checks that no verified history reaches below its mark, that a repair the journal already records never vouches for a tail, and that "not started" appears only on a clean stream holding no start of that attempt.
+
+The core checks everything the bytes can show. It cannot see a marker or a sidecar, so a dishonest caller can hide those (as with every adapter fact, r5 section 8), but cannot make a faulted, torn or mark-short journal `Verified`, and nothing it supplies creates authority: reconciliation and `begin_reconciled` still apply, and mint nothing.
+
+## Uncertain writes (`verify_persisted`)
+
+`verify_persisted(file, committed, pending)` is the pure, byte-exact check of r5 5.4: `committed` is what the writer knows it acknowledged, `pending` the frame whose write was uncertain, `file` the journal re-read under its lock.
+
+| Result | Meaning | The future adapter then |
+| --- | --- | --- |
+| `Absent { torn }` | The file is exactly `committed`, possibly followed by a torn tail (no newline, at most one frame), reported with its length and whether it is a prefix of `pending`. | Repairs the tail (5.5), then may retry non-consumption drafts unchanged; `discard`s the abandoned frame. |
+| `Landed` | The file is exactly `committed` followed by exactly `pending`. | `adopt`s it: the live projection gains the frame, and **no grant is minted** (a landed decision is voided `write_uncertain`; a landed start is followed by `effect_not_performed`). |
+| `Diverged(reason)` | Shortened, altered, a foreign complete frame, extra bytes after the pending frame, or corrupt bytes after `committed`. | Poisons the stream: durable quarantine marker, no further appends; live state is kept so its own child can still be stopped (5.8). |
+| `Unknown(reason)` | The inputs cannot support a conclusion: `committed` is not a clean stream, `pending` is not exactly one valid frame, `pending` does not continue `committed` (another run, or not the next sequence numbers), or the file is beyond the stream bound. | Treats it as `Diverged`. |
+
+What it establishes: whether these bytes hold that frame, exactly. What it cannot establish, and the adapter must: that `file` is the journal (lock, `O_NOFOLLOW`, owned regular file), that what it read is durable (`F_FULLFSYNC` and the directory sync), that `committed` is truly what was acknowledged (the high-water mark), and that no other writer exists (the lock for the whole supervision lifetime). It never replays, never reconciles a supervised run, never substitutes either for the prefix check, and its result is never authority: `Landed` only lets the live layer adopt a frame, which mints nothing (tested through `abandon`, `verify_persisted` and `adopt`).
+
+### Differences from design r5 in D3.2b-4
+
+- `replay(run, &decoded)` takes the run id and the whole decoded stream rather than `&[Vec<Event>]`, so the stream's end (tail, corruption, newer version) is part of the history. `ReplayedHistory` carries the fault, the codec's reason, the tail and the frame boundaries; `valid_through_seq` is the last event of its projection.
+- `RecordedHistory::from_replay` derives the status and is the only production constructor; `RecordedHistory::new` is test-only. The repair of an incomplete tail is bound to the tail's exact length and CRC-32C; r5 does not state that binding.
+- The high-water-mark check is pure (`check_mark`); a mark problem refuses the conversion (the summary is `Unverified(MarkMismatch)` until the adapter writes a marker).
+- `StreamEnd::NewerVersion` is its own end (F14); `scan_after_corruption` returns at most 1 024 `UnverifiedFrame`s without events and a flag; `verify_persisted` adds `Unknown` and reports torn tails.
+- New bounds: `MAX_STREAM_BYTES`, a frame nesting depth of 64 checked before serde (8 for v1 after the version peek), and 1 024 unverified frames. r5 5.7 step 5 lets a sidecar holding the tail's bytes be reused; here only a sidecar without a record may vouch for a tail.
+- The v1 wire form above (names, flat encodings, always-present nulls, recomputed risk and scope) is fixed here; it may still change with review until the first persistence adapter freezes v1.
+- To build values from text the codec needs the provider catalog's and evidence vocabulary's types: `Sha256` gains an `as_str` accessor (agents, no other change), and `model.rs` names them for the rest of the lifecycle through three aliases (`CatalogId`, `Digest`, `ShortToken`), keeping its two reviewed imports the only reference to the agents module.
+
 ## Static boundary
 
 `config.test.ts` holds the compiled `src/lifecycle*` files to the agents purity rules: no process, filesystem, network, environment, clock, thread, global state, unsafe code, FFI, Tauri, serde or libc; no command; nothing public outside the crate; no identifier that could hold a path, a search location, an argument vector or a command; and no macro other than `matches!`.
@@ -203,7 +293,7 @@ Decision 12.8 amends the rules for this module:
   - `use crate::agents::catalog::ProviderId;`
   - `use crate::agents::evidence::{Sha256, Token};`
 - Any other copy or position is held to the full rules and fails.
-- The module root names no `super`; a submodule names `super` only to reach a sibling (`super::model`, `super::reduce`, `super::live`, `super::reconcile`; decision 12.8(b), D3.2b-2 and D3.2b-3). No file imports with a glob. It may name the agents module nowhere else.
+- The module root names no `super`; a submodule names `super` only to reach a reviewed sibling (decision 12.8(b), D3.2b-2 to D3.2b-4): the model none, the reducer the model, the live layer the model, the reducer and reconciliation, reconciliation the model, the reducer, the live layer and replay, the codec only the model, and replay the model, the reducer and the codec. A lifecycle file with no reviewed list fails. No file imports with a glob. It may name the agents module nowhere else.
 - No identifier may contain authoriz/authoris, dispatch, enforc, terminat or execute_now, in any letter case and at any position.
 - The agents module never names the lifecycle model.
 - `lib.rs` declares the module once, in the same pinned form as `mod agents;`, and no other compiled production file names it.
@@ -232,11 +322,32 @@ D3.2b-3 adds one reviewed exception and the pins that keep reconciliation inert:
 - **Frames and histories.** `ReconciledFrame` and `RecordedHistory` are declared once in `reconcile.rs` with no attribute (no derive) and no visible field, are built once, have no trait implemented for them anywhere, and are never aliased, renamed or built by another file. `Opening` is declared once in `live.rs` with no attribute, has no trait, and is named by no other file. `SupervisedRun` is declared once in `live.rs` with no attribute and no visible field, is built only by `held`, and has no trait. `LiveSupervision` and `PendingSupervision` stay built in one place each, now shared by both doors.
 - Fixtures: the proposal in snake, upper and lower camel case, with a prefix, a suffix, a digit or an underscore, as a raw identifier, mentioned a third time (a `matches!`), imported under an alias, in the live layer, the reducer, the module root or the model, assembled by a macro, carrying an action or a process id, built a second time; a termination method or state, a kill, a signal, a process, a clock, a process-table read, a command, serde or a `super` escape beside it; a method, a trait or another derive on `Recommendation`, another variant, a function taking one, a match on one, a recommendation read back, the list counted in the live layer, in reconciliation or through the accessor, a recommendation pushed into another list, a production accessor, a visible list, named by the live layer or the reducer, aliased or renamed; a look-alike letter in a forbidden word; a supervised run claimed without a supervision, built twice, cloneable or with a visible field; a cloneable frame or history, a visible frame field, a frame or history built twice or by the live layer, a trait for or an alias of a frame; a cloneable opening, a trait for one, one named by reconciliation, a supervision built a second time.
 
+D3.2b-4 adds one reviewed serde exception and the pins that keep bytes from becoming history or authority:
+
+- **Serde in the codec only (decisions 12.8(c), 12.9).** The serde rule is unchanged. In `lifecycle/codec.rs` only, exactly these forms are set aside before the rules run: the import `use serde::{Deserialize, Serialize};` as its first line of code (only line comments before it), the pure in-memory functions `serde_json::from_slice`, `serde_json::to_vec`, `serde_json::from_value` and the type `serde_json::Value`, and the attribute `#[serde(deny_unknown_fields)]`. A reader, a writer, a serde path, a renamed `serde_json`, another attribute (a rename, a custom deserializer), a second import, an import after other code, an import naming more, or any of these in another file stays a violation, and the test checks that the codec would fail without the exception.
+- **Serialization on wire types only.** No other lifecycle file names `Serialize`, `Deserialize`, `Serializer`, `Deserializer`, serde or serde_json; nothing implements a serde trait or a visitor by hand; and every derive that names one is on a private codec struct named for the wire (`W…`, `WireOut`, `WireRecord`) or the version peek (`Peek`). No model, live, replay or reconciliation type can be serialized.
+- **Decoded and unverified bytes.** `Decoded` and `DecodedFrame` are declared once in `codec.rs` with no attribute and no visible field, and built once there; `UnverifiedFrame` has exactly the derives `Clone, Debug, PartialEq, Eq`, no visible field and no field holding an event, a body, a decoded frame or a projection. No trait is implemented for these types, none is aliased or renamed, no other file builds one, and no other file names `UnverifiedFrame` or `scan_after_corruption`.
+- **Replayed history.** `ReplayedHistory` is declared once in `replay.rs` with no attribute and no visible field, built once there, has no trait, alias or rename, and `replay.rs` takes no `&mut self`. Only `replay.rs` and `reconcile.rs` name it.
+- **No change after construction.** No lifecycle file takes a `&mut` of a replayed or recorded history or binds one `mut` with its type named; `replay.rs` and `reconcile.rs` have no `mut self`, and assign no history field, call no mutating method on one (`take`, `clear`, `push`, `retain` and the like, whatever the spacing or parentheses) and borrow none mutably, by `&mut` or `ref mut`. These pins cover the ordinary ways to change a value; anything more contrived rests on review and on the Rust tests of faults, tails and repair binding; only `replay` returns a replayed history; and no lifecycle file uses a conditional attribute (`cfg_attr`), which could derive or rename what the rules never see. A reviewed `serde_json` item may not be renamed.
+- **Recorded history.** `RecordedHistory::new` is `#[cfg(test)]`; the private `assemble` holds the one literal and is called exactly four times (by `new` and by `from_replay`); no other function in `reconcile.rs` returns a recorded history; and `HistoryStatus::Verified` is named once in production code, in `from_replay`, and nowhere outside `reconcile.rs`.
+- Fixtures cover each of these, and a process, a file, a clock, an environment read, a path, a launch word and a macro in the new files.
+
 `native-sources.json` lists the new files, so the compiler's dep-info check covers them. The ten commands, their grants, the generated permissions, the dependency set and the release-isolation verifier are unchanged.
 
 ## Tests
 
 All synthetic: no file, clock, process, network, provider or VM.
+
+`lifecycle/codec/tests.rs` (26 tests), with **golden v1 fixtures** pinned as test constants (one frame per line, synthetic values only):
+
+- three golden histories built through the reducer: a supervised run (start consent, a session, progress, an operation consumed, one expired and one voided by a run-deadline stop, a failure claim, an exit, an attempt cancelled before its start, a failed start, a resolution, the close), a run reconciled after a recorded repair (`evidence_lost` and a `supervision_lost` void), and a run reconciled as never started (a `supervision_lost` withdrawal). Together they hold all 22 kinds, both request kinds, single- and multi-event frames and every producer's generated consequences; they encode to exactly the pinned bytes and decode and replay to pinned projections;
+- CRC-32C check value and RFC 3720 vectors; the frame layout and envelope field order; encode refusals; the largest instance of every kind against `MAX_EVENT_BYTES` and of a full batch against `MAX_FRAME_BYTES`; every closed value by name;
+- canonical and schema refusals (whitespace, order, escapes, floats, exponents, leading zeros, signs, negative zero, duplicate keys in the envelope and the body with equal or different values, unknown and missing fields, omitted nulls, unknown names, a lowered risk, another scope, integers above 2^53 − 1 and above u64, records as arrays, non-ASCII and look-alike letters, bidi controls, lone surrogates, escaped controls, invalid UTF-8), empty and oversized batches, deep nesting (65 and 8 000 levels for any version, 9 for a v1 record), and the version peek (v2 with unknown fields or any shape, nested deeper or with more records than v1 allows, a newer record inside a frame, frames before kept, nothing after interpreted);
+- framing: malformed headers, truncation at every byte offset of a journal, torn versus corrupt tails (missing newline, zero runs at and over `MAX_TAIL_BYTES`, a wrong last byte, a bad checksum on the last frame, a torn frame followed by more, a length past the end, garbage), a corrupted middle frame, the audit scan and its bound, the stream bound, `serde_json` without `arbitrary_precision`;
+- `verify_persisted`: every `Absent`, `Landed`, `Diverged` and `Unknown` case, including the first frame of a journal;
+- **seeded property tests** (no dependency; failing seeds go to `CODEC_REGRESSION_SEEDS`, none so far): 200 random journals from every producer (backward and absurd times included) round-trip byte for byte and reach every kind; 300 journals × 20 random mutations (bit flips, truncation, insertion, deletion, garbage, overwrites, duplication, zero tails) never panic, never lose a frame before the first changed byte, and keep every decoded frame canonical; a single bit flip anywhere in a journal is always detected at its frame; 2 000 random byte strings, half framed with a valid checksum, never panic; `verify_persisted` on every frame of 80 random journals.
+
+`lifecycle/replay/tests.rs` (15 tests): replay equals the live projection for every fixture and golden history, after every frame of 150 random journals, and for frames staged and confirmed by a live supervision; every recorded-history fault at its frame with the projection before it (another run, missing first frame, missing, repeated and swapped frames, decreasing time, a misused clamp, forged producer labels, consequences with another reason or producer, dropped or added, a second exit, a conflicting terminal state, a second start, a start before it began, a coalesced progress, a mixed frame); a corrupted middle frame, a newer version and a bad last checksum quarantining with the bytes unchanged; the derived status (marker, fault, every mark problem including acknowledged frames lost at a frame boundary, never-created); a torn tail refused without its exact repair, and refused with a repair the journal already records or a sidecar below a recorded one, and reconciled as `evidence_lost` with a new one; a property over truncated journals and random marks that never yields "not started" after a torn tail or a recorded start; contradictory repair evidence; crash recovery through `reconcile`, `begin_reconciled` and the opening frame replayed, with the orphan and the quarantine blocking every start; replayed decisions and grants never usable; and a landed uncertain decision adopted with no grant.
 
 `lifecycle/reduce/tests.rs` (36 tests):
 
@@ -289,8 +400,8 @@ All synthetic: no file, clock, process, network, provider or VM.
 - Values may still change without a schema version bump until the first persistence adapter freezes v1.
 - Rust privacy holds against safe code in the crate, not against code that chooses to use the user or supervisor constructors: each future caller (approval interface, spawn boundary, provider relay) must be limited to its own constructor by review and static pins when it is added.
 - The core cannot observe durability, honest digests, a unique `LiveEpoch` or a true `JournalSize`; callers must call `confirm` only after a durable write and `adopt` only after a byte-exact check (r5 section 8).
-- Reconciliation trusts its caller for the history's status and missing repairs, the observations' provenance, a unique epoch, and that no live supervision holds the run it reconciles (r5 5.4); `start_conflicts` trusts the caller's inventory and `NeverCreated` claims (a supervised run must be backed by an opened supervision whose history extends the summary). A false caller can hide a blocking condition, never create a grant.
+- Reconciliation trusts its caller for the adapter facts behind a history's status (a marker, the high-water mark, the sidecars without a record), though since D3.2b-4 the status itself is derived from the replayed bytes, the observations' provenance, a unique epoch, and that no live supervision holds the run it reconciles (r5 5.4); `start_conflicts` trusts the caller's inventory and `NeverCreated` claims (a supervised run must be backed by an opened supervision whose history extends the summary). A false caller can hide a blocking condition, never create a grant.
 - The model module allows dead code in test builds, because parts of the vocabulary serve only later increments.
-- **D3.2b-4:** the canonical codec, framing and CRC-32C, `decode_stream` with version peeking before strict decoding (F14), `verify_persisted`, `scan_after_corruption`, `replay` and the read-only `ReplayedHistory` (which must produce the `RecordedHistory` reconciliation reads, with its status derived rather than stated), and golden v1 fixtures.
-- **Adapter:** F4, F5, F6 and F15 from the gate review (frame boundary at the mark, atomic sidecars, zero-frame runs, a sleep-inclusive clock or an explicit `clock_fault` entry point); the run lock for the lifetime of a supervision; durable opening frames before `open`; the run-id counter, marks and never-created markers that `RunInventory` and `RunSummary` are built from, under the lock for anything that clears a conflict; the quarantine recovery and archive policy (12.18) before any execution boundary.
+- **Codec and replay (D3.2b-4):** they read only bytes the caller supplies. Nothing reads a journal file, writes one, repairs a tail, writes a sidecar or a marker, or keeps a high-water mark: those are the adapter's. The golden v1 fixtures and wire form may still change, with review, until the first adapter freezes v1. Replay is linear in the journal; there is no snapshot (r5 4.9).
+- **Adapter:** F4, F5, F6 and F15 from the gate review (frame boundary at the mark, atomic sidecars, zero-frame runs, a sleep-inclusive clock or an explicit `clock_fault` entry point); the run lock for the lifetime of a supervision; durable opening frames before `open`; the run-id counter, marks and never-created markers that `RunInventory` and `RunSummary` are built from, under the lock for anything that clears a conflict; the quarantine recovery and archive policy (12.18) before any execution boundary. For the codec (D3.2b-4): read the whole journal under the lock with a bound (`MAX_STREAM_BYTES`), call `decode_stream`, `replay` and `RecordedHistory::from_replay` with honest `OpeningEvidence`, write a marker on any refusal or quarantine, repair only a tail the conversion accepted, into a sidecar no record holds (a sidecar is reused only while it has no record), and after an uncertain append keep the committed bytes, re-read the file and `adopt` only on `Landed`, `discard` only on `Absent`, and poison the stream on anything else.
 - **Execution boundary** (not authorized): refusing to record a start while `start_conflicts` reports anything, with no bypass, plus its own release policy and the Execution Safety Gate (#108 decisions 3, 5, 11, B, C).
