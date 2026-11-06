@@ -200,7 +200,7 @@ pub(crate) fn encode_frame(events: &[Event]) -> Result<Vec<u8>, EncodeRefused> {
     if events.iter().any(|event| event.v != RECORD_VERSION) {
         return Err(EncodeRefused::NotCurrentVersion);
     }
-    let mut payload = Vec::from([b'[']);
+    let mut payload = b"[".to_vec();
     for (index, event) in events.iter().enumerate() {
         let bytes = event_bytes(event)?;
         if bytes.len() > MAX_EVENT_BYTES as usize {
@@ -334,12 +334,19 @@ fn checked_frame(bytes: &[u8]) -> Result<(&[u8], usize), (CorruptReason, bool)> 
 /// Decodes and classifies a whole journal. Never panics, allocates nothing beyond lengths it has validated, and
 /// interprets nothing after the first invalid frame.
 pub(crate) fn decode_stream(bytes: &[u8]) -> Decoded {
-    if bytes.len() as u64 > MAX_STREAM_BYTES {
-        return Decoded { frames: Vec::new(), end: StreamEnd::Corrupt { offset: 0, reason: CorruptReason::StreamTooLarge } };
-    }
     let mut frames = Vec::new();
+    let end = if bytes.len() as u64 > MAX_STREAM_BYTES {
+        StreamEnd::Corrupt { offset: 0, reason: CorruptReason::StreamTooLarge }
+    } else {
+        decode_frames(bytes, &mut frames)
+    };
+    Decoded { frames, end }
+}
+
+/// Decodes valid frames into `frames` until the end of `bytes` or the first invalid one, and says how the stream ends.
+fn decode_frames(bytes: &[u8], frames: &mut Vec<DecodedFrame>) -> StreamEnd {
     let mut at = 0;
-    let end = loop {
+    loop {
         if at == bytes.len() {
             break StreamEnd::Clean;
         }
@@ -356,8 +363,7 @@ pub(crate) fn decode_stream(bytes: &[u8]) -> Decoded {
             },
             Err((reason, short)) => break classify_rest(offset, rest, reason, short),
         }
-    };
-    Decoded { frames, end }
+    }
 }
 
 enum PayloadFault {

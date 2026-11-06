@@ -218,12 +218,39 @@ function withoutReviewedProposal(file: string, text: string): string {
     (code.match(PROPOSAL_CONSTRUCTION) ?? []).length === 1;
   return reviewed ? text.replace(REVIEWED_PROPOSAL, "ReviewedProposal") : text;
 }
+// D3.2b-4 (#118, decisions 12.8(c) and 12.9): the journal codec is the only lifecycle file that may name serde, and only
+// in these forms, which are set aside before the rules run: the import below as its first line of code (only line
+// comments before it), the pure in-memory serde_json functions listed here, and the `deny_unknown_fields` attribute.
+// Any other serde or serde_json item (a reader, a writer, a custom (de)serializer, another attribute), a second import,
+// an import elsewhere or in another file stays a violation. serializationViolations pins what the derives may be on.
+const REVIEWED_SERDE_IMPORT = "use serde::{Deserialize, Serialize};";
+const REVIEWED_SERDE_JSON = /\bserde_json::(?:from_slice|to_vec|from_value|Value)\b/g;
+const REVIEWED_SERDE_ATTRIBUTE = /^[ \t]*#\[serde\(deny_unknown_fields\)\]\n/gm;
+function withoutReviewedSerde(file: string, text: string): string {
+  if (file !== "lifecycle/codec.rs") return text;
+  const lines = text.split("\n");
+  const first = lines.findIndex((line) => !line.startsWith("//"));
+  if (lines[first] !== REVIEWED_SERDE_IMPORT) return text;
+  lines.splice(first, 1);
+  return lines.join("\n").replace(REVIEWED_SERDE_JSON, "reviewed_json").replace(REVIEWED_SERDE_ATTRIBUTE, "");
+}
+// Which siblings each lifecycle file may name through `super` (decision 12.8(b), D3.2b-2 to D3.2b-4). The codec names
+// only the model: it never reaches the reducer, the live layer or reconciliation. Replay reaches the codec and the
+// reducer; reconciliation reaches replay only to build a recorded history from one; the live layer reaches neither.
+const LIFECYCLE_SIBLINGS: Record<string, string[]> = {
+  "lifecycle/model.rs": [],
+  "lifecycle/reduce.rs": ["model"],
+  "lifecycle/live.rs": ["model", "reduce", "reconcile"],
+  "lifecycle/reconcile.rs": ["model", "reduce", "live", "replay"],
+  "lifecycle/codec.rs": ["model"],
+  "lifecycle/replay.rs": ["model", "reduce", "codec"],
+};
 function lifecycleContentViolations(files: Record<string, string>): string[] {
   const stripped = Object.fromEntries(
-    Object.entries(files).map(([file, text]) => [file, withoutReviewedProposal(file, withoutLifecycleImports(file, text))]),
+    Object.entries(files).map(([file, text]) => [file, withoutReviewedSerde(file, withoutReviewedProposal(file, withoutLifecycleImports(file, text)))]),
   );
   const violations = pureContentViolations(stripped, (file) =>
-    file === "lifecycle.rs" ? /\bsuper\b/ : /\bsuper\b(?!::(?:model|reduce|live|reconcile)\b)/,
+    file === "lifecycle.rs" ? /\bsuper\b/ : /\bsuper\b(?!::(?:model|reduce|live|reconcile|codec|replay)\b)/,
   );
   for (const [file, text] of Object.entries(stripped)) {
     const code = rustCodeOnly(text);
@@ -232,7 +259,87 @@ function lifecycleContentViolations(files: Record<string, string>): string[] {
       const hit = code.match(pattern);
       if (hit) violations.push(`${file}: ${hit[0]}`);
     }
+    if (file === "lifecycle.rs") continue;
+    const allowed = LIFECYCLE_SIBLINGS[file];
+    if (!allowed) violations.push(`${file}: no reviewed sibling list`);
+    for (const m of code.matchAll(/\bsuper::(\w+)/g)) if (!allowed?.includes(m[1])) violations.push(`${file}: names super::${m[1]}`);
   }
+  return violations;
+}
+
+// D3.2b-4 (#118): serialization lives in the codec only, on its own wire types. No other lifecycle file names a serde
+// trait; nothing implements one by hand; and every derive that names one is on a private codec struct named for the
+// wire (`W…`, `WireOut`, `WireRecord`) or the version peek (`Peek`), so no model, live, replay or reconciliation type
+// can be written or read by serde. Returns what breaks those rules.
+function serializationViolations(files: Record<string, string>): string[] {
+  const violations: string[] = [];
+  for (const [file, text] of Object.entries(files)) {
+    const code = rustCodeOnly(text);
+    if (file !== "lifecycle/codec.rs" && /\b(?:Serialize|Deserialize|Serializer|Deserializer|serde|serde_json)\b/.test(code)) violations.push(`${file}: names serialization`);
+    if (/\bimpl\b[^{;]*\b(?:Serialize|Deserialize|Serializer|Deserializer|Visitor)\b/.test(code)) violations.push(`${file}: implements serialization by hand`);
+  }
+  const codec = rustCodeOnly(files["lifecycle/codec.rs"] ?? "");
+  for (const m of codec.matchAll(/#\[derive\(([^)]*)\)\]\s*/g)) {
+    if (!/\b(?:Serialize|Deserialize)\b/.test(m[1])) continue;
+    const target = codec.slice((m.index ?? 0) + m[0].length).match(/^(?:#\[serde\(deny_unknown_fields\)\]\s*)?struct (\w+)/);
+    if (!target || !/^(?:W[A-Z]\w*|WireOut|WireRecord|Peek)$/.test(target[1])) violations.push(`codec.rs: serialization derived for ${target?.[1] ?? "something other than a wire struct"}`);
+  }
+  return violations;
+}
+
+// D3.2b-4 (#118): replayed history is read-only and recovered bytes never feed it. Decoded frames, decoded streams and
+// unverified frames are built only by the codec, with private fields; an unverified frame holds no event, and nothing
+// but the codec names it or the scan that makes it. A replayed history is built once, by `replay`, has no derive, no
+// visible field, no trait, no mutable access, and is named only by replay.rs and reconcile.rs. A recorded history is
+// built from a replay only: `new` is test-only, the private `assemble` is called exactly four times (by `new` and by
+// `from_replay`), only those three functions return one, and `Verified` is named once, in `from_replay`.
+const CODEC_TYPES = ["Decoded", "DecodedFrame", "UnverifiedFrame"];
+const RECORDED_NEW =
+  "    #[cfg(test)]\n    pub(crate) fn new(projection: RunProjection, status: HistoryStatus, unrecorded_repairs: Vec<JournalRepair>) -> RecordedHistory {\n";
+function replayViolations(files: Record<string, string>): string[] {
+  const violations: string[] = [];
+  const codec = rustCodeOnly(files["lifecycle/codec.rs"] ?? "");
+  const replay = rustCodeOnly(files["lifecycle/replay.rs"] ?? "");
+  const reconcile = files["lifecycle/reconcile.rs"] ?? "";
+  const reconcileCode = rustCodeOnly(reconcile);
+  for (const name of CODEC_TYPES) {
+    const declared = [...codec.matchAll(new RegExp(`((?:#\\[[^\\]]*\\]\\s*)*)pub\\(crate\\) struct ${name} \\{([^}]*)\\}`, "g"))];
+    if (declared.length !== 1) violations.push(`codec.rs: ${name} declared ${declared.length} times`);
+    for (const [, attributes, body] of declared) {
+      const allowed = name === "UnverifiedFrame" ? "#[derive(Clone, Debug, PartialEq, Eq)]" : "";
+      if (attributes.trim() !== allowed) violations.push(`codec.rs: ${name} has ${attributes.trim()}`);
+      if (/\bpub\b/.test(body)) violations.push(`codec.rs: ${name} has a visible field`);
+      if (name === "UnverifiedFrame" && /\b(?:Event|EventBody|Decoded|DecodedFrame|RunProjection)\b/.test(body)) violations.push("codec.rs: an unverified frame holds an event");
+    }
+    if ((codec.match(structLiteral(name)) ?? []).length !== 1) violations.push(`codec.rs: ${name} built ${(codec.match(structLiteral(name)) ?? []).length} times`);
+  }
+  for (const [file, text] of Object.entries(files)) {
+    const code = rustCodeOnly(text);
+    for (const name of [...CODEC_TYPES, "ReplayedHistory"]) {
+      if (new RegExp(`\\bimpl\\b[^{;]*\\bfor\\s+[(\\s]*(?:[\\w:]*::)?${name}\\b`).test(code)) violations.push(`${file}: a trait is implemented for ${name}`);
+      if (new RegExp(`\\btype\\s+\\w+[^=;]*=[^;]*\\b${name}\\b`).test(code)) violations.push(`${file}: an alias of ${name}`);
+      if (new RegExp(`\\b${name}\\s+as\\b`).test(code)) violations.push(`${file}: ${name} renamed`);
+    }
+    if (file !== "lifecycle/codec.rs") {
+      for (const name of CODEC_TYPES) if (structLiteral(name).test(code)) violations.push(`${file}: builds a ${name}`);
+      if (/\b(?:UnverifiedFrame|scan_after_corruption)\b/.test(code)) violations.push(`${file}: reads unverified frames`);
+    }
+    if (file !== "lifecycle/replay.rs" && structLiteral("ReplayedHistory").test(code)) violations.push(`${file}: builds a ReplayedHistory`);
+    if (!["lifecycle/replay.rs", "lifecycle/reconcile.rs"].includes(file) && /\bReplayedHistory\b/.test(code)) violations.push(`${file}: names ReplayedHistory`);
+    if (file !== "lifecycle/reconcile.rs" && /\bHistoryStatus::Verified\b/.test(code)) violations.push(`${file}: names a verified status`);
+  }
+  const replayed = [...replay.matchAll(/((?:#\[[^\]]*\]\s*)*)pub\(crate\) struct ReplayedHistory \{([^}]*)\}/g)];
+  if (replayed.length !== 1 || replayed[0][1].trim() || /\bpub\b/.test(replayed[0][2])) violations.push("replay.rs: ReplayedHistory is not declared once, plain, with private fields");
+  if ((replay.match(structLiteral("ReplayedHistory")) ?? []).length !== 1) violations.push("replay.rs: ReplayedHistory built more than once");
+  if (/&\s*mut\s+self\b/.test(replay)) violations.push("replay.rs: mutable access");
+  if (reconcile.split(RECORDED_NEW).length !== 2) violations.push("reconcile.rs: RecordedHistory::new is not test-only");
+  if ((reconcileCode.match(/\bRecordedHistory::assemble\(/g) ?? []).length !== 4) violations.push("reconcile.rs: assemble called other than by new and from_replay");
+  if (!/\n {4}fn assemble\(/.test(reconcileCode) || /\bpub(?:\([^)]*\))?\s+fn assemble\b/.test(reconcileCode)) violations.push("reconcile.rs: assemble is not private");
+  for (const m of reconcileCode.matchAll(/\bfn\s+(\w+)([^{;]*)[{;]/g)) {
+    const arrow = m[2].lastIndexOf("->");
+    if (arrow >= 0 && /\bRecordedHistory\b/.test(m[2].slice(arrow)) && !["new", "assemble", "from_replay"].includes(m[1])) violations.push(`reconcile.rs: ${m[1]} returns a recorded history`);
+  }
+  if ((reconcileCode.match(/\bHistoryStatus::Verified\b/g) ?? []).length !== 1) violations.push("reconcile.rs: a verified status named outside from_replay");
   return violations;
 }
 
@@ -716,17 +823,32 @@ describe("desktop trust boundary", () => {
   // of the crate only through two reviewed imports.
   it("keeps the lifecycle model pure, unreachable from the interface and limited to its reviewed imports", () => {
     const files = lifecycleSources();
-    expect(Object.keys(files).sort()).toEqual(["lifecycle.rs", "lifecycle/live.rs", "lifecycle/model.rs", "lifecycle/reconcile.rs", "lifecycle/reduce.rs"]);
+    expect(Object.keys(files).sort()).toEqual([
+      "lifecycle.rs",
+      "lifecycle/codec.rs",
+      "lifecycle/live.rs",
+      "lifecycle/model.rs",
+      "lifecycle/reconcile.rs",
+      "lifecycle/reduce.rs",
+      "lifecycle/replay.rs",
+    ]);
     expect(lifecycleContentViolations(files)).toEqual([]);
     expect(liveAuthorityViolations(files)).toEqual([]);
     expect(reconciliationViolations(files)).toEqual([]);
+    expect(serializationViolations(files)).toEqual([]);
+    expect(replayViolations(files)).toEqual([]);
     // The reviewed termination-proposal exception applies: without it, the reconciliation file fails the rule.
     expect(withoutReviewedProposal("lifecycle/reconcile.rs", files["lifecycle/reconcile.rs"])).not.toEqual(files["lifecycle/reconcile.rs"]);
-    expect(pureContentViolations({ "lifecycle/reconcile.rs": files["lifecycle/reconcile.rs"] }, () => /\bsuper\b(?!::(?:model|reduce|live)\b)/)).toEqual([]);
+    expect(pureContentViolations({ "lifecycle/reconcile.rs": files["lifecycle/reconcile.rs"] }, () => /\bsuper\b(?!::(?:model|reduce|live|replay)\b)/)).toEqual([]);
     expect(rustCodeOnly(files["lifecycle/reconcile.rs"])).toMatch(/\w*terminat\w*/i);
-    for (const file of ["lifecycle/model.rs", "lifecycle/live.rs", "lifecycle/reconcile.rs"]) expect(files[file]).toMatch(/\n#\[cfg\(test\)\]\nmod tests;\n$/);
-    // The reducer's test fixtures are shared with the live layer's tests, in test builds only.
+    // The reviewed serde forms apply to the codec only: without them it fails the rules, and they change no other file.
+    expect(pureContentViolations({ "lifecycle/codec.rs": files["lifecycle/codec.rs"] }, () => /\bsuper\b(?!::model\b)/)).not.toEqual([]);
+    expect(withoutReviewedSerde("lifecycle/codec.rs", files["lifecycle/codec.rs"])).not.toEqual(files["lifecycle/codec.rs"]);
+    for (const file of Object.keys(files).filter((f) => f !== "lifecycle/codec.rs")) expect(withoutReviewedSerde(file, files[file])).toEqual(files[file]);
+    for (const file of ["lifecycle/model.rs", "lifecycle/live.rs", "lifecycle/reconcile.rs", "lifecycle/replay.rs"]) expect(files[file]).toMatch(/\n#\[cfg\(test\)\]\nmod tests;\n$/);
+    // The reducer's and the codec's test fixtures are shared with other lifecycle tests, in test builds only.
     expect(files["lifecycle/reduce.rs"]).toMatch(/\n#\[cfg\(test\)\]\npub\(crate\) mod tests;\n$/);
+    expect(files["lifecycle/codec.rs"]).toMatch(/\n#\[cfg\(test\)\]\npub\(crate\) mod tests;\n$/);
     for (const line of LIFECYCLE_IMPORTS) expect(files["lifecycle/model.rs"].split("\n").filter((l) => l === line)).toHaveLength(1);
     // lib.rs declares the module once (pinned in the agents test above) and no other compiled production file names
     // it, the agents module included.
@@ -912,6 +1034,92 @@ describe("desktop trust boundary", () => {
     };
     for (const [name, files] of Object.entries(inert)) {
       expect(reconciliationViolations(files), name).not.toEqual([]);
+    }
+    // The codec and replay (D3.2b-4): serde only in the codec and only in the reviewed forms, the sibling table, and the
+    // usual process, file, clock and environment cases in the new files.
+    const codecFile = "lifecycle/codec.rs";
+    const content: Record<string, Record<string, string>> = {
+      "serde in replay": add("lifecycle/replay.rs", "#[derive(serde::Serialize)]\nstruct R0;"),
+      "serde_json in the reducer": add("lifecycle/reduce.rs", "fn r1(b: &[u8]) { let _ = serde_json::from_slice::<u8>(b); }"),
+      "a reader in the codec": add(codecFile, "fn r2<R>(r: R) { let _ = serde_json::from_reader::<R, u8>(r); }"),
+      "a writer in the codec": add(codecFile, "fn r3(v: &u8) { let _ = serde_json::to_writer(Vec::new(), v); }"),
+      "a serde path in the codec": add(codecFile, "fn r4<'de, D: serde::Deserializer<'de>>(_d: D) {}"),
+      "serde_json renamed in the codec": add(codecFile, "use serde_json as j;"),
+      "another serde attribute": add(codecFile, '#[derive(Deserialize)]\n#[serde(rename = "x")]\nstruct WOther { a: u8 }'),
+      "a custom field deserializer": add(codecFile, '#[derive(Deserialize)]\nstruct WFn { #[serde(deserialize_with = "f")] a: u8 }'),
+      "a second serde import": add(codecFile, REVIEWED_SERDE_IMPORT),
+      "a serde import naming more": replace(codecFile, REVIEWED_SERDE_IMPORT, "use serde::{Deserialize, Serialize, Serializer};"),
+      "the serde import after other code": { ...actual, [codecFile]: actual[codecFile].replace(`${REVIEWED_SERDE_IMPORT}\n`, "") + `\n${REVIEWED_SERDE_IMPORT}` },
+      "the serde import in replay": add("lifecycle/replay.rs", REVIEWED_SERDE_IMPORT),
+      "a file in the codec": add(codecFile, 'fn r5() { let _ = std::fs::read("/tmp/r1.ordj"); }'),
+      "a file type in the codec": add(codecFile, "fn r6(_: File) {}"),
+      "a clock in the codec": add(codecFile, "fn r7() { let _ = std::time::SystemTime::now(); }"),
+      "an environment read in replay": add("lifecycle/replay.rs", 'fn r8() { let _ = std::env::var("HOME"); }'),
+      "a process in replay": add("lifecycle/replay.rs", 'fn r9() { let _ = std::process::Command::new("codex"); }'),
+      "a launch word in the codec": add(codecFile, "fn launch_frame() {}"),
+      "a path in the codec": add(codecFile, "struct R10 { journal_path: u8 }"),
+      "a macro in the codec": add(codecFile, 'fn r11() -> String { format!("{}", 1) }'),
+      "the codec naming the reducer": add(codecFile, "use super::reduce::apply_recorded;"),
+      "the codec naming the live layer": add(codecFile, "use super::live::begin_new;"),
+      "the codec naming reconciliation": add(codecFile, "use super::reconcile::RecordedHistory;"),
+      "the codec naming replay": add(codecFile, "use super::replay::replay;"),
+      "the live layer naming the codec": add("lifecycle/live.rs", "use super::codec::decode_stream;"),
+      "the live layer naming replay": add("lifecycle/live.rs", "use super::replay::replay;"),
+      "the reducer naming replay": add("lifecycle/reduce.rs", "use super::replay::ReplayedHistory;"),
+      "the model naming the codec": add("lifecycle/model.rs", "use super::codec::encode_frame;"),
+      "replay naming the live layer": add("lifecycle/replay.rs", "use super::live::LiveSupervision;"),
+      "replay naming reconciliation": add("lifecycle/replay.rs", "use super::reconcile::RecordedHistory;"),
+      "reconciliation naming the codec": add("lifecycle/reconcile.rs", "use super::codec::decode_stream;"),
+      "the codec escaping through super": add(codecFile, "use super::super::store;"),
+      "an unreviewed lifecycle file": { ...actual, "lifecycle/journal.rs": "use super::model::Event;\n" },
+    };
+    for (const [name, files] of Object.entries(content)) {
+      expect(lifecycleContentViolations(files), name).not.toEqual([]);
+    }
+    const serialization: Record<string, Record<string, string>> = {
+      "a model type deriving serde": add("lifecycle/model.rs", "#[derive(Serialize)]\npub(crate) struct S0;"),
+      "a live type deriving serde": add("lifecycle/live.rs", "#[derive(Deserialize)]\nstruct S1;"),
+      "serialization named by the reducer": add("lifecycle/reduce.rs", "fn s2<T: Serialize>(_: T) {}"),
+      "serde named by replay": add("lifecycle/replay.rs", "fn s3(v: &serde_json::Value) {}"),
+      "a derive on a codec enum": add(codecFile, "#[derive(Serialize)]\nenum WKind { A }"),
+      "a derive on a codec struct not named for the wire": add(codecFile, "#[derive(Serialize, Deserialize)]\nstruct Grant { a: u8 }"),
+      "a derive on a visible codec struct": add(codecFile, "#[derive(Serialize)]\npub(crate) struct WVisible;"),
+      "a derive on a decoded frame": replace(codecFile, "pub(crate) struct DecodedFrame {", "#[derive(Serialize)]\npub(crate) struct DecodedFrame {"),
+      "a hand-written Serialize": add(codecFile, "impl Serialize for DecodedFrame { fn serialize<S>(&self, s: S) {} }"),
+      "a hand-written Deserialize": add(codecFile, "impl<'de> Deserialize<'de> for Decoded {}"),
+      "a hand-written visitor": add(codecFile, "struct V;\nimpl<'de> Visitor<'de> for V {}"),
+    };
+    for (const [name, files] of Object.entries(serialization)) {
+      expect(serializationViolations(files), name).not.toEqual([]);
+    }
+    const replayed: Record<string, Record<string, string>> = {
+      "a cloneable replayed history": replace("lifecycle/replay.rs", "pub(crate) struct ReplayedHistory {", "#[derive(Clone)]\npub(crate) struct ReplayedHistory {"),
+      "a visible replay field": replace("lifecycle/replay.rs", "    fault: Option<JournalFault>,\n    damage", "    pub(crate) fault: Option<JournalFault>,\n    damage"),
+      "a replayed history built twice": add("lifecycle/replay.rs", "fn twin(h: ReplayedHistory) -> ReplayedHistory { ReplayedHistory { ..h } }"),
+      "a replayed history built by reconciliation": add("lifecycle/reconcile.rs", "fn forge(h: ReplayedHistory) -> ReplayedHistory { ReplayedHistory { ..h } }"),
+      "a mutable replay method": add("lifecycle/replay.rs", "impl ReplayedHistory { pub(crate) fn clear(&mut self) { self.fault = None; } }"),
+      "a trait for a replayed history": add("lifecycle/replay.rs", "impl Default for ReplayedHistory { fn default() -> ReplayedHistory { todo() } }"),
+      "a replayed history named by the live layer": add("lifecycle/live.rs", "fn from_disk(_: &ReplayedHistory) {}"),
+      "an alias of a replayed history": add("lifecycle/replay.rs", "type R = ReplayedHistory;"),
+      "a recorded history stated in production": replace("lifecycle/reconcile.rs", "    #[cfg(test)]\n    pub(crate) fn new(", "    pub(crate) fn new("),
+      "a visible assemble": replace("lifecycle/reconcile.rs", "    fn assemble(", "    pub(crate) fn assemble("),
+      "another assemble call": add("lifecycle/reconcile.rs", "fn trust(p: RunProjection) { let _ = RecordedHistory::assemble(p, HistoryStatus::Quarantined(QuarantineReason::Marker), Vec::new()); }"),
+      "another function returning a recorded history": add("lifecycle/reconcile.rs", "fn relabel(h: RecordedHistory) -> RecordedHistory { h }"),
+      "a verified status elsewhere in reconciliation": add("lifecycle/reconcile.rs", "fn v0() -> HistoryStatus { HistoryStatus::Verified }"),
+      "a verified status in the live layer": add("lifecycle/live.rs", "fn v1() -> HistoryStatus { HistoryStatus::Verified }"),
+      "a decoded frame built in replay": add("lifecycle/replay.rs", "fn f0() -> DecodedFrame { DecodedFrame { offset: 0, end: 0, events: Vec::new() } }"),
+      "a decoded stream built twice": add(codecFile, "fn f1() -> Decoded { Decoded { frames: Vec::new(), end: StreamEnd::Clean } }"),
+      "a visible decoded frame field": replace(codecFile, "    events: Vec<Event>,\n}\n\nimpl DecodedFrame", "    pub(crate) events: Vec<Event>,\n}\n\nimpl DecodedFrame"),
+      "an unverified frame carrying events": replace(codecFile, "    kinds: Vec<EventKind>,\n}", "    kinds: Vec<EventKind>,\n    events: Vec<Event>,\n}"),
+      "another derive on an unverified frame": replace(codecFile, "#[derive(Clone, Debug, PartialEq, Eq)]\npub(crate) struct UnverifiedFrame", "#[derive(Clone, Debug, PartialEq, Eq, Default)]\npub(crate) struct UnverifiedFrame"),
+      "an unverified frame read by replay": add("lifecycle/replay.rs", "fn u0(_: &super::codec::UnverifiedFrame) {}"),
+      "the audit scan called by reconciliation": add("lifecycle/reconcile.rs", "fn u1(b: &[u8]) { let _ = super::codec::scan_after_corruption(b, 0); }"),
+      "a cloneable decoded stream": replace(codecFile, "pub(crate) struct Decoded {", "#[derive(Clone)]\npub(crate) struct Decoded {"),
+      "a trait for a decoded frame": add(codecFile, "impl Clone for DecodedFrame { fn clone(&self) -> DecodedFrame { todo() } }"),
+      "a decoded frame renamed": add("lifecycle/replay.rs", "use super::codec::DecodedFrame as Frame;"),
+    };
+    for (const [name, files] of Object.entries(replayed)) {
+      expect(replayViolations(files), name).not.toEqual([]);
     }
     // The agents module may never name the lifecycle model.
     const agents = agentSources();
