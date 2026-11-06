@@ -73,6 +73,9 @@ pub(crate) enum ModelError {
     ResolutionNotAllowed,
     /// An exit status with neither or both of an exit code and an ending signal number.
     InvalidExitStatus,
+    /// An approval request offered by the wrong producer: start consent only from the supervisor, an operation
+    /// request only from the provider relay.
+    WrongProducer,
 }
 
 /// Which duration of `Limits` was out of bounds.
@@ -1216,14 +1219,176 @@ impl EventBody {
     }
 }
 
+// Drafts by producer (r5 section 3.1, closed by D3.2b-2). A draft's producer is fixed by which of these types its body
+// came from; no caller can name a producer, and each type can express only the kinds its producer may record. The
+// provider relay in particular can request an operation approval, report a session or progress, and claim failure:
+// it has no way to express a decision, a consumption, a lifecycle change, a resolution or a process exit.
+
+/// What the user records, through the future native confirmation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum UserDraft {
+    RunCreated { spec: RunSpec, spec_digest: SpecDigest },
+    AttemptCreated { attempt: AttemptNo, continuation: Continuation },
+    ApprovalDecided { approval: ApprovalId, decision: Decision, provenance: DecisionProvenance },
+    CancelRequested { scope: CancelScope },
+    RunClosed { reason: CloseReason },
+    AttentionResolved(ConcernResolution),
+}
+
+/// What the future single spawn boundary records about its own child and its own approval requests.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum SupervisorDraft {
+    /// The start consent request of a new attempt; its kind must be `start`.
+    StartRequested { request: ApprovalRequest, description: OperationDescription },
+    StartBegun { attempt: AttemptNo, approval: ApprovalId, binding: Binding },
+    AttemptStarted { attempt: AttemptNo, os_identity: OsIdentity },
+    StartFailed { attempt: AttemptNo, code: StartFailCode },
+    StopRequested { attempt: AttemptNo, reason: StopReason },
+    AttemptExited { attempt: AttemptNo, status: ExitStatus },
+    ApprovalConsumed { approval: ApprovalId, binding: Binding },
+    ApprovalExpired { approval: ApprovalId, basis: ExpiryBasis },
+    ApprovalWithdrawn { approval: ApprovalId, reason: WithdrawalReason },
+    ApprovalVoided { approval: ApprovalId, reason: VoidReason },
+}
+
+/// What the supervisor forwards from normalized provider output. Untrusted: it can add a pending request, add
+/// metadata, show activity or worsen an outcome, and nothing else.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum RelayDraft {
+    /// An operation approval request; its kind must be `operation`.
+    OperationRequested { request: ApprovalRequest, description: OperationDescription },
+    SessionObserved { attempt: AttemptNo, session: Token },
+    Progress { attempt: AttemptNo, kind: ProgressKind },
+    OutcomeClaimed { attempt: AttemptNo, claim: OutcomeClaim },
+}
+
+/// What startup reconciliation records (its rules are D3.2b-3).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ReconcilerDraft {
+    AttemptInterrupted { attempt: AttemptNo, observation: InterruptObservation },
+    AttemptNotStarted { attempt: AttemptNo, reason: NotStartedCause },
+    ApprovalWithdrawn { approval: ApprovalId, reason: WithdrawalReason },
+    ApprovalVoided { approval: ApprovalId, reason: VoidReason },
+}
+
+/// What the future storage adapter records after moving an incomplete tail to a sidecar.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum JournalDraft {
+    Repaired(JournalRepair),
+}
+
 /// What a caller asks the reducer to record. `stated_at_ms` is the raw wall-clock reading: it may be invalid, in
 /// which case the reducer keeps the previous time and marks the event `clamped` (only `RunCreated` is refused).
+///
+/// The fields are private: a draft is built only from one of the producer types above, so its producer label always
+/// matches what its body may express. An approval request's description travels beside the body, in memory only,
+/// and never becomes part of an event.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct EventDraft {
-    pub(crate) producer: Producer,
-    pub(crate) v: u16,
-    pub(crate) stated_at_ms: u64,
-    pub(crate) body: EventBody,
+    producer: Producer,
+    v: u16,
+    stated_at_ms: u64,
+    body: EventBody,
+    description: Option<OperationDescription>,
+}
+
+impl EventDraft {
+    fn new(producer: Producer, stated_at_ms: u64, body: EventBody, description: Option<OperationDescription>) -> EventDraft {
+        EventDraft { producer, v: RECORD_VERSION, stated_at_ms, body, description }
+    }
+
+    pub(crate) fn user(draft: UserDraft, stated_at_ms: u64) -> EventDraft {
+        let body = match draft {
+            UserDraft::RunCreated { spec, spec_digest } => EventBody::RunCreated { spec, spec_digest },
+            UserDraft::AttemptCreated { attempt, continuation } => EventBody::AttemptCreated { attempt, continuation },
+            UserDraft::ApprovalDecided { approval, decision, provenance } => EventBody::ApprovalDecided { approval, decision, provenance },
+            UserDraft::CancelRequested { scope } => EventBody::CancelRequested { scope },
+            UserDraft::RunClosed { reason } => EventBody::RunClosed { reason },
+            UserDraft::AttentionResolved(resolution) => EventBody::AttentionResolved(resolution),
+        };
+        EventDraft::new(Producer::User, stated_at_ms, body, None)
+    }
+
+    /// Refuses a start request whose kind is not `start` (`WrongProducer`).
+    pub(crate) fn supervisor(draft: SupervisorDraft, stated_at_ms: u64) -> Result<EventDraft, ModelError> {
+        let (body, description) = match draft {
+            SupervisorDraft::StartRequested { request, description } => {
+                if request.fields.kind != ApprovalKind::Start {
+                    return Err(ModelError::WrongProducer);
+                }
+                (EventBody::ApprovalRequested(request), Some(description))
+            }
+            SupervisorDraft::StartBegun { attempt, approval, binding } => (EventBody::StartBegun { attempt, approval, binding }, None),
+            SupervisorDraft::AttemptStarted { attempt, os_identity } => (EventBody::AttemptStarted { attempt, os_identity }, None),
+            SupervisorDraft::StartFailed { attempt, code } => (EventBody::StartFailed { attempt, code }, None),
+            SupervisorDraft::StopRequested { attempt, reason } => (EventBody::StopRequested { attempt, reason }, None),
+            SupervisorDraft::AttemptExited { attempt, status } => (EventBody::AttemptExited { attempt, status }, None),
+            SupervisorDraft::ApprovalConsumed { approval, binding } => (EventBody::ApprovalConsumed { approval, binding }, None),
+            SupervisorDraft::ApprovalExpired { approval, basis } => (EventBody::ApprovalExpired { approval, basis }, None),
+            SupervisorDraft::ApprovalWithdrawn { approval, reason } => (EventBody::ApprovalWithdrawn { approval, reason }, None),
+            SupervisorDraft::ApprovalVoided { approval, reason } => (EventBody::ApprovalVoided { approval, reason }, None),
+        };
+        Ok(EventDraft::new(Producer::Supervisor, stated_at_ms, body, description))
+    }
+
+    /// Refuses an operation request whose kind is not `operation` (`WrongProducer`): the relay can never ask for
+    /// start consent.
+    pub(crate) fn relay(draft: RelayDraft, stated_at_ms: u64) -> Result<EventDraft, ModelError> {
+        let (body, description) = match draft {
+            RelayDraft::OperationRequested { request, description } => {
+                if request.fields.kind != ApprovalKind::Operation {
+                    return Err(ModelError::WrongProducer);
+                }
+                (EventBody::ApprovalRequested(request), Some(description))
+            }
+            RelayDraft::SessionObserved { attempt, session } => (EventBody::ProviderSessionObserved { attempt, session }, None),
+            RelayDraft::Progress { attempt, kind } => (EventBody::Progress { attempt, kind }, None),
+            RelayDraft::OutcomeClaimed { attempt, claim } => (EventBody::ProviderOutcomeClaimed { attempt, claim }, None),
+        };
+        Ok(EventDraft::new(Producer::ProviderRelay, stated_at_ms, body, description))
+    }
+
+    pub(crate) fn reconciler(draft: ReconcilerDraft, stated_at_ms: u64) -> EventDraft {
+        let body = match draft {
+            ReconcilerDraft::AttemptInterrupted { attempt, observation } => EventBody::AttemptInterrupted { attempt, observation },
+            ReconcilerDraft::AttemptNotStarted { attempt, reason } => EventBody::AttemptNotStarted { attempt, reason },
+            ReconcilerDraft::ApprovalWithdrawn { approval, reason } => EventBody::ApprovalWithdrawn { approval, reason },
+            ReconcilerDraft::ApprovalVoided { approval, reason } => EventBody::ApprovalVoided { approval, reason },
+        };
+        EventDraft::new(Producer::Reconciler, stated_at_ms, body, None)
+    }
+
+    pub(crate) fn journal(draft: JournalDraft, stated_at_ms: u64) -> EventDraft {
+        let JournalDraft::Repaired(repair) = draft;
+        EventDraft::new(Producer::Journal, stated_at_ms, EventBody::JournalRepaired(repair), None)
+    }
+
+    /// Test builds only: a draft with any producer label, to prove that the reducer refuses a label its body does not
+    /// allow even if a draft were built around the typed constructors.
+    #[cfg(test)]
+    pub(crate) fn forged(producer: Producer, stated_at_ms: u64, body: EventBody) -> EventDraft {
+        EventDraft::new(producer, stated_at_ms, body, None)
+    }
+
+    pub(crate) const fn producer(&self) -> Producer {
+        self.producer
+    }
+
+    pub(crate) const fn v(&self) -> u16 {
+        self.v
+    }
+
+    pub(crate) const fn stated_at_ms(&self) -> u64 {
+        self.stated_at_ms
+    }
+
+    pub(crate) fn body(&self) -> &EventBody {
+        &self.body
+    }
+
+    pub(crate) fn description(&self) -> Option<&OperationDescription> {
+        self.description.as_ref()
+    }
 }
 
 /// One recorded event. `v`, `seq`, `at_ms` and `clamped` say when and where a fact was recorded; equality of content
@@ -1437,6 +1602,13 @@ pub(crate) enum Rejection {
     /// A batch whose shape the batch rules do not allow.
     BatchShape,
     RunQuarantined,
+    /// A request that does not match its run, a consumer whose binding differs from its request, or a decision whose
+    /// presented digest differs from the request's (r5 gate-review finding F7).
+    BindingMismatch,
+    /// A decision or consumption recorded at or after the end of its recorded window.
+    WindowClosed,
+    /// A new attempt while a blocking concern of the run is unresolved.
+    BlockingConcern,
 }
 
 /// Why replay stopped. The run is then quarantined: read-only, never repaired, never reconciled, and a blocking
