@@ -15,8 +15,8 @@ use super::model::{
     ApprovalId, ApprovalKind, ApprovalRequest, ApprovalState, AttemptNo, AttemptState, ConcernClass, ConcernRef, Decision, Event,
     EventBody, EventDraft, EventKind, ExpiryBasis, JournalSize, LiveEpoch, MonoMs, OperationDescription, Producer,
     Rejection, RunId,
-    StopReason, SupervisorDraft, VoidReason, WallMs, DeadlineKind, GRANT_USE_MS, MAX_APPROVAL_LIFETIME_MS, MAX_EVENTS,
-    MAX_WALL_MS, RESERVED_EVENTS,
+    StopReason, SupervisorDraft, VoidReason, WallMs, DeadlineKind, GRANT_USE_MS, MAX_APPROVAL_LIFETIME_MS, MAX_BATCH, MAX_EVENTS,
+    MAX_EVENT_BYTES, MAX_FRAME_BYTES, MAX_TAIL_BYTES, MAX_WALL_MS, RESERVED_EVENTS,
 };
 use super::reconcile::{is_quiescent, HistoryStatus, QuarantineReason, ReconciledFrame, RecordedHistory};
 use super::reduce::{apply, RunProjection};
@@ -453,7 +453,7 @@ impl LiveSupervision {
                 // A protected draft refused for capacity (D3.2c-1): its stop, end or repair could not be recorded, so
                 // nothing about this run may be taken as settled while it is supervised. Conservative: a protected
                 // draft in an oversized batch faults too.
-                if rejection == Rejection::LimitExceeded && drafts.iter().any(protected_draft) {
+                if rejection == Rejection::LimitExceeded && drafts.len() <= MAX_BATCH && drafts.iter().any(protected_draft) {
                     self.capacity_fault = true;
                 }
                 return refuse(LiveRefusal::Rejected(rejection), grant);
@@ -474,6 +474,18 @@ impl LiveSupervision {
             })
             .filter(|(approval, _)| applied.events.iter().any(|event| matches!(&event.body, EventBody::ApprovalRequested(request) if request.fields().approval == *approval)))
             .collect();
+        // A frame that brings the journal to a ceiling leaves no room for what may follow (the end of the attempt it
+        // stops, for example): the supervision faults now, whether the frame is then confirmed or abandoned (review of
+        // #120). Bytes are counted at the largest a frame of these events can take.
+        let stated = self.stated(size);
+        let count = u32::try_from(applied.events.len()).unwrap_or(u32::MAX);
+        let after = JournalSize {
+            events: stated.events.saturating_add(count),
+            bytes: stated.bytes.saturating_add(u64::from(count) * u64::from(MAX_EVENT_BYTES) + u64::from(MAX_TAIL_BYTES - MAX_FRAME_BYTES)),
+        };
+        if after.exhausted() {
+            self.capacity_fault = true;
+        }
         self.frames += 1;
         self.in_flight = Some((self.frames, applied.events.clone()));
         Ok(Staged { epoch: self.epoch, frame: self.frames, events: applied.events, projection: applied.projection, mono, progress, descriptions, grant })

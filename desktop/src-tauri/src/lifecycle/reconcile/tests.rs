@@ -876,3 +876,35 @@ fn a_run_opened_at_the_ceiling_opens_faulted() {
     summaries.push((7, locked(&other_run(7, T0))));
     assert_eq!(start_conflicts(&enumerated(7, summaries), &[live.held()]), Vec::from([StartConflict::CapacityExhausted(run_id())]));
 }
+
+#[test]
+fn a_frame_that_reaches_the_ceiling_faults_the_supervision_at_once() {
+    // Review of #120: a stop accepted one event short of the ceiling leaves no room for the exit. The supervision faults
+    // when the frame is staged, not at the next call, so its claim never excuses an attempt it can no longer end.
+    let (mut live, mut frames, _) = supervised_running(0, 0);
+    let edge = JournalSize { events: MAX_EVENTS + SAFETY_EVENTS - 1, bytes: 0 };
+    let staged = live.stage(&[stop(1, StopReason::JournalFull, AT)], None, MonoMs::new(7_000), edge).map_err(|r| r.refusal).unwrap();
+    assert!(live.in_capacity_fault());
+    frames.push(staged.events().to_vec());
+    live.confirm(staged).unwrap();
+    let conflicts = start_conflicts(&inventory_with(&frames), &[live.held()]);
+    assert_eq!(conflicts, Vec::from([StartConflict::Unreconciled(run_id(), n(1)), StartConflict::CapacityExhausted(run_id())]));
+    // The same by bytes: a frame that may reach the byte ceiling.
+    let (mut live, _, _) = supervised_running(0, 0);
+    let near = JournalSize { events: 10, bytes: MAX_JOURNAL_BYTES + SAFETY_JOURNAL_BYTES - 100 };
+    assert!(live.stage(&[stop(1, StopReason::JournalFull, AT)], None, MonoMs::new(7_000), near).is_ok());
+    assert!(live.in_capacity_fault());
+    // Far from either ceiling nothing faults.
+    let (mut live, _, _) = supervised_running(0, 0);
+    assert!(live.stage(&[stop(1, StopReason::JournalFull, AT)], None, MonoMs::new(7_000), size(live.projection())).is_ok());
+    assert!(!live.in_capacity_fault());
+}
+
+#[test]
+fn an_oversized_batch_is_a_caller_error_not_a_capacity_fault() {
+    let (mut live, _, _) = supervised_running(0, 0);
+    let stops: Vec<EventDraft> = (0..=MAX_BATCH).map(|_| stop(1, StopReason::JournalFull, AT)).collect();
+    let refused = live.stage(&stops, None, MonoMs::new(7_000), size(live.projection())).err().map(|r| r.refusal);
+    assert_eq!(refused, Some(LiveRefusal::Rejected(Rejection::LimitExceeded)));
+    assert!(!live.in_capacity_fault());
+}
