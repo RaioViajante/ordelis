@@ -345,7 +345,14 @@ function replayViolations(files: Record<string, string>): string[] {
     ["lifecycle/replay.rs", "projection|fault|damage|boundaries|tail"],
     ["lifecycle/reconcile.rs", "projection|status|unrecorded_repairs"],
   ]) {
-    if (new RegExp(`\\.(?:${fields})\\s*(?:[-+*/|&^]|<<|>>)?=(?!=)`).test(rustCodeOnly(files[file] ?? ""))) violations.push(`${file}: a history field assigned`);
+    const code = rustCodeOnly(files[file] ?? "");
+    if (new RegExp(`\\.(?:${fields})\\s*(?:[-+*/|&^]|<<|>>)?=(?!=)`).test(code)) violations.push(`${file}: a history field assigned`);
+    // Re-review of #118: nor changed through a mutating method, a mutable borrow of a field, or a mutable `self`, which
+    // an untyped `let mut` binding would otherwise allow.
+    const mutating = "take|replace|clear|push|pop|insert|remove|retain|truncate|drain|extend|append|get_or_insert\\w*|as_mut|iter_mut|sort\\w*|dedup\\w*|swap\\w*|fill|split_off|resize";
+    if (new RegExp(`\\.(?:${fields})\\s*\\.\\s*(?:${mutating})\\b`).test(code)) violations.push(`${file}: a history field changed by a method`);
+    if (new RegExp(`&\\s*mut\\s+[\\w.]*\\.(?:${fields})\\b`).test(code)) violations.push(`${file}: a history field borrowed mutably`);
+    if (/\bmut\s+self\b/.test(code)) violations.push(`${file}: a mutable self`);
   }
   for (const m of replay.matchAll(/\bfn\s+(\w+)([^{;]*)[{;]/g)) {
     const arrow = m[2].lastIndexOf("->");
@@ -1146,6 +1153,10 @@ describe("desktop trust boundary", () => {
       "a recorded history relabelled": add("lifecycle/reconcile.rs", "fn relabel(h: &mut RecordedHistory, v: &RecordedHistory) { h.status = v.status; }"),
       "a recorded history rebound": add("lifecycle/reconcile.rs", "fn relabel(h: RecordedHistory) { let mut x: RecordedHistory = h; }"),
       "a recorded status assigned": add("lifecycle/reconcile.rs", "fn relabel(mut h: Box<RecordedHistory>) { h.status = HistoryStatus::Quarantined(QuarantineReason::Marker); }"),
+      "repairs dropped through an untyped binding": add("lifecycle/reconcile.rs", "fn quiet(h: RecordedHistory, i: ReconcileInput) -> bool { let mut x = h; x.unrecorded_repairs.clear(); reconcile(&x, &[], i).is_ok() }"),
+      "repairs dropped through a mutable self": add("lifecycle/reconcile.rs", "impl RecordedHistory { pub(crate) fn reconcile_quietly(mut self, i: ReconcileInput) -> Result<Reconciliation, ReconcileRefused> { self.unrecorded_repairs.clear(); reconcile(&self, &[], i) } }"),
+      "a fault taken through an untyped binding": add("lifecycle/replay.rs", "pub(crate) fn with_clean(h: ReplayedHistory, f: impl FnOnce(ReplayedHistory)) { let mut r = h; r.fault.take(); f(r) }"),
+      "a field borrowed mutably": add("lifecycle/replay.rs", "fn clean(h: ReplayedHistory) { let mut r = h; wipe(&mut r.tail); }"),
       "a replay field assigned in place": add("lifecycle/replay.rs", "fn grow(h: &mut Vec<u8>, r: ReplayedHistory) { let mut r = r; r.boundaries = Vec::new(); }"),
     };
     for (const [name, files] of Object.entries(replayed)) {
