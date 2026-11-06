@@ -50,21 +50,45 @@ The minimum stable model of design r5, section 11.1:
 - **F4:** `StartFailCode::EffectNotPerformed` also covers a failed high-water-mark write.
 - **F7:** `ApprovalRequest` enforces kind and class consistency and computes the risk. The comparison of a request's `spec_digest` and target with the run's own needs the projection and is left to the reducer.
 
+### Bounds stricter than design r5
+
+r5 does not state these; the model adds them so that no value outside a sensible range can be built:
+
+- an approval lifetime of at least 1 s (r5 gives only the upper bound);
+- a non-empty operation description;
+- an exit status with exactly one of an exit code and an ending signal number (1 to 127);
+- sequence numbers and task revisions of at most 2^53 − 1, so they stay exact JSON numbers;
+- a task revision of at least 1, as `tasks.json` v1 writes it;
+- a process id other than 0;
+- a repair that removed between 1 and `MAX_TAIL_BYTES` bytes.
+
+### Names
+
+- The `JournalRepaired` body is `JournalRepair`. The name `RepairRecord` stays free for b-3's reconciliation input.
+- `SpecDigest` is an alias of `Sha256`.
+
 ## Static boundary
 
 `config.test.ts` holds the compiled `src/lifecycle*` files to the agents purity rules: no process, filesystem, network, environment, clock, thread, global state, unsafe code, FFI, Tauri, serde or libc; no command; nothing public outside the crate; no identifier that could hold a path, a search location, an argument vector or a command; and no macro other than `matches!`.
 
 Decision 12.8 amends the rules for this module:
 
-- It may reference the rest of the crate only through two whole-line imports in `lifecycle/model.rs`, each exactly once:
+- It may reference the rest of the crate only through two whole-line imports in `lifecycle/model.rs`, adjacent and in this order, as its first lines of code (only line comments before them, so no `pub(crate)` or attribute can prefix them):
   - `use crate::agents::catalog::ProviderId;`
   - `use crate::agents::evidence::{Sha256, Token};`
+- Any other copy or position is held to the full rules and fails.
 - It may not name `super`, and it may name the agents module nowhere else.
-- No identifier may suggest authorized, dispatched, enforced or terminated, in any letter case.
+- No identifier may contain authoriz/authoris, dispatch, enforc or terminat, in any letter case and at any position.
 - The agents module never names the lifecycle model.
 - `lib.rs` declares the module once, in the same pinned form as `mod agents;`, and no other compiled production file names it.
 
-Bypass fixtures pin each amendment: an alias, a renamed module, a glob, a grouped import naming more, a re-export, a spaced path, a second copy, an import in the wrong file, a full path, an authority-like name, and the usual process, file, clock, environment and macro cases. `native-sources.json` lists the new files, so the compiler's dep-info check covers them. The ten commands, their grants, the generated permissions, the dependency set and the release-isolation verifier are unchanged.
+Bypass fixtures pin each amendment:
+
+- an alias, a renamed module, a glob, a grouped import naming more;
+- a re-export, including one split over two lines;
+- a spaced path, a second copy, an import after other code, the imports swapped, an import in the wrong file, a full path;
+- authority-like names as a prefix, inside a name and as a type;
+- the usual process, file, clock, environment and macro cases. `native-sources.json` lists the new files, so the compiler's dep-info check covers them. The ten commands, their grants, the generated permissions, the dependency set and the release-isolation verifier are unchanged.
 
 ## Tests
 
@@ -95,4 +119,6 @@ Bypass fixtures pin each amendment: an alias, a renamed module, a glob, a groupe
 
 - This is vocabulary only. No transition is decided here; the reducer is the next step and is not authorized.
 - Values may still change without a schema version bump until the first persistence adapter freezes v1.
+- `EventDraft` has crate-visible fields, so any code in the crate can label a draft with any producer. r5 fixes a producer by which typed constructor built the draft. **b-2 must close this before any caller exists:** private fields, per-producer construction, and a provider-relay interface that cannot build a user draft.
+- The module allows dead code in test builds too, because nothing uses the vocabulary yet; b-2's reducer is its first user.
 - Open items from the design's gate review (recorded on #108) must be settled before b-2, b-3, b-4 or the adapter.
