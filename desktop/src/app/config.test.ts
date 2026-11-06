@@ -97,7 +97,16 @@ function lifecycleSources(): Record<string, string> {
 // flag names in notes) is never mistaken for code and code is never hidden in a comment or behind a quote character.
 // Path separators lose their surrounding spaces (`crate :: x` is `crate::x`). Raw strings are refused separately.
 const CHAR_LITERAL = /'(?:\\u\{[0-9A-Fa-f]{1,6}\}|\\x[0-9A-Fa-f]{2}|\\.|[^\\'\n])'/y;
+// Memoized: it is pure, and the bypass fixtures run every rule over every file while changing one file at a time.
+const codeOnlyCache = new Map<string, string>();
 function rustCodeOnly(text: string): string {
+  const cached = codeOnlyCache.get(text);
+  if (cached !== undefined) return cached;
+  const code = stripRust(text);
+  codeOnlyCache.set(text, code);
+  return code;
+}
+function stripRust(text: string): string {
   let out = "";
   for (let i = 0; i < text.length; ) {
     CHAR_LITERAL.lastIndex = i;
