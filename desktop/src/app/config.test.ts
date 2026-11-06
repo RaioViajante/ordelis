@@ -210,7 +210,7 @@ function lifecycleContentViolations(files: Record<string, string>): string[] {
 // built outside live.rs, and a draft's producer is fixed by its typed constructor. Returns what breaks those rules.
 const LIVE_TYPES = ["LiveGrant", "LiveSupervision", "PendingSupervision", "Staged", "Abandoned"];
 // `Name {` that builds a value: not a declaration, an impl block or a return type.
-const structLiteral = (name: string) => new RegExp(`(?<!(?:\\bstruct|\\bimpl|->)\\s*)\\b${name}\\s*\\{`, "g");
+const structLiteral = (name: string) => new RegExp(`(?<!(?:\\bstruct|\\bimpl|->|\\blet)\\s*)\\b${name}\\s*\\{`, "g");
 function liveAuthorityViolations(files: Record<string, string>): string[] {
   const violations: string[] = [];
   const live = rustCodeOnly(files["lifecycle/live.rs"] ?? "");
@@ -224,12 +224,12 @@ function liveAuthorityViolations(files: Record<string, string>): string[] {
     }
     for (const [file, text] of Object.entries(files)) {
       const code = rustCodeOnly(text);
-      if (new RegExp(`\\bimpl\\b[^{;]*\\bfor\\s+(?:[\\w:]*::)?${name}\\b`).test(code)) violations.push(`${file}: a trait is implemented for ${name}`);
+      if (new RegExp(`\\bimpl\\b[^{;]*\\bfor\\s+[(\\s]*(?:[\\w:]*::)?${name}\\b`).test(code)) violations.push(`${file}: a trait is implemented for ${name}`);
       if (file !== "lifecycle/live.rs" && new RegExp(`\\b${name}\\b`).test(code)) violations.push(`${file}: names ${name}`);
     }
   }
   // A grant is built in one place (mint), a supervision in one place (begin_new).
-  for (const name of ["LiveGrant", "LiveSupervision"]) {
+  for (const name of LIVE_TYPES) {
     const literals = live.match(structLiteral(name)) ?? [];
     if (literals.length !== 1) violations.push(`live.rs: ${name} built ${literals.length} times`);
   }
@@ -242,11 +242,14 @@ function liveAuthorityViolations(files: Record<string, string>): string[] {
     if (new RegExp(`\\b(?:${guarded})\\s+as\\b`).test(code)) violations.push(`${file}: a guarded type renamed`);
     if (/\bSelf\s*\{/.test(code)) violations.push(`${file}: a value built through Self`);
   }
-  // Only stage takes a grant by value; only confirm and mint return grants.
-  for (const m of live.matchAll(/fn\s+(\w+)\s*(?:<[^>]*>)?\s*\(([^)]*)\)\s*(?:->\s*([^{]*))?\{/g)) {
-    const [, fn, params, returns = ""] = m;
+  // Only stage (and its private check) takes a grant; only confirm returns grants, through its private settle and mint.
+  for (const m of live.matchAll(/\bfn\s+(\w+)([^{;]*)[{;]/g)) {
+    const [, fn, signature] = m;
+    const arrow = signature.lastIndexOf("->");
+    const params = arrow < 0 ? signature : signature.slice(0, arrow);
+    const returns = arrow < 0 ? "" : signature.slice(arrow);
     if (/LiveGrant/.test(params) && !["stage", "check_grant"].includes(fn)) violations.push(`live.rs: ${fn} takes a grant`);
-    if (/LiveGrant/.test(returns) && !["confirm", "mint"].includes(fn)) violations.push(`live.rs: ${fn} returns a grant`);
+    if (/LiveGrant/.test(returns) && !["confirm", "settle", "mint"].includes(fn)) violations.push(`live.rs: ${fn} returns a grant`);
   }
   // EventDraft: private fields, built by one private constructor, which the typed constructors (and the test-only
   // forging helper) call.
@@ -705,6 +708,12 @@ describe("desktop trust boundary", () => {
       "a default for an alias": add("lifecycle/live.rs", "type S = Staged;\nimpl Default for S { fn default() -> S { todo() } }"),
       "a renamed grant": add("lifecycle/live.rs", "use self::LiveGrant as G;"),
       "an alias of a draft": add("lifecycle/reduce.rs", "type D = EventDraft;"),
+      // Re-review of #114: tuple parameters, nested generics, a parenthesized impl target, another staged literal.
+      "a grant after a tuple parameter": add("lifecycle/live.rs", "fn take(_t: (u8, u8), grant: LiveGrant) {}"),
+      "a grant returned under nested generics": add("lifecycle/live.rs", "fn keep<T: Into<u8>>(_t: T) -> Option<LiveGrant> { None }"),
+      "a trait for a parenthesized type": add("lifecycle/live.rs", "impl Default for (Staged) { fn default() -> Staged { todo() } }"),
+      "a second staged frame": add("lifecycle/live.rs", "fn fake() -> Staged { Staged { frame: 0 } }"),
+      "a second pending supervision": add("lifecycle/live.rs", "fn fake() -> PendingSupervision { PendingSupervision { events: todo() } }"),
     };
     for (const [name, files] of Object.entries(authority)) {
       expect(liveAuthorityViolations(files), name).not.toEqual([]);
