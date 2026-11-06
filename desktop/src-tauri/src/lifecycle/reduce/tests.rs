@@ -984,7 +984,7 @@ fn the_reserve_keeps_room_to_stop_end_and_resolve() {
     assert_eq!(apply(&proposed.projection, &[decide(1, Decision::Granted, AT)], bytes).err(), Some(Rejection::ReserveOnly));
     let full = JournalSize { events: MAX_EVENTS, bytes: 0 };
     assert_eq!(tried_with(&journal, exited(1, 0, AT), full), None);
-    assert_eq!(tried_with(&journal, repaired(1, AT), full), Some(Rejection::LimitExceeded));
+    assert_eq!(tried_with(&journal, repaired(1, AT), full), None);
     // A frame never exceeds the batch limit.
     let many: Vec<EventDraft> = (0..=MAX_BATCH).map(|i| relay(RelayDraft::SessionObserved { attempt: n(1), session: token(&format!("s-{i}")) }, AT)).collect();
     assert_eq!(apply(&journal.projection, &many, journal.size()).err(), Some(Rejection::LimitExceeded));
@@ -1100,10 +1100,18 @@ pub(crate) fn filled(events: u32) -> Journal {
         at += PROGRESS_COALESCE_MS;
         journal.one(progress(1, at));
     }
+    // The reserve accepts repairs (capped per run) and resolutions: alternate a repair and the acknowledgement of the
+    // concern it raises, leaving `MAX_REPAIRS - 32` repairs for later.
     let mut sidecar = 1;
     while (journal.projection.events().len() as u32) < events {
-        journal.one(repaired(sidecar, at));
-        sidecar += 1;
+        let open = journal.projection.concerns().iter().find(|c| c.concern().kind() == ConcernKind::JournalRepaired && c.resolution().is_none()).map(|c| c.concern());
+        match open {
+            Some(concern) => journal.one(resolve(concern, Resolution::Acknowledged, at)),
+            None => {
+                sidecar += 1;
+                journal.one(repaired(sidecar, at))
+            }
+        };
     }
     journal
 }
@@ -1135,15 +1143,22 @@ fn repeated_clock_resolutions_no_longer_exhaust_the_reserve() {
 
 #[test]
 fn past_the_event_limit_only_the_safety_tier_is_open() {
-    // A journal holding MAX_EVENTS real events (the reserve filled with repair records, which it accepts).
-    let full = filled(MAX_EVENTS);
+    // A journal holding MAX_EVENTS real events (the reserve filled with repairs and their acknowledgements), the last
+    // a repair whose informational concern is still open.
+    let mut full = filled(MAX_EVENTS - 1);
+    full.one(repaired(MAX_REPAIRS, AT));
     assert_eq!(full.projection.events().len() as u32, MAX_EVENTS);
     let refused = |journal: &Journal, batch: Vec<EventDraft>| apply(&journal.projection, &batch, journal.size()).err();
-    // Informational and ordinary events, repeated findings and resolutions, and a repair on its own: refused.
+    // Informational and ordinary events, creations, requests, decisions, starts and closes: refused.
     assert_eq!(refused(&full, Vec::from([progress(1, T0 + 999_999_000)])), Some(Rejection::LimitExceeded));
     assert_eq!(refused(&full, Vec::from([operation(2, 1, AT)])), Some(Rejection::LimitExceeded));
-    assert_eq!(refused(&full, Vec::from([repaired(9_999, AT)])), Some(Rejection::LimitExceeded));
-    let informational = full.projection.concerns().iter().find(|c| c.concern().kind() == ConcernKind::JournalRepaired).unwrap().concern();
+    assert_eq!(refused(&approved(), Vec::from([begin(1, 1, AT)])), None);
+    let approved_full = JournalSize { events: MAX_EVENTS, bytes: 0 };
+    assert_eq!(apply(&approved().projection, &[begin(1, 1, AT)], approved_full).err(), Some(Rejection::LimitExceeded));
+    assert_eq!(apply(&Journal::new().projection, &attempt_pair(1, 1, AT), approved_full).err(), Some(Rejection::LimitExceeded));
+    // A repair on its own is admitted (a protected frame written after the attempt ended can itself tear).
+    assert_eq!(refused(&full, Vec::from([repaired(9_999, AT)])), None);
+    let informational = full.projection.concerns().iter().find(|c| c.concern().kind() == ConcernKind::JournalRepaired && c.resolution().is_none()).unwrap().concern();
     assert_eq!(refused(&full, Vec::from([resolve(informational, Resolution::Acknowledged, AT)])), Some(Rejection::LimitExceeded));
     // The attempt in flight can still report failure, be stopped, cancelled and end, live and in replay.
     let mut journal = filled(MAX_EVENTS);
@@ -1181,7 +1196,7 @@ fn the_byte_tiers_and_the_absolute_ceilings_fail_closed() {
     for bytes in [MAX_JOURNAL_BYTES, MAX_JOURNAL_BYTES + SAFETY_JOURNAL_BYTES - 1] {
         assert_eq!(tried(stop(1, StopReason::JournalFull, AT), at(base, bytes)), None);
         assert_eq!(tried(progress(1, AT), at(base, bytes)), Some(Rejection::LimitExceeded));
-        assert_eq!(tried(repaired(1, AT), at(base, bytes)), Some(Rejection::LimitExceeded));
+        assert_eq!(tried(repaired(1, AT), at(base, bytes)), None);
     }
     // At either ceiling nothing is accepted, a stop and a repair included: the run keeps blocking every start.
     for size in [at(base, MAX_JOURNAL_BYTES + SAFETY_JOURNAL_BYTES), at(MAX_EVENTS + SAFETY_EVENTS, 0), at(u32::MAX, u64::MAX)] {
@@ -1203,25 +1218,30 @@ fn the_byte_tiers_and_the_absolute_ceilings_fail_closed() {
 
 #[test]
 fn property_the_safety_tier_bounds_what_a_run_can_still_record() {
-    // From random reachable states placed in the safety tier, any sequence of drafts records at most the 14 events the
-    // tier is sized for (stop, two cancels, start identity, failure claim, end, four approval endings, two repairs and two
-    // orphan resolutions), refuses everything else, and replays to the same projection.
+    // From random reachable states placed in the safety tier, any of the drafts below, in any order, records at most the
+    // 12 non-repair events the tier is sized for (stop, two cancels, start identity, failure claim, end, four approval
+    // endings, two orphan resolutions) plus repairs (capped per run), never creates an attempt, a request, a decision, a
+    // consumption or a start, refuses everything else, and replays to the same projection.
     use crate::lifecycle::codec::tests::{random_journal, Rng};
-    let bound = 1 + 2 + 1 + 1 + 1 + usize::from(MAX_OPEN_APPROVALS) + 2 + 2;
+    let bound = 1 + 2 + 1 + 1 + 1 + usize::from(MAX_OPEN_APPROVALS) + 2;
     let (mut reached, mut exercised) = (0, 0);
     for seed in 0..400 {
         let mut rng = Rng::new(seed ^ 0xc1);
         // Even seeds: an attempt in flight in every state, with up to four open operation approvals; odd seeds: any
         // reachable state of a random journal.
         let mut journal = if seed % 2 == 0 { in_flight(&mut rng) } else { random_journal(seed, 80).0 };
-        let mut recorded = 0usize;
-        for _ in 0..120 {
+        let repairs_before = journal.projection.events().iter().filter(|e| e.body.kind() == EventKind::JournalRepaired).count();
+        let (mut recorded, mut repairs) = (0usize, 0usize);
+        for _ in 0..160 {
             let projection = &journal.projection;
-            let current = projection.current_attempt().map_or(1, |record| record.attempt().number());
+            let attempts = projection.attempts().len() as u8;
+            let current = projection.current_attempt().map_or(attempts.max(1), |record| record.attempt().number());
+            let next_k = projection.approvals().len() as u64 + 1;
             let k = 1 + rng.below(projection.approvals().len().max(1) as u64);
             let at = projection.last_at().map_or(T0, WallMs::ms) + rng.below(5_000);
             let concern = projection.concerns().iter().find(|c| c.resolution().is_none()).map(|c| c.concern());
-            let batch = match rng.below(16) {
+            let sidecar = 50_000 + rng.below(100_000) as u32;
+            let batch = match rng.below(24) {
                 0 => Vec::from([stop(current, STOP_REASONS_FOR_TESTS[rng.below(3) as usize], at)]),
                 1 => Vec::from([cancel(CancelScope::Attempt(n(current)), at)]),
                 2 => Vec::from([cancel(CancelScope::Run, at)]),
@@ -1231,7 +1251,7 @@ fn property_the_safety_tier_bounds_what_a_run_can_still_record() {
                 6 => Vec::from([relay(RelayDraft::OutcomeClaimed { attempt: n(current), claim: OutcomeClaim::Failure }, at)]),
                 7 => Vec::from([supervisor(SupervisorDraft::ApprovalExpired { approval: a(k), basis: ExpiryBasis::Monotonic }, at)]),
                 8 => Vec::from([supervisor(SupervisorDraft::ApprovalVoided { approval: a(k), reason: VoidReason::UseByPassed }, at)]),
-                9 => Vec::from([repaired(50_000 + rng.below(1_000) as u32, at), interrupted(current, InterruptObservation::Unknown, at)]),
+                9 => Vec::from([repaired(sidecar, at), repaired(sidecar + 1, at), interrupted(current, InterruptObservation::Unknown, at)]),
                 10 => Vec::from([interrupted(current, InterruptObservation::NoIdentity, at)]),
                 11 => match concern {
                     Some(concern) => {
@@ -1241,26 +1261,38 @@ fn property_the_safety_tier_bounds_what_a_run_can_still_record() {
                     None => Vec::from([progress(current, at)]),
                 },
                 12 => Vec::from([progress(current, at)]),
-                13 => Vec::from([repaired(60_000 + rng.below(1_000) as u32, at)]),
+                13 => Vec::from([repaired(sidecar, at)]),
                 14 => Vec::from([EventDraft::user(UserDraft::RunClosed { reason: CloseReason::ByUser }, at)]),
-                _ => Vec::from([decide(k, Decision::Granted, at)]),
+                15 => Vec::from([decide(k, Decision::Granted, at)]),
+                16 if attempts < MAX_ATTEMPT_RECORDS => attempt_pair(attempts + 1, next_k, at),
+                17 => Vec::from([begin(current, k, at)]),
+                18 => Vec::from([EventDraft::reconciler(ReconcilerDraft::AttemptNotStarted { attempt: n(current), reason: NotStartedCause::SupervisionLost }, at)]),
+                19 => Vec::from([operation(next_k, current, at)]),
+                20 => Vec::from([consumed(k, at)]),
+                21 => Vec::from([relay(RelayDraft::SessionObserved { attempt: n(current), session: token("session-9") }, at)]),
+                _ => Vec::from([supervisor(SupervisorDraft::ApprovalWithdrawn { approval: a(k), reason: WithdrawalReason::AttemptEnded }, at)]),
             };
             // The journal is placed in the safety tier by its stated size; the count still grows with what is recorded.
-            let size = JournalSize { events: MAX_EVENTS + recorded as u32, bytes: 0 };
+            let size = JournalSize { events: MAX_EVENTS + (recorded + repairs) as u32, bytes: 0 };
             if let Ok(applied) = apply(&journal.projection, &batch, size) {
-                assert!(
-                    applied.events.is_empty() || applied.events.iter().all(|event| event.body.kind().safety() || matches!(&event.body, EventBody::AttentionResolved(r) if r.concern().kind() == ConcernKind::PossibleOrphan) || matches!(event.body, EventBody::JournalRepaired(_))),
-                    "seed {seed}: an unprotected event was recorded in the safety tier: {:?}",
-                    applied.events.iter().map(|e| e.body.kind()).collect::<Vec<_>>()
-                );
-                recorded += applied.events.len();
+                for event in &applied.events {
+                    let admitted = event.body.kind().safety()
+                        || matches!(&event.body, EventBody::AttentionResolved(r) if r.concern().kind() == ConcernKind::PossibleOrphan);
+                    match event.body {
+                        EventBody::JournalRepaired(_) => repairs += 1,
+                        _ if admitted => recorded += 1,
+                        _ => panic!("seed {seed}: {:?} recorded in the safety tier", event.body.kind()),
+                    }
+                }
                 if !applied.events.is_empty() {
                     journal.frames.push(applied.events.clone());
                 }
                 journal.projection = applied.projection;
             }
         }
-        assert!(recorded <= bound, "seed {seed}: {recorded} events recorded in the safety tier");
+        assert!(recorded <= bound, "seed {seed}: {recorded} non-repair events recorded in the safety tier");
+        assert!(repairs_before + repairs <= MAX_REPAIRS as usize, "seed {seed}: {} repairs", repairs_before + repairs);
+        assert!(recorded + MAX_REPAIRS as usize <= SAFETY_EVENTS as usize);
         reached = reached.max(recorded);
         exercised += usize::from(recorded > 0);
         assert_eq!(journal.replayed(), journal.projection, "seed {seed}");
@@ -1268,7 +1300,7 @@ fn property_the_safety_tier_bounds_what_a_run_can_still_record() {
     // The property is not vacuous: most seeds record protected events, and some come close to the bound.
     assert!(exercised >= 200, "only {exercised} seeds recorded anything");
     assert!(reached >= 8, "at most {reached} events recorded");
-    println!("safety tier: {exercised}/400 seeds recorded events, at most {reached} (bound {bound})");
+    println!("safety tier: {exercised}/400 seeds recorded events, at most {reached} non-repair events (bound {bound})");
 }
 
 /// Attempt 1 in flight in a random state, with random open operation approvals while it runs.
@@ -1291,3 +1323,28 @@ fn in_flight(rng: &mut crate::lifecycle::codec::tests::Rng) -> Journal {
 }
 
 const STOP_REASONS_FOR_TESTS: [StopReason; 3] = [StopReason::JournalFull, StopReason::ClockFault, StopReason::Deadline(DeadlineKind::Run)];
+
+#[test]
+fn repairs_are_capped_per_run() {
+    // Repairs are admitted in every tier but the last, so they are capped: past MAX_REPAIRS the next one is refused and
+    // the run must be quarantined instead (r5 5.5). The cap keeps what repairs can take from the safety tier finite.
+    let mut journal = running();
+    for sidecar in 1..=MAX_REPAIRS {
+        journal.one(repaired(sidecar, AT));
+    }
+    assert_eq!(journal.refused(Vec::from([repaired(MAX_REPAIRS + 1, AT)])), Rejection::LimitExceeded);
+    assert_eq!(journal.refused(Vec::from([repaired(MAX_REPAIRS + 1, AT), interrupted(1, InterruptObservation::Unknown, AT)])), Rejection::LimitExceeded);
+    assert_eq!(journal.replayed(), journal.projection);
+}
+
+#[test]
+fn only_a_clock_acknowledgement_skips_the_clock_concern() {
+    // A clamped resolution of anything but `clock_irregular` still flags the clock (review of #120).
+    let mut journal = running();
+    journal.one(interrupted(1, InterruptObservation::Unknown, AT));
+    let orphan = journal.projection.concerns().iter().find(|c| c.concern().kind() == ConcernKind::PossibleOrphan).unwrap().concern();
+    let applied = journal.one(resolve(orphan, Resolution::AcceptedRisk, T0));
+    assert!(applied.events[0].clamped);
+    assert!(journal.projection.concerns().iter().any(|c| c.concern().kind() == ConcernKind::ClockIrregular && c.resolution().is_none()));
+    assert_eq!(journal.replayed(), journal.projection);
+}

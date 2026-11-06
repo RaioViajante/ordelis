@@ -16,6 +16,7 @@ use super::model::{
     StopReason, StoppedKind, VoidReason, WallMs, WithdrawalReason, GRANT_USE_MS, MAX_APPROVALS_PER_ATTEMPT,
     MAX_APPROVAL_LIFETIME_MS, MAX_ATTEMPT_RECORDS, MAX_BATCH, MAX_EVENTS, MAX_JOURNAL_BYTES, MAX_OPEN_APPROVALS,
     PROGRESS_COALESCE_MS, RECORD_VERSION, RESERVED_EVENTS, RESERVED_JOURNAL_BYTES, SAFETY_EVENTS, SAFETY_JOURNAL_BYTES,
+    MAX_REPAIRS,
 };
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -560,7 +561,13 @@ fn judge(projection: &mut RunProjection, event: Event, batch: &Batch<'_>, shape:
         None => projection.events.len(),
     };
     let journal_bytes = batch.size.map_or(0, |size| size.bytes);
-    let protected = protected(&event, batch);
+    let protected = protected(&event);
+    // Repairs are admitted in every tier but the last, so they are capped per run: past `MAX_REPAIRS` the run must be
+    // quarantined instead (r5 5.5), and repairs can never take more of the safety tier than that.
+    let repairs = || projection.events.iter().filter(|recorded| recorded.body.kind() == EventKind::JournalRepaired).count();
+    if kind == EventKind::JournalRepaired && repairs() >= MAX_REPAIRS as usize {
+        return Err(Rejection::LimitExceeded);
+    }
     match Capacity::of(journal_events, journal_bytes) {
         Capacity::Ordinary => {}
         Capacity::Reserve if kind.reserved() || kind == EventKind::JournalRepaired => {}
@@ -626,16 +633,15 @@ impl Capacity {
 }
 
 /// Whether the safety tier admits `event` (D3.2c-1): a safety kind (`EventKind::safety`), the resolution of a blocking
-/// concern, or a repair record in a frame that also ends the attempt in flight through reconciliation. Every one of these
-/// is bounded once the journal is past `MAX_EVENTS`: no attempt or request can be created there, so only the one attempt
-/// in flight and its open approvals can still produce them, each kind at most once per semantic key, and a frame that
-/// ends that attempt happens once.
-fn protected(event: &Event, batch: &Batch<'_>) -> bool {
+/// concern, or a repair record. Every one of these is bounded once the journal is past `MAX_EVENTS`: no attempt or
+/// request can be created there, so only the one attempt in flight and its open approvals can still produce the safety
+/// kinds, each at most once per semantic key; a blocking concern is resolved once; and repairs are capped per run
+/// (`MAX_REPAIRS`). A repair must be admitted on its own too: a protected frame written after the attempt ended (an
+/// orphan resolution, a run cancel) can itself be torn, and its tail must be repairable.
+fn protected(event: &Event) -> bool {
     match &event.body {
         EventBody::AttentionResolved(resolved) => resolved.concern().kind().class() == ConcernClass::Blocking,
-        EventBody::JournalRepaired(_) => batch.entries.iter().any(|(producer, body)| {
-            *producer == Producer::Reconciler && matches!(body.kind(), EventKind::AttemptInterrupted | EventKind::AttemptNotStarted)
-        }),
+        EventBody::JournalRepaired(_) => true,
         body => body.kind().safety(),
     }
 }
@@ -1190,10 +1196,12 @@ fn append(projection: &mut RunProjection, event: Event) -> Result<Verdict, Rejec
     Ok(Verdict::Append(Vec::new()))
 }
 
-/// A clamped time raises `clock_irregular`, except on a resolution (D3.2c-1): resolving a clock concern with the clock
-/// still behind would otherwise raise the next one, an unbounded loop of events. The clamp stays recorded on the event.
+/// A clamped time raises `clock_irregular`, except on the resolution of a `clock_irregular` concern (D3.2c-1):
+/// acknowledging it with the clock still behind would otherwise raise the next one, an unbounded loop of events. The
+/// clamp stays recorded on the event.
 fn push_with_clock(projection: &mut RunProjection, event: Event) {
-    if event.clamped && event.body.kind() != EventKind::AttentionResolved {
+    let resolves_clock = matches!(&event.body, EventBody::AttentionResolved(resolved) if resolved.concern().kind() == ConcernKind::ClockIrregular);
+    if event.clamped && !resolves_clock {
         raise(projection, ConcernKind::ClockIrregular, None, event.seq);
     }
     projection.push(event);

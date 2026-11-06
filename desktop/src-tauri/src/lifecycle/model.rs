@@ -28,6 +28,9 @@ pub(crate) const MAX_OPEN_APPROVALS: u8 = 4;
 pub(crate) const MAX_EVENTS: u32 = 4096;
 pub(crate) const RESERVED_EVENTS: u32 = 64;
 pub(crate) const SAFETY_EVENTS: u32 = 64;
+/// Repair records per run (D3.2c-1). Each records one torn tail moved to a sidecar; past this many the reducer refuses
+/// the next one and the run must be quarantined. Bounds what repairs can take from the safety tier.
+pub(crate) const MAX_REPAIRS: u32 = 40;
 /// Events per frame, counting generated consequences.
 pub(crate) const MAX_BATCH: usize = 8;
 /// Canonical encoding of one event at its maximal field sizes, of a frame payload, and of a repairable tail.
@@ -1076,7 +1079,7 @@ impl EventKind {
     /// Kinds accepted in the safety tier past `MAX_EVENTS` (D3.2c-1): the events that stop, start-record, end or
     /// reconcile the attempt in flight, end its approvals, and report a provider failure. Each is bounded by its
     /// semantic key or by the open approvals of the one attempt in flight. The reducer also admits there the resolution
-    /// of a blocking concern and the repair records of a frame that ends the attempt in flight; nothing else.
+    /// of a blocking concern and repair records (at most `MAX_REPAIRS` per run); nothing else.
     pub(crate) const fn safety(self) -> bool {
         matches!(
             self,

@@ -554,12 +554,15 @@ fn the_limits_fit_together() {
     // The reserve holds a stop, an exit, a reconciliation and resolutions with their consequences (under 25 events).
     assert!(RESERVED_EVENTS >= 25);
     assert!(RESERVED_JOURNAL_BYTES >= 25 * u64::from(MAX_FRAME_BYTES));
-    // The safety tier (D3.2c-1) holds everything the attempt in flight can still need once the journal is past
-    // MAX_EVENTS (stop, two cancels, start record, failure claim, end, MAX_OPEN_APPROVALS approval endings, two repairs
-    // and two orphan resolutions: 14 events) with room to spare, in events and in bytes, each event in its own frame.
-    let need = 1 + 2 + 1 + 1 + 1 + u32::from(MAX_OPEN_APPROVALS) + 2 + 2;
-    assert!(SAFETY_EVENTS >= 4 * need);
+    // The safety tier (D3.2c-1) holds everything a run can still record once the journal is past MAX_EVENTS: stop, two
+    // cancels, start record, failure claim, end, MAX_OPEN_APPROVALS approval endings and two orphan resolutions (12
+    // events), plus every repair the run may still record (at most MAX_REPAIRS), in events and in bytes, each event in
+    // its own frame.
+    let need = 1 + 2 + 1 + 1 + 1 + u32::from(MAX_OPEN_APPROVALS) + 2;
+    assert!(need + MAX_REPAIRS <= SAFETY_EVENTS);
     assert!(SAFETY_JOURNAL_BYTES >= u64::from(SAFETY_EVENTS) * u64::from(MAX_TAIL_BYTES - MAX_FRAME_BYTES + MAX_EVENT_BYTES + 2));
+    // Reconciliation's own repair bound (two owed per opening) fits under the per-run cap.
+    assert!(MAX_REPAIRS >= 2);
     // Nothing is accepted past the absolute ceilings, which stay finite and below the codec's stream bound.
     assert!(u64::from(MAX_EVENTS + SAFETY_EVENTS) < MAX_WALL_MS);
     assert!(MAX_JOURNAL_BYTES + SAFETY_JOURNAL_BYTES + 2 * u64::from(MAX_TAIL_BYTES) <= crate::lifecycle::codec::MAX_STREAM_BYTES);
