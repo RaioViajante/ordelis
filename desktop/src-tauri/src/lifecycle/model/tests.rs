@@ -386,8 +386,27 @@ fn the_reserve_keeps_room_to_stop_end_reconcile_and_resolve() {
     for kind in [EventKind::RunCreated, EventKind::AttemptCreated, EventKind::ApprovalRequested, EventKind::ApprovalDecided, EventKind::ApprovalConsumed, EventKind::StartBegun] {
         assert!(!kind.reserved(), "{kind:?}");
     }
-    // A repair is outside every limit; nothing else is.
-    assert_eq!(EventKind::ALL.into_iter().filter(|k| k.unlimited()).collect::<Vec<_>>(), [EventKind::JournalRepaired]);
+    // The safety tier (D3.2c-1) admits a subset of the reserved kinds: the ones that stop, start-record, end or reconcile
+    // the attempt in flight, end its approvals, or report a provider failure. Not a resolution, a close or a repair by
+    // kind (the reducer admits a blocking resolution and a reconciliation's repairs by content).
+    let safety: Vec<EventKind> = EventKind::ALL.into_iter().filter(|k| k.safety()).collect();
+    assert_eq!(
+        safety,
+        [
+            EventKind::ApprovalExpired,
+            EventKind::ApprovalWithdrawn,
+            EventKind::ApprovalVoided,
+            EventKind::AttemptStarted,
+            EventKind::StartFailed,
+            EventKind::StopRequested,
+            EventKind::CancelRequested,
+            EventKind::AttemptExited,
+            EventKind::AttemptInterrupted,
+            EventKind::AttemptNotStarted,
+            EventKind::ProviderOutcomeClaimed,
+        ]
+    );
+    assert!(safety.iter().all(|kind| kind.reserved()));
     let size = |events, bytes| JournalSize { events, bytes };
     assert!(!size(MAX_EVENTS - RESERVED_EVENTS - 1, 0).in_reserve());
     assert!(size(MAX_EVENTS - RESERVED_EVENTS, 0).in_reserve());
@@ -535,6 +554,15 @@ fn the_limits_fit_together() {
     // The reserve holds a stop, an exit, a reconciliation and resolutions with their consequences (under 25 events).
     assert!(RESERVED_EVENTS >= 25);
     assert!(RESERVED_JOURNAL_BYTES >= 25 * u64::from(MAX_FRAME_BYTES));
+    // The safety tier (D3.2c-1) holds everything the attempt in flight can still need once the journal is past
+    // MAX_EVENTS (stop, two cancels, start record, failure claim, end, MAX_OPEN_APPROVALS approval endings, two repairs
+    // and two orphan resolutions: 14 events) with room to spare, in events and in bytes, each event in its own frame.
+    let need = 1 + 2 + 1 + 1 + 1 + u32::from(MAX_OPEN_APPROVALS) + 2 + 2;
+    assert!(SAFETY_EVENTS >= 4 * need);
+    assert!(SAFETY_JOURNAL_BYTES >= u64::from(SAFETY_EVENTS) * u64::from(MAX_TAIL_BYTES - MAX_FRAME_BYTES + MAX_EVENT_BYTES + 2));
+    // Nothing is accepted past the absolute ceilings, which stay finite and below the codec's stream bound.
+    assert!(u64::from(MAX_EVENTS + SAFETY_EVENTS) < MAX_WALL_MS);
+    assert!(MAX_JOURNAL_BYTES + SAFETY_JOURNAL_BYTES + 2 * u64::from(MAX_TAIL_BYTES) <= crate::lifecycle::codec::MAX_STREAM_BYTES);
     assert!(MAX_OPEN_APPROVALS <= MAX_APPROVALS_PER_ATTEMPT);
     assert!(MAX_STARTED_ATTEMPTS <= MAX_ATTEMPT_RECORDS);
     assert!(GRANT_USE_MS < MAX_APPROVAL_LIFETIME_MS);

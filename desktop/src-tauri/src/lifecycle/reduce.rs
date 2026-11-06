@@ -1,6 +1,6 @@
 // The deterministic lifecycle reducer (D3.2b-2, issue #114; design r5 sections 3, 4.3, 4.4 and 4.8, with the gate
-// review's F7, F10, F12 and F14). Pure: it reads no clock, file, environment or randomness, and every time it uses is
-// a value it is given.
+// review's F7, F10, F12 and F14; hardened by D3.2c-1, issue #120: a start ends its frame, and a bounded safety tier).
+// Pure: it reads no clock, file, environment or randomness, and every time it uses is a value it is given.
 //
 // Two entry points share one transition function. `apply` takes drafts and records them (it assigns `seq`, `at_ms` and
 // `clamped`); `apply_recorded` takes one frame of events exactly as recorded. A batch or frame is applied to a copy, so
@@ -15,7 +15,7 @@ use super::model::{
     OsIdentity, Producer, Rejection, Resolution, RunId, RunSpec, RunState, SemanticKey, Seq, SpecDigest, StopCause,
     StopReason, StoppedKind, VoidReason, WallMs, WithdrawalReason, GRANT_USE_MS, MAX_APPROVALS_PER_ATTEMPT,
     MAX_APPROVAL_LIFETIME_MS, MAX_ATTEMPT_RECORDS, MAX_BATCH, MAX_EVENTS, MAX_JOURNAL_BYTES, MAX_OPEN_APPROVALS,
-    PROGRESS_COALESCE_MS, RECORD_VERSION, RESERVED_EVENTS, RESERVED_JOURNAL_BYTES,
+    PROGRESS_COALESCE_MS, RECORD_VERSION, RESERVED_EVENTS, RESERVED_JOURNAL_BYTES, SAFETY_EVENTS, SAFETY_JOURNAL_BYTES,
 };
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -300,6 +300,10 @@ pub(crate) fn apply(projection: &RunProjection, batch: &[EventDraft], size: Jour
         if !draft.body().drafted_by(draft.producer()) {
             return Err(Rejection::ProducerNotAllowed);
         }
+        // S1 (D3.2c-1): a start's record stands alone at the end of its frame, so it can be durable before any effect.
+        if draft.body().kind() == EventKind::StartBegun && index + 1 != batch.len() {
+            return Err(Rejection::StartNotLast);
+        }
         if draft.v() != RECORD_VERSION {
             return Err(Rejection::InvalidDraft);
         }
@@ -364,6 +368,10 @@ pub(crate) fn apply_recorded(projection: &RunProjection, frame: &[Event]) -> Res
     while index < frame.len() {
         let record = &frame[index];
         envelope(&next, record)?;
+        // S1 (D3.2c-1): a `StartBegun` generates no consequence, so it must be the frame's last record.
+        if record.body.kind() == EventKind::StartBegun && index + 1 != frame.len() {
+            return Err(JournalFault::StartNotLast);
+        }
         match judge(&mut next, record.clone(), &context, &mut shape).map_err(fault_of)? {
             Verdict::Append(generated) => {
                 let recorded = frame.get(index + 1..index + 1 + generated.len()).ok_or(JournalFault::ConsequenceMismatch)?;
@@ -431,6 +439,7 @@ fn fault_of(rejection: Rejection) -> JournalFault {
         Rejection::Conflict { .. } | Rejection::PartialDuplicate => JournalFault::DuplicateKey,
         Rejection::LimitExceeded | Rejection::ReserveOnly => JournalFault::LimitExceeded,
         Rejection::BatchShape => JournalFault::MixedProducerFrame,
+        Rejection::StartNotLast => JournalFault::StartNotLast,
         Rejection::InvalidDraft
         | Rejection::InvalidTime
         | Rejection::RunTerminal
@@ -543,25 +552,22 @@ fn judge(projection: &mut RunProjection, event: Event, batch: &Batch<'_>, shape:
         }
         return Err(Rejection::Conflict { existing: projection.events[existing].seq });
     }
-    // (5) Limits and reserve. A repair is outside every limit. Live, the caller's stated journal size counts (never
-    // less than what this projection holds); replaying, the event count is all there is (F14).
+    // (5) Capacity (r5 4.8, amended by D3.2c-1). Live, the caller's stated journal size counts (never less than what
+    // this projection holds); replaying, the event count is all there is (F14), so replay accepts at least what was
+    // accepted live.
     let journal_events = match batch.size {
         Some(size) => (size.events as usize).max(batch.base) + (projection.events.len() - batch.base),
         None => projection.events.len(),
     };
     let journal_bytes = batch.size.map_or(0, |size| size.bytes);
-    if !kind.unlimited() {
-        if journal_events >= MAX_EVENTS as usize || journal_bytes >= MAX_JOURNAL_BYTES {
-            return Err(Rejection::LimitExceeded);
-        }
-        let in_reserve = journal_events >= (MAX_EVENTS - RESERVED_EVENTS) as usize
-            || journal_bytes >= MAX_JOURNAL_BYTES - RESERVED_JOURNAL_BYTES;
-        if in_reserve && !kind.reserved() {
-            if event.producer == Producer::ProviderRelay {
-                return Ok(Verdict::Coalesced(CoalesceReason::Reserve));
-            }
-            return Err(Rejection::ReserveOnly);
-        }
+    let protected = protected(&event, batch);
+    match Capacity::of(journal_events, journal_bytes) {
+        Capacity::Ordinary => {}
+        Capacity::Reserve if kind.reserved() || kind == EventKind::JournalRepaired => {}
+        Capacity::Reserve if event.producer == Producer::ProviderRelay => return Ok(Verdict::Coalesced(CoalesceReason::Reserve)),
+        Capacity::Reserve => return Err(Rejection::ReserveOnly),
+        Capacity::Safety if protected => {}
+        Capacity::Safety | Capacity::Exhausted => return Err(Rejection::LimitExceeded),
     }
     // (6) Terminal run, attempt or approval.
     terminal_checks(projection, &event)?;
@@ -571,11 +577,67 @@ fn judge(projection: &mut RunProjection, event: Event, batch: &Batch<'_>, shape:
     }
     let before = projection.events.len();
     let verdict = transition(projection, event, batch)?;
-    // The event and its generated consequences must fit under the hard limit.
-    if !kind.unlimited() && journal_events + (projection.events.len() - before) > MAX_EVENTS as usize {
+    // The event and its generated consequences must fit: under `MAX_EVENTS`, or under the absolute ceiling for an event
+    // the safety tier admits. Nothing passes the ceiling.
+    let ceiling = if protected { MAX_EVENTS + SAFETY_EVENTS } else { MAX_EVENTS };
+    if journal_events + (projection.events.len() - before) > ceiling as usize {
         return Err(Rejection::LimitExceeded);
     }
     Ok(verdict)
+}
+
+/// Where a journal of `events` events and `bytes` bytes stands (r5 4.8, amended by D3.2c-1). Each dimension has the same
+/// four tiers and the journal is in the higher of its two:
+///
+/// - `Ordinary`: below `MAX_EVENTS - RESERVED_EVENTS` and `MAX_JOURNAL_BYTES - RESERVED_JOURNAL_BYTES`: any event;
+/// - `Reserve`: below `MAX_EVENTS` and `MAX_JOURNAL_BYTES`: reserved kinds and repairs (other provider-relayed drafts are
+///   coalesced, other drafts refused);
+/// - `Safety`: below `MAX_EVENTS + SAFETY_EVENTS` and `MAX_JOURNAL_BYTES + SAFETY_JOURNAL_BYTES`: only what `protected`
+///   admits;
+/// - `Exhausted`: nothing, a repair included. The run cannot record anything more; the adapter must quarantine rather
+///   than lose a record, and the run keeps blocking every start.
+///
+/// Replay knows no bytes, so it places a journal by its event count only; it therefore accepts everything the live path
+/// accepted with the same count.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Capacity {
+    Ordinary,
+    Reserve,
+    Safety,
+    Exhausted,
+}
+
+impl Capacity {
+    fn of(events: usize, bytes: u64) -> Capacity {
+        let by_events = match events as u64 {
+            n if n < u64::from(MAX_EVENTS - RESERVED_EVENTS) => Capacity::Ordinary,
+            n if n < u64::from(MAX_EVENTS) => Capacity::Reserve,
+            n if n < u64::from(MAX_EVENTS + SAFETY_EVENTS) => Capacity::Safety,
+            _ => Capacity::Exhausted,
+        };
+        let by_bytes = match bytes {
+            n if n < MAX_JOURNAL_BYTES - RESERVED_JOURNAL_BYTES => Capacity::Ordinary,
+            n if n < MAX_JOURNAL_BYTES => Capacity::Reserve,
+            n if n < MAX_JOURNAL_BYTES + SAFETY_JOURNAL_BYTES => Capacity::Safety,
+            _ => Capacity::Exhausted,
+        };
+        by_events.max(by_bytes)
+    }
+}
+
+/// Whether the safety tier admits `event` (D3.2c-1): a safety kind (`EventKind::safety`), the resolution of a blocking
+/// concern, or a repair record in a frame that also ends the attempt in flight through reconciliation. Every one of these
+/// is bounded once the journal is past `MAX_EVENTS`: no attempt or request can be created there, so only the one attempt
+/// in flight and its open approvals can still produce them, each kind at most once per semantic key, and a frame that
+/// ends that attempt happens once.
+fn protected(event: &Event, batch: &Batch<'_>) -> bool {
+    match &event.body {
+        EventBody::AttentionResolved(resolved) => resolved.concern().kind().class() == ConcernClass::Blocking,
+        EventBody::JournalRepaired(_) => batch.entries.iter().any(|(producer, body)| {
+            *producer == Producer::Reconciler && matches!(body.kind(), EventKind::AttemptInterrupted | EventKind::AttemptNotStarted)
+        }),
+        body => body.kind().safety(),
+    }
 }
 
 /// Check (6): a terminal run accepts only resolutions, repairs and reconciliation; a terminal attempt accepts no
@@ -1128,8 +1190,10 @@ fn append(projection: &mut RunProjection, event: Event) -> Result<Verdict, Rejec
     Ok(Verdict::Append(Vec::new()))
 }
 
+/// A clamped time raises `clock_irregular`, except on a resolution (D3.2c-1): resolving a clock concern with the clock
+/// still behind would otherwise raise the next one, an unbounded loop of events. The clamp stays recorded on the event.
 fn push_with_clock(projection: &mut RunProjection, event: Event) {
-    if event.clamped {
+    if event.clamped && event.body.kind() != EventKind::AttentionResolved {
         raise(projection, ConcernKind::ClockIrregular, None, event.seq);
     }
     projection.push(event);

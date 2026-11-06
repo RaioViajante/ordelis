@@ -44,9 +44,9 @@ const MAX_NESTING: usize = 8;
 /// (the version peek included). Future versions must keep it, with the frame format, so that a newer record is always
 /// read as newer rather than as damage.
 const MAX_FRAME_NESTING: usize = 64;
-/// The largest stream this codec reads. A journal accepts no ordinary event at or above MAX_JOURNAL_BYTES, so beyond
-/// it only the frame that crossed it, repair records (exempt from limits, about 200 bytes each) and one torn tail can
-/// follow; one more MiB leaves room for thousands of repairs. A longer stream is not decoded at all.
+/// The largest stream this codec reads. A journal accepts nothing at or above MAX_JOURNAL_BYTES + SAFETY_JOURNAL_BYTES
+/// (D3.2c-1), so beyond that only the frame that crossed it and one torn tail can follow; one MiB above
+/// MAX_JOURNAL_BYTES covers both with room to spare. A longer stream is not decoded at all.
 pub(crate) const MAX_STREAM_BYTES: u64 = MAX_JOURNAL_BYTES + 1024 * 1024;
 /// `scan_after_corruption` lists at most this many later frames.
 pub(crate) const MAX_UNVERIFIED_FRAMES: usize = 1024;

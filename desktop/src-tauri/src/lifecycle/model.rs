@@ -22,18 +22,23 @@ pub(crate) const MAX_ATTEMPT_RECORDS: u8 = 32;
 /// Approval requests per attempt, and open (pending or granted) approvals per attempt.
 pub(crate) const MAX_APPROVALS_PER_ATTEMPT: u8 = 64;
 pub(crate) const MAX_OPEN_APPROVALS: u8 = 4;
-/// Events per run, of which the last `RESERVED_EVENTS` accept only reserved kinds.
+/// Events per run, of which the last `RESERVED_EVENTS` accept only reserved kinds. Past `MAX_EVENTS`, a safety tier of
+/// `SAFETY_EVENTS` accepts only the bounded events that stop, end, reconcile or resolve a run (D3.2c-1); at
+/// `MAX_EVENTS + SAFETY_EVENTS` nothing at all is accepted.
 pub(crate) const MAX_EVENTS: u32 = 4096;
 pub(crate) const RESERVED_EVENTS: u32 = 64;
+pub(crate) const SAFETY_EVENTS: u32 = 64;
 /// Events per frame, counting generated consequences.
 pub(crate) const MAX_BATCH: usize = 8;
 /// Canonical encoding of one event at its maximal field sizes, of a frame payload, and of a repairable tail.
 pub(crate) const MAX_EVENT_BYTES: u32 = 2048;
 pub(crate) const MAX_FRAME_BYTES: u32 = 17_408;
 pub(crate) const MAX_TAIL_BYTES: u32 = MAX_FRAME_BYTES + 22;
-/// Journal bytes per run, of which the last `RESERVED_JOURNAL_BYTES` accept only reserved kinds.
+/// Journal bytes per run, of which the last `RESERVED_JOURNAL_BYTES` accept only reserved kinds, followed by a safety
+/// tier of `SAFETY_JOURNAL_BYTES` (as for events); at `MAX_JOURNAL_BYTES + SAFETY_JOURNAL_BYTES` nothing is accepted.
 pub(crate) const MAX_JOURNAL_BYTES: u64 = 4 * 1024 * 1024;
 pub(crate) const RESERVED_JOURNAL_BYTES: u64 = 512 * 1024;
+pub(crate) const SAFETY_JOURNAL_BYTES: u64 = 256 * 1024;
 /// The memory-only operation description, in bytes.
 pub(crate) const MAX_DESCRIPTION_BYTES: usize = 2048;
 pub(crate) const PROGRESS_COALESCE_MS: u64 = 10_000;
@@ -1068,9 +1073,25 @@ impl EventKind {
         )
     }
 
-    /// A repair can always be recorded: it is outside every limit and accepted in every run state.
-    pub(crate) const fn unlimited(self) -> bool {
-        matches!(self, EventKind::JournalRepaired)
+    /// Kinds accepted in the safety tier past `MAX_EVENTS` (D3.2c-1): the events that stop, start-record, end or
+    /// reconcile the attempt in flight, end its approvals, and report a provider failure. Each is bounded by its
+    /// semantic key or by the open approvals of the one attempt in flight. The reducer also admits there the resolution
+    /// of a blocking concern and the repair records of a frame that ends the attempt in flight; nothing else.
+    pub(crate) const fn safety(self) -> bool {
+        matches!(
+            self,
+            EventKind::AttemptStarted
+                | EventKind::StartFailed
+                | EventKind::StopRequested
+                | EventKind::CancelRequested
+                | EventKind::AttemptExited
+                | EventKind::AttemptInterrupted
+                | EventKind::AttemptNotStarted
+                | EventKind::ApprovalExpired
+                | EventKind::ApprovalWithdrawn
+                | EventKind::ApprovalVoided
+                | EventKind::ProviderOutcomeClaimed
+        )
     }
 }
 
@@ -1615,6 +1636,9 @@ pub(crate) enum Rejection {
     WindowClosed,
     /// A new attempt while a blocking concern of the run is unresolved.
     BlockingConcern,
+    /// A `StartBegun` that is not the last event of its batch: the start's record must be durable on its own before any
+    /// effect, so nothing that follows a start can share its frame (D3.2c-1).
+    StartNotLast,
 }
 
 /// Why replay stopped. The run is then quarantined: read-only, never repaired, never reconciled, and a blocking
@@ -1639,6 +1663,8 @@ pub(crate) enum JournalFault {
     CoalesceViolated,
     InvalidTransition,
     LimitExceeded,
+    /// A recorded `StartBegun` that is not the last event of its frame (D3.2c-1).
+    StartNotLast,
 }
 
 /// Why a draft was accepted without being appended.

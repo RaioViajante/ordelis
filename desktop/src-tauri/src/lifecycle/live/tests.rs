@@ -1058,3 +1058,17 @@ fn seeded_crash_reconciliation_never_carries_authority_across_a_restart() {
     assert!(stats.ready > 0 && stats.pending > 0, "ready {} pending {}", stats.ready, stats.pending);
     assert!(stats.proposals > 0);
 }
+
+#[test]
+fn a_start_batched_with_anything_is_refused_and_the_grant_comes_back() {
+    // D3.2c-1 (#120), integration review probe p4.
+    let (mut live, grant) = approved_live();
+    let before = live.projection().clone();
+    let (refusal, grant) = refusal(&mut live, Vec::from([begin(1, 1, T0 + 3_000), started(1, T0 + 3_000)]), Some(grant), 3_000);
+    assert_eq!(refusal, LiveRefusal::Rejected(Rejection::StartNotLast));
+    assert_eq!(live.projection(), &before);
+    // The same grant still records the start alone; the identity follows in its own frame.
+    commit(&mut live, Vec::from([begin(1, 1, T0 + 3_000)]), grant, 3_000);
+    commit(&mut live, Vec::from([started(1, T0 + 4_000)]), None, 4_000);
+    assert_eq!(attempt_state(&live, 1), AttemptState::Running);
+}

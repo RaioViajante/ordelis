@@ -1,6 +1,6 @@
 # Execution lifecycle contracts
 
-**Status:** Foundation. Implemented for [D3.2b-1 (#112)](https://github.com/RaioViajante/ordelis/issues/112), [D3.2b-2 (#114)](https://github.com/RaioViajante/ordelis/issues/114), [D3.2b-3 (#116)](https://github.com/RaioViajante/ordelis/issues/116) and [D3.2b-4 (#118)](https://github.com/RaioViajante/ordelis/issues/118), part of the [D3.2 design record (#108)](https://github.com/RaioViajante/ordelis/issues/108). Pure Rust in `desktop/src-tauri/src/lifecycle/`, with no command, no caller and no interface.
+**Status:** Foundation. Implemented for [D3.2b-1 (#112)](https://github.com/RaioViajante/ordelis/issues/112), [D3.2b-2 (#114)](https://github.com/RaioViajante/ordelis/issues/114), [D3.2b-3 (#116)](https://github.com/RaioViajante/ordelis/issues/116) and [D3.2b-4 (#118)](https://github.com/RaioViajante/ordelis/issues/118), hardened by [D3.2c-1 (#120)](https://github.com/RaioViajante/ordelis/issues/120), part of the [D3.2 design record (#108)](https://github.com/RaioViajante/ordelis/issues/108). Pure Rust in `desktop/src-tauri/src/lifecycle/`, with no command, no caller and no interface.
 **Scope:** the vocabulary of runs, attempts, approvals and journal events, the deterministic reducer of their state machines, the in-memory live authority of one supervised run, conservative crash reconciliation with cross-run start conflicts, and the canonical journal codec with full replay. Nothing here starts, stops, finds or observes a process, reads a clock or a file, or persists anything: the codec turns bytes it is given into values and values into bytes.
 **Related:** [Provider catalog and evidence vocabulary](desktop-agents.md) · [Execution Safety Gate](execution-safety-gate.md) · [Desktop architecture](desktop-architecture.md)
 
@@ -13,6 +13,8 @@
 | **Reducer and in-memory live authority (D3.2b-2)** | **Implemented here.** Compiled into every build, used by nothing outside its tests. |
 | **Reconciliation, `begin_reconciled` and cross-run start conflicts (D3.2b-3)** | **Implemented here.** Used by nothing outside its tests; it reads caller-supplied histories and synthetic observations only. |
 | **Codec, framing, `replay`, `ReplayedHistory` and `verify_persisted` (D3.2b-4)** | **Implemented here.** Used by nothing outside its tests; it reads caller-supplied bytes only. |
+| **Reducer safety hardening (D3.2c-1)** | **Implemented here.** A start ends its frame; a bounded safety tier past the event limit. |
+| D3.2c-2, D3.2c-3 | Approved as the next pure increments; not started. |
 | Journal persistence, approval interface, execution boundary | Not authorized; each needs its own decision. |
 
 No run can be created, stored or started today. A value of these types is a description, never permission. Live authority exists only in memory (`live.rs`), is never built from a recorded event, and never starts anything: a grant records consent for one consumption and is never Execution Safety Gate satisfaction.
@@ -35,7 +37,7 @@ The minimum stable model of design r5, section 11.1:
   - `Progress` occupies none; it is coalesced instead.
   - Every way an attempt ends shares one key, so two terminal events can never both be recorded.
 - **Producers:** `drafted_by` is the closed allow-list. The provider relay can request an operation approval, report a session or progress, and claim failure; nothing else. Since D3.2b-2 a draft is built only from a typed body per producer (below).
-- **Reserve and moves:** the reserved kinds keep room to stop, end, reconcile and resolve a run, and `JournalRepaired` is outside every limit. Only attempt events move an attempt.
+- **Reserve and moves:** the reserved kinds keep room to stop, end, reconcile and resolve a run; past the event limit, the safety kinds (D3.2c-1) do. Only attempt events move an attempt.
 - **States:** run, attempt and approval states.
   - Attempt outcomes are separated into classes: observed success, observed failure, observed stop, **unknown** and **never started**. Only an observed failure may be presented as a failure.
   - An unknown outcome counts against the started-attempt budget, because the attempt may have run.
@@ -99,8 +101,68 @@ r5 does not state these; the model adds them so that no value outside a sensible
 - **Run outcomes:** derived immediately after the attempt event that causes them. A run-scope cancel moves the run to `closing` first, so `cancelled` wins over `exhausted` (F12). `exhausted` carries the outcome class of the last attempt that may have run.
 - **Outcomes and concerns:** rule W (a provider can only turn a later zero exit into a reported failure); an exit while stopping needs the child's recorded identity and is decided by the first stop reason (F2); a start failure is `never_started` and raises no concern; every interruption raises a blocking `possible_orphan`; after a recorded repair, a not-yet-started attempt can end only as `interrupted{evidence_lost}`, never as "not started".
 - **Progress:** coalesced (accepted, not appended) within 10 s of the attempt's last recorded progress, live and in replay; a stored progress the rule would have coalesced is a `CoalesceViolated` fault.
-- **Limits and reserve:** inside the last 64 events or 512 KiB only reserved kinds are accepted; other provider-relayed drafts are `Coalesced`, other drafts `ReserveOnly`. At 4096 events or 4 MiB only a repair is accepted. A frame holds at most 8 events, generated ones included. Replay checks the reserve by event count only (F14).
+- **Limits and reserve:** inside the last 64 events or 512 KiB only reserved kinds and repairs are accepted; other provider-relayed drafts are `Coalesced`, other drafts `ReserveOnly`. Past 4096 events or 4 MiB only the bounded safety tier is open, and past its ceiling nothing at all (D3.2c-1, below). A frame holds at most 8 events, generated ones included. Replay checks every tier by event count only (F14).
 - **Recorded envelope:** a known version that never decreases (`NewerVersion`, `VersionDecreased`), this run (`WrongRun`), the next `seq` (`SeqNotFirst`, `SeqGap`), a time that never decreases (`TimeDecreased`), and `clamped` only with the previous time (`ClampedMisused`). Expiry and void timing is not checked against `at_ms` in replay (F14).
+
+## Safety hardening (D3.2c-1)
+
+Two reducer rules found by the D3.2b integrated review (findings S1 and S2), applied identically by `apply` (live, so also `stage`, `reconcile` and `begin_reconciled`) and by `apply_recorded` (replay).
+
+### A start ends its frame (S1)
+
+A `StartBegun` must be the **last event of its frame**. Anything after it in the same batch (the child's `AttemptStarted`, an exit, a stop, a cancel, a progress report, from any producer) is refused with `Rejection::StartNotLast`; a recorded frame that holds one is the fault `JournalFault::StartNotLast` and quarantines the run. A `StartBegun` generates no consequence, so on replay it is also the frame's last record. A refused batch changes nothing, and a grant handed to `stage` comes back.
+
+- **What it proves:** only that no recorded frame can show a start and its effects as one write, as r5 5.2.1 (effect after record) requires: the child's identity, exit or anything else always comes in a later frame.
+- **What it does not prove:** durability. It authorizes no execution. A future execution boundary must still require, independently, a durable `StartBegun` and high-water mark, Execution Safety Gate satisfaction, valid live consent and global start-conflict clearance before any process starts.
+
+### Bounded safety capacity (S2)
+
+Before D3.2c-1:
+- reserved kinds could fill the 64-event reserve. In particular, a clamped acknowledgement of `clock_irregular` raised the next concern each time;
+- at 4096 events every stop, end and reconciliation was refused, the run could never be reconciled, and every start stayed blocked;
+- a repair was exempt from every limit.
+
+Each dimension now has four tiers, and a journal is in the higher of its two:
+
+| Tier | Events | Bytes (live only) | Accepted |
+| --- | --- | --- | --- |
+| Ordinary | below 4 032 | below 3.5 MiB | any event |
+| Reserve | 4 032 to 4 095 | 3.5 MiB to below 4 MiB | reserved kinds and repairs; other relayed drafts `Coalesced`, others `ReserveOnly` |
+| Safety | 4 096 to 4 159 (`SAFETY_EVENTS` = 64) | 4 MiB to below 4.25 MiB (`SAFETY_JOURNAL_BYTES` = 256 KiB) | only **protected** events; anything else `LimitExceeded` |
+| Exhausted | 4 160 and above | 4.25 MiB and above | nothing, a repair included: `LimitExceeded` |
+
+What the safety tier admits:
+- **Protected events:**
+  - the safety kinds `StopRequested`, `CancelRequested`, `AttemptStarted`, `StartFailed`, `AttemptExited`, `AttemptInterrupted`, `AttemptNotStarted`, `ApprovalExpired`, `ApprovalWithdrawn`, `ApprovalVoided` and `ProviderOutcomeClaimed` (`EventKind::safety`, a subset of the reserved kinds);
+  - an `AttentionResolved` of a **blocking** concern (a possible orphan);
+  - a `JournalRepaired` **only in a frame that also ends the attempt in flight through reconciliation**.
+- **Generated consequences** count. A protected event must fit, with its consequences, under the absolute ceiling (4 160 events); any other event under 4 096. Otherwise the whole batch is refused.
+- **Not admitted:** informational resolutions (`clock_irregular`, `workspace_unknown`, `journal_repaired`), `RunClosed`, progress, sessions, requests, decisions, consumptions, starts and lone repairs.
+
+**Why 64 is enough.** Past 4 096 events no attempt or request can be created, so only the one attempt in flight and its open approvals can still produce protected events, each kind at most once per semantic key. That bounds what a run can still record to **14 events**:
+- one stop and two cancels (attempt and run);
+- the child's identity, a failure claim and the end;
+- at most four approval endings;
+- the two repairs of the one reconciliation frame;
+- at most two orphan resolutions.
+
+A seeded property test (400 seeds, any sequence of drafts from states with an attempt in flight and from arbitrary reachable states) checks the 14-event bound and that nothing unprotected is recorded. The highest count it observes is 10. In bytes, 64 events of 2 048 bytes in one-event frames fit 256 KiB.
+
+**Repeated findings and resolutions.** A resolution never raises `clock_irregular`, even when its own time was clamped: the clamp stays recorded on the event, and the loop of acknowledgements is gone. Every other clamped event still raises one concern while none is open.
+
+**Failure behaviour (fails closed):**
+- At the ceiling nothing is recorded: a stop, an end, a reconciliation frame and a repair are all refused with `LimitExceeded`. The run then stays non-terminal, or its concerns unresolved, so `start_conflicts` keeps blocking every start; no evidence is deleted to make room.
+- A refused event is never reported as recorded.
+- A process the live supervisor owns must still be stopped when its stop cannot be recorded (r5 5.8). It is not treated as stopped, because nothing records that it was.
+- Live counts the caller's stated size (events and bytes); replay counts events only and therefore accepts at least what the live path accepted with the same count. Concerns never depend on bytes, so live and replayed projections stay equal.
+
+### Differences from design r5 in D3.2c-1
+
+- r5 4.4 and 4.8 exempted `JournalRepaired` from every limit. A repair is now accepted in the ordinary and reserve tiers, past the event limit only inside a reconciliation frame, and never at the ceiling. A repair that cannot be recorded leaves the run to be quarantined (r5 5.5 already requires it).
+- r5 4.8 sized the reserve for under 25 events without counting resolutions or re-raised clock concerns. The safety tier and the non-raising resolution close that.
+- r5 3 (clock anomalies): a clamped `AttentionResolved` raises no `clock_irregular`.
+- New codes: `Rejection::StartNotLast` and `JournalFault::StartNotLast`. New constants: `SAFETY_EVENTS` and `SAFETY_JOURNAL_BYTES`.
+- None of this changes the wire format or any golden v1 fixture (no golden frame batches a start, comes near the reserve or holds a clamped resolution). v1 is still unfrozen.
 
 ## Live authority (`lifecycle/live.rs`)
 
@@ -347,9 +409,9 @@ All synthetic: no file, clock, process, network, provider or VM.
 - `verify_persisted`: every `Absent`, `Landed`, `Diverged` and `Unknown` case, including the first frame of a journal;
 - **seeded property tests** (no dependency; failing seeds go to `CODEC_REGRESSION_SEEDS`, none so far): 200 random journals from every producer (backward and absurd times included) round-trip byte for byte and reach every kind; 300 journals × 20 random mutations (bit flips, truncation, insertion, deletion, garbage, overwrites, duplication, zero tails) never panic, never lose a frame before the first changed byte, and keep every decoded frame canonical; a single bit flip anywhere in a journal is always detected at its frame; 2 000 random byte strings, half framed with a valid checksum, never panic; `verify_persisted` on every frame of 80 random journals.
 
-`lifecycle/replay/tests.rs` (15 tests): replay equals the live projection for every fixture and golden history, after every frame of 150 random journals, and for frames staged and confirmed by a live supervision; every recorded-history fault at its frame with the projection before it (another run, missing first frame, missing, repeated and swapped frames, decreasing time, a misused clamp, forged producer labels, consequences with another reason or producer, dropped or added, a second exit, a conflicting terminal state, a second start, a start before it began, a coalesced progress, a mixed frame); a corrupted middle frame, a newer version and a bad last checksum quarantining with the bytes unchanged; the derived status (marker, fault, every mark problem including acknowledged frames lost at a frame boundary, never-created); a torn tail refused without its exact repair, and refused with a repair the journal already records or a sidecar below a recorded one, and reconciled as `evidence_lost` with a new one; a property over truncated journals and random marks that never yields "not started" after a torn tail or a recorded start; contradictory repair evidence; crash recovery through `reconcile`, `begin_reconciled` and the opening frame replayed, with the orphan and the quarantine blocking every start; replayed decisions and grants never usable; and a landed uncertain decision adopted with no grant.
+`lifecycle/replay/tests.rs` (18 tests): replay equals the live projection for every fixture and golden history, after every frame of 150 random journals, and for frames staged and confirmed by a live supervision; every recorded-history fault at its frame with the projection before it (another run, missing first frame, missing, repeated and swapped frames, decreasing time, a misused clamp, forged producer labels, consequences with another reason or producer, dropped or added, a second exit, a conflicting terminal state, a second start, a start before it began, a coalesced progress, a mixed frame); a corrupted middle frame, a newer version and a bad last checksum quarantining with the bytes unchanged; the derived status (marker, fault, every mark problem including acknowledged frames lost at a frame boundary, never-created); a torn tail refused without its exact repair, and refused with a repair the journal already records or a sidecar below a recorded one, and reconciled as `evidence_lost` with a new one; a property over truncated journals and random marks that never yields "not started" after a torn tail or a recorded start; contradictory repair evidence; crash recovery through `reconcile`, `begin_reconciled` and the opening frame replayed, with the orphan and the quarantine blocking every start; replayed decisions and grants never usable; a landed uncertain decision adopted with no grant; and (D3.2c-1) a recorded start followed by anything quarantining, a run at 4 096 real events stopping, reconciling after a torn tail and resolving its orphan, and replay refusing unprotected records past the event limit.
 
-`lifecycle/reduce/tests.rs` (36 tests):
+`lifecycle/reduce/tests.rs` (41 tests):
 
 - the attempt transition table: every attempt state (12 fixtures) × every event kind, with the exact result (moved, unchanged, duplicate or refused), and each result replayed from its frames to the same projection;
 - every kind under every producer it does not allow, refused first;
@@ -360,10 +422,11 @@ All synthetic: no file, clock, process, network, provider or VM.
 - operation consumption, executable identity, first stop reason, rule W, start failures, orphans and resolutions, repairs and `evidence_lost`;
 - run outcomes (`succeeded`, `exhausted`, `cancelled` over `exhausted`, `closing`, `closed`), unknown outcomes, resume continuations;
 - clamping and absurd wall readings, `Progress` coalescing live and recorded, the reserve and hard limits, approval limits, and every recorded-envelope fault.
+- (D3.2c-1) a start followed by anything refused, live and recorded, and the valid order kept; the reproduction of integration-review probe p6 (one clock acknowledgement, then stop and exit in the reserve); the safety tier at 4 096 real events (claims, stops, cancels, exits, a reconciliation frame and an orphan resolution accepted; progress, requests, informational resolutions and lone repairs refused; replay equal); the byte tiers and both ceilings refusing everything, a stop whose consequences would cross the ceiling refused whole; and the seeded 14-event bound of the safety tier.
 
 `lifecycle/reconcile/tests.rs` (25 tests): crash before the start, with an intact journal and after a recorded or reported repair; crash after a possible start without identity; every observation kind; stale (another epoch, from the future, one millisecond too old, the exact age limit), mismatched (pid, start token, executable), contradictory and duplicate observations, and observations of ended or unknown attempts; pending and unused approvals ended only by generated consequences; a closing run; quarantine by a stored double ending and by a marker; determinism under reordered observations and idempotence (re-applied frame, reconciled result, crash before the write); late and conflicting events; refusals; `begin_reconciled` (`Ready`, `Pending`, every refusal including forged frames and a quarantined frame relabelled as verified, a sidecar reported twice, two frames of one history opening twice as the adapter-lock boundary); no historical grant or decision usable, fresh consent for a new attempt; a blocking orphan kept until an exact, allowed, user-provenanced resolution, while informational concerns never block; frames with no stop and inert recommendations; and `start_conflicts` (global orphan block across run ids and a re-registered project, every quarantine and unverified kind, lock-free and index reads, unreconciled runs, owner and impostor supervisions, a supervision ahead of its summary, pending and twice-reported repairs, unknown and incomplete inventories, contradictions, order independence, informational concerns).
 
-`lifecycle/live/tests.rs` (24 tests):
+`lifecycle/live/tests.rs` (25 tests):
 
 - the only doors (`begin_new`, `open`, `drop_pending`); reconciler drafts refused, also under `clock_fault`; frames of another supervision with the same epoch refused; minting once per fresh decision; consumption by value; grants for another approval, another supervision, nothing, or two consumptions; the grant returned on refusal;
 - monotonic expiry and voiding, the 900 s cap, decision windows, no grant for a frame that voids its approval (F13), adopted decisions that mint nothing, uncertain writes and the unresolved state (F8), dropped consumptions;
