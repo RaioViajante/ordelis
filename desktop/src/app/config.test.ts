@@ -198,7 +198,7 @@ function lifecycleContentViolations(files: Record<string, string>): string[] {
   );
   for (const [file, text] of Object.entries(stripped)) {
     const code = rustCodeOnly(text);
-    for (const pattern of [/\bagents\b/, /\w*(?:authori[sz]|dispatch|enforc|terminat|execute_now)\w*/i, /::\s*\*/]) {
+    for (const pattern of [/\bagents\b/, /\w*(?:authori[sz]|dispatch|enforc|terminat|execute_now)\w*/i, /\buse\b[^;]*\*/]) {
       const hit = code.match(pattern);
       if (hit) violations.push(`${file}: ${hit[0]}`);
     }
@@ -224,7 +224,7 @@ function liveAuthorityViolations(files: Record<string, string>): string[] {
     }
     for (const [file, text] of Object.entries(files)) {
       const code = rustCodeOnly(text);
-      if (new RegExp(`\\bimpl\\b[^{;]*\\bfor\\s+${name}\\b`).test(code)) violations.push(`${file}: a trait is implemented for ${name}`);
+      if (new RegExp(`\\bimpl\\b[^{;]*\\bfor\\s+(?:[\\w:]*::)?${name}\\b`).test(code)) violations.push(`${file}: a trait is implemented for ${name}`);
       if (file !== "lifecycle/live.rs" && new RegExp(`\\b${name}\\b`).test(code)) violations.push(`${file}: names ${name}`);
     }
   }
@@ -233,8 +233,17 @@ function liveAuthorityViolations(files: Record<string, string>): string[] {
     const literals = live.match(structLiteral(name)) ?? [];
     if (literals.length !== 1) violations.push(`live.rs: ${name} built ${literals.length} times`);
   }
+  // No other name for these types or for EventDraft (an alias could be built, returned or given a trait), and no
+  // value built through `Self`: every construction site is a named literal counted below (review of #114).
+  const guarded = [...LIVE_TYPES, "EventDraft"].join("|");
+  for (const [file, text] of Object.entries(files)) {
+    const code = rustCodeOnly(text);
+    if (new RegExp(`\\btype\\s+\\w+[^=;]*=[^;]*\\b(?:${guarded})\\b`).test(code)) violations.push(`${file}: an alias of a guarded type`);
+    if (new RegExp(`\\b(?:${guarded})\\s+as\\b`).test(code)) violations.push(`${file}: a guarded type renamed`);
+    if (/\bSelf\s*\{/.test(code)) violations.push(`${file}: a value built through Self`);
+  }
   // Only stage takes a grant by value; only confirm and mint return grants.
-  for (const m of live.matchAll(/fn\s+(\w+)\s*\(([^)]*)\)\s*(?:->\s*([^{]*))?\{/g)) {
+  for (const m of live.matchAll(/fn\s+(\w+)\s*(?:<[^>]*>)?\s*\(([^)]*)\)\s*(?:->\s*([^{]*))?\{/g)) {
     const [, fn, params, returns = ""] = m;
     if (/LiveGrant/.test(params) && !["stage", "check_grant"].includes(fn)) violations.push(`live.rs: ${fn} takes a grant`);
     if (/LiveGrant/.test(returns) && !["confirm", "mint"].includes(fn)) violations.push(`live.rs: ${fn} returns a grant`);
@@ -634,6 +643,8 @@ describe("desktop trust boundary", () => {
       "a module of the crate through super": add("lifecycle/live.rs", "use super::store;"),
       "the root through super": add("lifecycle/reduce.rs", "use super as root;"),
       "a glob of a sibling": add("lifecycle/live.rs", "use super::model::*;"),
+      "a glob inside braces": add("lifecycle/live.rs", "use super::model::{*};"),
+      "a glob in a nested tree": add("lifecycle/reduce.rs", "use super::{model::{Event, *}};"),
       "a prefix of a sibling name": add("lifecycle/reduce.rs", "use super::models;"),
       "the agents root renamed": add("lifecycle/model.rs", "use crate::agents as a;"),
       "an agents module renamed": add("lifecycle/model.rs", "use crate::agents::catalog as c;"),
@@ -683,6 +694,17 @@ describe("desktop trust boundary", () => {
       "a visible draft field": modelText("pub(crate) struct EventDraft {\n    producer: Producer,", "pub(crate) struct EventDraft {\n    pub(crate) producer: Producer,"),
       "a draft built elsewhere": add("lifecycle/reduce.rs", "fn forge() -> EventDraft { EventDraft { producer: Producer::User } }"),
       "a forging helper in production": modelText("    #[cfg(test)]\n    pub(crate) fn forged", "    pub(crate) fn forged"),
+      // Independent review of #114: construction through Self, generic signatures, aliases and paths.
+      "a grant twin through Self": add("lifecycle/live.rs", "impl LiveGrant { pub(crate) fn twin(&self) -> Self { Self { epoch: self.epoch, use_by: self.use_by } } }"),
+      "a staged frame through Self": add("lifecycle/live.rs", "impl Staged { fn fake(frame: u64) -> Self { Self { frame } } }"),
+      "a labelled draft through Self": add("lifecycle/model.rs", "impl EventDraft { pub(crate) fn labelled(producer: Producer, body: EventBody) -> Self { Self { producer, body } } }"),
+      "a generic function returning a grant": add("lifecycle/live.rs", "fn keep<'a>(&'a self) -> Option<LiveGrant> { None }"),
+      "a generic function taking a grant": add("lifecycle/live.rs", "fn take<T>(grant: LiveGrant, _t: T) {}"),
+      "a trait for an alias": add("lifecycle/live.rs", "type G = LiveGrant;\nimpl Clone for G { fn clone(&self) -> G { todo() } }"),
+      "a trait for a path": add("lifecycle/live.rs", "impl Clone for self::LiveGrant where Self: Sized { fn clone(&self) -> Self { todo() } }"),
+      "a default for an alias": add("lifecycle/live.rs", "type S = Staged;\nimpl Default for S { fn default() -> S { todo() } }"),
+      "a renamed grant": add("lifecycle/live.rs", "use self::LiveGrant as G;"),
+      "an alias of a draft": add("lifecycle/reduce.rs", "type D = EventDraft;"),
     };
     for (const [name, files] of Object.entries(authority)) {
       expect(liveAuthorityViolations(files), name).not.toEqual([]);

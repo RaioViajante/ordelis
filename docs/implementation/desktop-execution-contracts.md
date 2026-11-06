@@ -107,8 +107,8 @@ r5 does not state these; the model adds them so that no value outside a sensible
 | Type | Role | Rules |
 | --- | --- | --- |
 | `PendingSupervision` | A run being created: `begin_new` staged its `RunCreated` frame. | Holds no grant, accepts no draft. `open` makes it live after the frame is durable; `drop_pending` discards it. |
-| `LiveSupervision` | The live projection of one run during one process lifetime, with its monotonic clocks, memory-only descriptions and outstanding grants. | Built only by `begin_new` (D3.2b-3 adds `begin_reconciled`). One outstanding `Staged` at a time. |
-| `Staged` / `Abandoned` | A frame to write, and a frame whose write was uncertain. | `confirm` (durable) or `abandon` (uncertain). After `abandon` the supervision is unresolved until `adopt` (the frame landed) or `discard` (it is absent) (F8). |
+| `LiveSupervision` | The live projection of one run during one process lifetime, with its monotonic clocks, memory-only descriptions and outstanding grants. | Built only by `begin_new` (D3.2b-3 adds `begin_reconciled`). One outstanding `Staged` at a time. Refuses every reconciler draft: a supervised run is never reconciled (r5 5.4). |
+| `Staged` / `Abandoned` | A frame to write, and a frame whose write was uncertain. | `#[must_use]`. `confirm` (durable) or `abandon` (uncertain). After `abandon` the supervision is unresolved until `adopt` (the frame landed) or `discard` (it is absent) (F8). Each call accepts only the frame this supervision holds outstanding (same epoch, number, events and run, extending its current projection). A wholly duplicate or coalesced batch stages an empty frame: nothing is written, and it is still confirmed. |
 | `LiveGrant` | The only value that can consume an approval. | Minted only by `confirm`, for a decision that frame newly recorded, inside its monotonic window, for a request this supervision recorded, whose approval is still granted after the frame (F13). Bound to the epoch, run, attempt, approval, kind and exact recorded request. Consumed by value by `stage`; returned inside the refusal when `stage` refuses. Valid until `min(decision + 60 s, request + 900 s)` on the monotonic clock. |
 
 - None of these types derives or implements `Clone`, `Copy`, `Default`, `Debug` or serde, none has a field visible outside `live.rs`, and none is named by any other file. No conversion leads from an event, a projection or a recorded frame to any of them; `adopt` never mints.
@@ -120,7 +120,8 @@ r5 does not state these; the model adds them so that no value outside a sensible
 
 - `replay` over a whole journal and `ReplayedHistory` move to D3.2b-4 with the codec (#108 records "b-4: the codec and replay"). `apply_recorded` over one in-memory frame is here, so live and recorded projections are compared now.
 - `begin_new` takes the run id, because a `RunCreated` body carries none.
-- `confirm`, `abandon`, `adopt` and `discard` return a `LiveRefusal` for a frame that is not this supervision's outstanding one.
+- `confirm`, `abandon`, `adopt` and `discard` return a `LiveRefusal` for a frame that is not this supervision's outstanding one, compared by its events and projection as well as its epoch, so two supervisions given the same epoch by mistake cannot exchange frames.
+- `stage` refuses reconciler drafts (`LiveRefusal::Reconciliation`); r5 states this only for the adapter (5.4).
 - Three rejection codes make refusals precise: `BindingMismatch`, `WindowClosed` and `BlockingConcern`.
 - `AttemptInterrupted` must fit what was recorded: `no_identity` exactly when no child identity was recorded, `evidence_lost` only after a repair.
 - A `clock_irregular` concern can be raised by a provider-relayed event whose stated time was clamped. The stated time is Ordelis's own reading, never the provider's, so invariant I6 is read as "no relay event changes a lifecycle state, a decision or a concern from its content".
@@ -151,9 +152,10 @@ Bypass fixtures pin each amendment:
 D3.2b-2 adds pins for live authority and draft construction, each with a bypass fixture:
 
 - `LiveGrant`, `LiveSupervision`, `PendingSupervision`, `Staged` and `Abandoned` are declared once in `live.rs` with no attribute but `#[must_use]`, have no visible field, have no trait implemented for them anywhere, and are named by no other file.
-- A `LiveGrant` and a `LiveSupervision` are each built in exactly one place. Only `stage` (and its private check) takes a grant; only `confirm` (and its private mint) returns grants.
+- A `LiveGrant` and a `LiveSupervision` are each built in exactly one place. Only `stage` (and its private check) takes a grant; only `confirm` (and its private mint) returns grants, generic signatures included.
 - `EventDraft` has no visible field and is built in one place; no other file builds one; `forged` is test-only.
-- Fixtures: a cloneable grant, a formattable supervision, a trait implemented by hand, a visible field, a second construction site, another function taking or returning a grant, a reducer naming a grant, a visible draft field, a draft built elsewhere, a forging helper in production; `super` from the root, to the crate root, to another crate module, spaced, aliased or as a glob; and a process, a clock, a sleep, a launch word or serde in the new files.
+- No lifecycle file builds a value through `Self { … }`, aliases or renames a guarded type, or implements a trait for one through a path; no `use` tree holds a glob.
+- Fixtures: a cloneable grant, a formattable supervision, a trait implemented by hand, through an alias or through a path, a visible field, a second construction site, construction through `Self` (a grant twin, a staged frame, a labelled draft), another function taking or returning a grant (plain or generic), a renamed grant, an aliased draft, a reducer naming a grant, a visible draft field, a draft built elsewhere, a forging helper in production; `super` from the root, to the crate root, to another crate module, spaced, aliased, as a glob or as a glob inside braces; and a process, a clock, a sleep, a launch word or serde in the new files.
 
 `native-sources.json` lists the new files, so the compiler's dep-info check covers them. The ten commands, their grants, the generated permissions, the dependency set and the release-isolation verifier are unchanged.
 
@@ -173,12 +175,12 @@ All synthetic: no file, clock, process, network, provider or VM.
 - run outcomes (`succeeded`, `exhausted`, `cancelled` over `exhausted`, `closing`, `closed`), unknown outcomes, resume continuations;
 - clamping and absurd wall readings, `Progress` coalescing live and recorded, the reserve and hard limits, approval limits, and every recorded-envelope fault.
 
-`lifecycle/live/tests.rs` (21 tests):
+`lifecycle/live/tests.rs` (23 tests):
 
-- the only doors (`begin_new`, `open`, `drop_pending`); minting once per fresh decision; consumption by value; grants for another approval, another supervision, nothing, or two consumptions; the grant returned on refusal;
+- the only doors (`begin_new`, `open`, `drop_pending`); reconciler drafts refused, also under `clock_fault`; frames of another supervision with the same epoch refused; minting once per fresh decision; consumption by value; grants for another approval, another supervision, nothing, or two consumptions; the grant returned on refusal;
 - monotonic expiry and voiding, the 900 s cap, decision windows, no grant for a frame that voids its approval (F13), adopted decisions that mint nothing, uncertain writes and the unresolved state (F8), dropped consumptions;
 - clock regressions at `due` and `stage`, safety drafts and the child identity under `clock_fault` (F2), deadline and expiry precedence (F1), the wall clock only closing windows, coalesced progress and the stall clock, overflow, memory-only descriptions;
-- **seeded property test** (decision 12.14): a hand-rolled SplitMix64 generator, 400 seeds × 160 steps, drives drafts from every producer, forged labels, clock regressions, absurd and backward wall readings, reserve sizes, wrong grants and uncertain writes through `stage`/`confirm`/`abandon`/`adopt`/`discard`. After every step it checks invariants I1–I14 of r5 section 9, that grants come only from fresh granted decisions, that `due` never repeats a key and always stages as one batch, and that the recorded frames alone rebuild the live projection. Each seed runs twice and must give the same journal. The run asserts that every event kind is reached. Seeds that ever fail are kept in `REGRESSION_SEEDS` (none has failed in the final implementation).
+- **seeded property test** (decision 12.14): a hand-rolled SplitMix64 generator, 400 seeds × 160 steps, drives drafts from every producer, forged labels, clock regressions, absurd and backward wall readings, reserve sizes, wrong grants and uncertain writes through `stage`/`confirm`/`abandon`/`adopt`/`discard`. After every step it checks invariants I1–I14 of r5 section 9, that grants come only from fresh granted decisions, that reconciler drafts are always refused, that `due` never repeats a key and always stages as one batch, and that the recorded frames alone rebuild the live projection. Each seed runs twice and must give the same journal. The run asserts that every kind a supervised run can record is reached (the reconciler-only ends are covered by the reducer tests). Seeds that ever fail are kept in `REGRESSION_SEEDS` (none has failed in the final implementation).
 
 `lifecycle/model/tests.rs`, with synthetic values only:
 

@@ -12,7 +12,7 @@
 // nothing here, or anywhere in the lifecycle module, turns it or a staged frame into a process start.
 use super::model::{
     ApprovalId, ApprovalKind, ApprovalRequest, ApprovalState, AttemptNo, AttemptState, Decision, Event, EventBody,
-    EventDraft, EventKind, ExpiryBasis, JournalSize, LiveEpoch, MonoMs, OperationDescription, Rejection, RunId,
+    EventDraft, EventKind, ExpiryBasis, JournalSize, LiveEpoch, MonoMs, OperationDescription, Producer, Rejection, RunId,
     StopReason, SupervisorDraft, VoidReason, WallMs, DeadlineKind, GRANT_USE_MS, MAX_APPROVAL_LIFETIME_MS, MAX_EVENTS,
     MAX_WALL_MS, RESERVED_EVENTS,
 };
@@ -57,11 +57,11 @@ pub(crate) struct LiveSupervision {
     last_mono: MonoMs,
     /// Entered on a monotonic regression and never left: no decision, consumption or grant, only safety drafts.
     clock_fault: bool,
-    /// Frames staged so far; the number identifies the outstanding one.
+    /// Frames staged so far; the number, with the frame's events, identifies the outstanding one.
     frames: u64,
-    in_flight: Option<u64>,
+    in_flight: Option<(u64, Vec<Event>)>,
     /// An abandoned frame not yet adopted or discarded (F8): nothing can be staged until it is.
-    unresolved: Option<u64>,
+    unresolved: Option<(u64, Vec<Event>)>,
     approvals: Vec<ApprovalClock>,
     attempts: Vec<AttemptClock>,
     descriptions: Vec<(ApprovalId, OperationDescription)>,
@@ -83,12 +83,16 @@ struct AttemptClock {
 }
 
 /// A run being created: its `RunCreated` frame is staged and not yet durable. It holds no grant and accepts no draft.
+#[must_use]
 pub(crate) struct PendingSupervision {
     live: LiveSupervision,
     events: Vec<Event>,
 }
 
-/// A frame staged for writing. Consumed by exactly one of `confirm` (durable) or `abandon` (uncertain or failed).
+/// A frame staged for writing. Consumed by exactly one of `confirm` (durable) or `abandon` (uncertain or failed);
+/// dropping it leaves the supervision unable to stage anything. Its `events` are empty when the whole batch was a
+/// duplicate or was coalesced: nothing is written, and it is still confirmed.
+#[must_use]
 pub(crate) struct Staged {
     epoch: LiveEpoch,
     frame: u64,
@@ -103,6 +107,7 @@ pub(crate) struct Staged {
 }
 
 /// A frame whose write was uncertain. It mints nothing; `adopt` (it landed) or `discard` (it is absent) resolves it.
+#[must_use]
 pub(crate) struct Abandoned {
     epoch: LiveEpoch,
     frame: u64,
@@ -135,6 +140,9 @@ pub(crate) enum LiveRefusal {
     GrantMismatch,
     /// A staged or abandoned frame that is not this supervision's outstanding one.
     NotThisSupervision,
+    /// A reconciler draft: a supervised run is never reconciled (r5 5.4); reconciliation opens a run instead
+    /// (D3.2b-3).
+    Reconciliation,
 }
 
 /// A refused `stage`. The grant, if one was handed over, comes back: it stays single-use because only one exists.
@@ -270,6 +278,9 @@ impl LiveSupervision {
         if self.unresolved.is_some() {
             return refuse(LiveRefusal::Unresolved, grant);
         }
+        if drafts.iter().any(|draft| draft.producer() == Producer::Reconciler) {
+            return refuse(LiveRefusal::Reconciliation, grant);
+        }
         if self.clock_fault && (grant.is_some() || drafts.iter().any(|draft| !safe_in_clock_fault(draft.body().kind()))) {
             return refuse(LiveRefusal::ClockFault, grant);
         }
@@ -313,7 +324,7 @@ impl LiveSupervision {
             .filter(|(approval, _)| applied.events.iter().any(|event| matches!(&event.body, EventBody::ApprovalRequested(request) if request.fields().approval == *approval)))
             .collect();
         self.frames += 1;
-        self.in_flight = Some(self.frames);
+        self.in_flight = Some((self.frames, applied.events.clone()));
         Ok(Staged { epoch: self.epoch, frame: self.frames, events: applied.events, projection: applied.projection, mono, progress, descriptions, grant })
     }
 
@@ -356,7 +367,7 @@ impl LiveSupervision {
     /// newly granted, if the approval is still granted after the frame (F13). Call only after the adapter reports the
     /// frame durable.
     pub(crate) fn confirm(&mut self, staged: Staged) -> Result<Vec<LiveGrant>, LiveRefusal> {
-        if staged.epoch != self.epoch || self.in_flight != Some(staged.frame) {
+        if !self.is_next(staged.epoch, &staged.projection, &staged.events, self.in_flight.as_ref(), staged.frame) {
             return Err(LiveRefusal::NotThisSupervision);
         }
         self.in_flight = None;
@@ -370,11 +381,10 @@ impl LiveSupervision {
     /// The staged frame's write was uncertain or failed. Nothing is minted, a consumed grant is dropped (consumptions
     /// are never retried), and the supervision stays unresolved until `adopt` or `discard` (F8).
     pub(crate) fn abandon(&mut self, staged: Staged) -> Result<Abandoned, LiveRefusal> {
-        if staged.epoch != self.epoch || self.in_flight != Some(staged.frame) {
+        if !self.is_next(staged.epoch, &staged.projection, &staged.events, self.in_flight.as_ref(), staged.frame) {
             return Err(LiveRefusal::NotThisSupervision);
         }
-        self.in_flight = None;
-        self.unresolved = Some(staged.frame);
+        self.unresolved = self.in_flight.take();
         let Staged { epoch, frame, events, projection, mono, progress, descriptions, grant } = staged;
         if let Some(grant) = grant {
             self.outstanding.retain(|approval| *approval != grant.approval);
@@ -386,7 +396,7 @@ impl LiveSupervision {
     /// truth, so the live projection takes it. Nothing is minted; the caller records what r5 5.4 requires (for example
     /// `ApprovalVoided{write_uncertain}` for a landed grant).
     pub(crate) fn adopt(&mut self, abandoned: Abandoned) -> Result<(), LiveRefusal> {
-        if abandoned.epoch != self.epoch || self.unresolved != Some(abandoned.frame) {
+        if !self.is_next(abandoned.epoch, &abandoned.projection, &abandoned.events, self.unresolved.as_ref(), abandoned.frame) {
             return Err(LiveRefusal::NotThisSupervision);
         }
         self.unresolved = None;
@@ -397,11 +407,23 @@ impl LiveSupervision {
 
     /// The abandoned frame is absent from the file: nothing changes, and its non-consumption drafts may be staged again.
     pub(crate) fn discard(&mut self, abandoned: Abandoned) -> Result<(), LiveRefusal> {
-        if abandoned.epoch != self.epoch || self.unresolved != Some(abandoned.frame) {
+        if !self.is_next(abandoned.epoch, &abandoned.projection, &abandoned.events, self.unresolved.as_ref(), abandoned.frame) {
             return Err(LiveRefusal::NotThisSupervision);
         }
         self.unresolved = None;
         Ok(())
+    }
+
+    /// Whether a staged or abandoned frame is the one this supervision holds outstanding (`expected`): same epoch, same
+    /// frame number and events, same run, and a projection that is the current one plus exactly that frame. Epochs are
+    /// unique only by the caller's promise; this keeps a frame of another supervision from replacing this one's history.
+    fn is_next(&self, epoch: LiveEpoch, projection: &RunProjection, events: &[Event], expected: Option<&(u64, Vec<Event>)>, frame: u64) -> bool {
+        let current = self.projection.events();
+        epoch == self.epoch
+            && expected.is_some_and(|(number, held)| *number == frame && held.as_slice() == events)
+            && projection.run() == self.projection.run()
+            && projection.events().len() == current.len() + events.len()
+            && projection.events().starts_with(current)
     }
 
     /// Takes a frame into the live projection and records the monotonic clocks it starts. Mints only when `mint` is

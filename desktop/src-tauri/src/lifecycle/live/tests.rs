@@ -259,6 +259,37 @@ fn a_frame_is_confirmed_only_by_its_own_supervision() {
 }
 
 #[test]
+fn a_supervised_run_is_never_reconciled() {
+    // r5 5.4: reconciliation is for a run nobody supervises. A reconciler void here would leave the attempt approved
+    // with nothing to end it, and an interruption would end an attempt whose child this supervision still owns.
+    let (mut live, grant) = approved_live();
+    let void = EventDraft::reconciler(ReconcilerDraft::ApprovalVoided { approval: a(1), reason: VoidReason::SupervisionLost }, T0 + 3_000);
+    let (why, back) = refusal(&mut live, Vec::from([void]), Some(grant), 3_000);
+    assert_eq!(why, LiveRefusal::Reconciliation);
+    assert!(back.is_some());
+    let mut live = running_live();
+    assert_eq!(refusal(&mut live, Vec::from([interrupted(1, InterruptObservation::PossiblyRunning, T0 + 5_000)]), None, 5_000).0, LiveRefusal::Reconciliation);
+    // Also under clock_fault, where withdrawals and voids are otherwise accepted.
+    let _ = live.due(m(1), T0 + 5_000, size_of(&live));
+    let withdraw = EventDraft::reconciler(ReconcilerDraft::ApprovalWithdrawn { approval: a(1), reason: WithdrawalReason::SupervisionLost }, T0 + 5_000);
+    assert_eq!(refusal(&mut live, Vec::from([withdraw]), None, 5_000).0, LiveRefusal::Reconciliation);
+    assert_eq!(attempt_state(&live, 1), AttemptState::Running);
+}
+
+#[test]
+fn a_frame_of_another_supervision_with_the_same_epoch_is_refused() {
+    // Epochs are unique only by the caller's promise; a frame must also extend this supervision's own projection.
+    let mut first = live();
+    let mut second = live();
+    let theirs = staged(&mut first, attempt_pair(1, 1, T0 + 1_000), None, 1_000);
+    let mine = staged(&mut second, Vec::from([cancel(CancelScope::Run, T0 + 1_000)]), None, 1_000);
+    assert_eq!(second.confirm(theirs).err(), Some(LiveRefusal::NotThisSupervision));
+    assert!(second.confirm(mine).ok().unwrap().is_empty());
+    assert_eq!(second.projection().state(), Some(RunState::Cancelled));
+    assert!(second.projection().attempts().is_empty());
+}
+
+#[test]
 fn a_monotonic_regression_leaves_only_safety_drafts() {
     // Starting attempt, held operation-free: the clock goes back.
     let (mut live, grant) = approved_live();
@@ -577,7 +608,9 @@ impl World {
         let creates = drafts.first().is_some_and(|d| d.body().kind() == EventKind::AttemptCreated);
         let relay_only = drafts.iter().all(|d| d.producer() == Producer::ProviderRelay);
         let blocked = before.has_unresolved_blocking_concern();
+        let reconciling = drafts.iter().any(|d| d.producer() == Producer::Reconciler);
         match self.live.stage(&drafts, grant, MonoMs::new(mono), size) {
+            Ok(_) if reconciling => panic!("a supervised run accepted a reconciler draft"),
             Err(refused) => {
                 if let Some(grant) = refused.grant {
                     self.grants.push(grant);
@@ -800,9 +833,11 @@ fn seeded_property_runs_keep_every_invariant_and_replay_identically() {
             }
         }
     }
-    // The generator reaches every kind and the interesting states, not only refusals.
+    // The generator reaches every kind a supervised run can record, and the interesting states, not only refusals.
+    // Interruption and supervision-lost ends come only from reconciliation, which a supervised run refuses.
     for (kind, count) in &kinds {
-        assert!(*count > 0, "the generator never recorded {kind:?}");
+        let reconciler_only = matches!(kind, EventKind::AttemptInterrupted | EventKind::AttemptNotStarted);
+        assert_eq!(*count > 0, !reconciler_only, "{kind:?} recorded {count} times");
     }
     assert!(minted > SEEDS as usize / 2, "few grants were minted: {minted}");
     assert!(events > (SEEDS as usize) * 10, "few events were recorded: {events}");
