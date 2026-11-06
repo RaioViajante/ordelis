@@ -4,8 +4,11 @@
 // Authorization is enforced by the app manifest in build.rs plus capabilities/default.json.
 // See docs/implementation/desktop-architecture.md.
 // The provider catalog and evidence vocabulary (agents.rs) are pure data with no command and no caller yet.
+// So is the execution lifecycle model (lifecycle.rs), which only names agents' provider id and evidence types.
 #[cfg_attr(not(test), allow(dead_code))]
 mod agents;
+#[cfg_attr(not(test), allow(dead_code))]
+mod lifecycle;
 mod projects;
 mod runtime_bridge;
 #[cfg(target_os = "macos")]
