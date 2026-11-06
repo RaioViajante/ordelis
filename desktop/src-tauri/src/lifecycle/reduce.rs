@@ -602,7 +602,8 @@ fn judge(projection: &mut RunProjection, event: Event, batch: &Batch<'_>, shape:
 /// - `Safety`: below `MAX_EVENTS + SAFETY_EVENTS` and `MAX_JOURNAL_BYTES + SAFETY_JOURNAL_BYTES`: only what `protected`
 ///   admits;
 /// - `Exhausted`: nothing, a repair included. The run cannot record anything more; the adapter must quarantine rather
-///   than lose a record, and the run keeps blocking every start.
+///   than lose a record. An unsupervised history then blocks every start through reconciliation; a supervised one through
+///   its live supervision's capacity fault (live.rs).
 ///
 /// Replay knows no bytes, so it places a journal by its event count only; it therefore accepts everything the live path
 /// accepted with the same count.

@@ -1452,6 +1452,11 @@ impl JournalSize {
     pub(crate) const fn in_reserve(self) -> bool {
         self.events >= MAX_EVENTS - RESERVED_EVENTS || self.bytes >= MAX_JOURNAL_BYTES - RESERVED_JOURNAL_BYTES
     }
+
+    /// At either absolute ceiling (D3.2c-1): nothing at all can be recorded.
+    pub(crate) const fn exhausted(self) -> bool {
+        self.events >= MAX_EVENTS + SAFETY_EVENTS || self.bytes >= MAX_JOURNAL_BYTES + SAFETY_JOURNAL_BYTES
+    }
 }
 
 // ---------------------------------------------------------------------------------------------------------------

@@ -2,7 +2,7 @@
 // nothing reads a file, a clock or a process table, and nothing is started or stopped.
 use super::*;
 use crate::agents::catalog::ProviderId;
-use crate::lifecycle::live::{begin_new, begin_reconciled, open, BeginRefused, LiveRefusal, LiveSupervision, Opening};
+use crate::lifecycle::live::{begin_new, begin_reconciled, open, BeginRefused, LiveGrant, LiveRefusal, LiveSupervision, Opening};
 use crate::lifecycle::model::*;
 use crate::lifecycle::reduce::tests::*;
 use crate::lifecycle::reduce::{apply_recorded, Applied};
@@ -724,4 +724,155 @@ fn informational_concerns_never_block_a_start() {
     assert!(failed.projection().concerns().iter().any(|c| c.concern().kind() == ConcernKind::WorkspaceUnknown && c.resolution().is_none()));
     let inventory = enumerated(7, (1..=6).map(|number| (number, RunSummary::NeverCreated)).chain([(7, locked(&failed))]).collect());
     assert_eq!(start_conflicts(&inventory, &[]), Vec::new());
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// D3.2c-1 (#120): a capacity-faulted supervision excuses nothing
+
+const EXHAUSTED: JournalSize = JournalSize { events: MAX_EVENTS + SAFETY_EVENTS, bytes: 0 };
+
+/// Stages and confirms one frame of `live`, keeping its events in `frames`, and returns the grants it minted.
+fn committed(live: &mut LiveSupervision, frames: &mut Vec<Vec<Event>>, drafts: Vec<EventDraft>, grant: Option<LiveGrant>, mono: u64) -> Vec<LiveGrant> {
+    let size = size(live.projection());
+    let staged = match live.stage(&drafts, grant, MonoMs::new(mono), size) {
+        Ok(staged) => staged,
+        Err(refused) => panic!("{:?}", refused.refusal),
+    };
+    frames.push(staged.events().to_vec());
+    match live.confirm(staged) {
+        Ok(grants) => grants,
+        Err(refusal) => panic!("{refusal:?}"),
+    }
+}
+
+/// r7 supervised from its creation, attempt 1 running, with `requests` operation requests of which the first `granted`
+/// are granted; returns the supervision, its recorded frames and the outstanding operation grants.
+fn supervised_running(requests: u64, granted: u64) -> (LiveSupervision, Vec<Vec<Event>>, Vec<LiveGrant>) {
+    let pending = begin_new(EPOCH, run_id(), created(T0), MonoMs::new(0)).unwrap();
+    let mut frames = Vec::from([pending.events().to_vec()]);
+    let mut live = open(pending);
+    committed(&mut live, &mut frames, attempt_pair(1, 1, T0 + 1_000), None, 1_000);
+    let mut start = committed(&mut live, &mut frames, Vec::from([decide(1, Decision::Granted, T0 + 2_000)]), None, 2_000);
+    committed(&mut live, &mut frames, Vec::from([begin(1, 1, T0 + 3_000)]), start.pop(), 3_000);
+    committed(&mut live, &mut frames, Vec::from([started(1, T0 + 4_000)]), None, 4_000);
+    let mut grants = Vec::new();
+    for k in 2..2 + requests {
+        let mono = 5_000 + 100 * k;
+        committed(&mut live, &mut frames, Vec::from([operation(k, 1, T0 + mono)]), None, mono);
+        if k < 2 + granted {
+            grants.extend(committed(&mut live, &mut frames, Vec::from([decide(k, Decision::Granted, T0 + mono + 50)]), None, mono + 50));
+        }
+    }
+    (live, frames, grants)
+}
+
+/// The summary of r7 as recorded in `frames`, with clean runs around it: r1 (same project, registered again later),
+/// r2 to r6 never created, and r8 (a new run id).
+fn inventory_with(frames: &[Vec<Event>]) -> RunInventory {
+    let projection = frames.iter().fold(RunProjection::empty(run_id()), |p, frame| apply_recorded(&p, frame).unwrap());
+    let r7 = locked(&RecordedHistory::new(projection, HistoryStatus::Verified, Vec::new()));
+    let mut summaries = Vec::from([(1, locked(&other_run(1, T0 + 9_000)))]);
+    summaries.extend((2..=6).map(|number| (number, RunSummary::NeverCreated)));
+    summaries.push((7, r7));
+    summaries.push((8, locked(&other_run(8, T0))));
+    enumerated(8, summaries)
+}
+
+#[test]
+fn a_supervision_at_the_ceiling_blocks_every_start_while_it_holds_its_run() {
+    let (mut live, frames, _) = supervised_running(0, 0);
+    // Held and healthy: the running attempt is excused, as for any supervised attempt.
+    assert_eq!(start_conflicts(&inventory_with(&frames), &[live.held()]), Vec::new());
+    // A stop stated at the ceiling is refused; the attempt stays running and nothing is recorded or settled.
+    let refused = live.stage(&[stop(1, StopReason::JournalFull, AT)], None, MonoMs::new(7_000), EXHAUSTED).err().map(|r| r.refusal);
+    assert_eq!(refused, Some(LiveRefusal::Rejected(Rejection::LimitExceeded)));
+    assert!(live.in_capacity_fault());
+    assert_eq!(live.projection().attempt(n(1)).unwrap().state(), AttemptState::Running);
+    // The claim now excuses nothing: the run blocks every start, whatever the run id or the project registration.
+    let conflicts = start_conflicts(&inventory_with(&frames), &[live.held()]);
+    assert_eq!(conflicts, Vec::from([StartConflict::Unreconciled(run_id(), n(1)), StartConflict::CapacityExhausted(run_id())]));
+    // A later, smaller stated size never clears the fault. A stop that fits is still recorded (evidence is kept), and
+    // the run still blocks while held.
+    let mut frames = frames;
+    committed(&mut live, &mut frames, Vec::from([stop(1, StopReason::JournalFull, AT)]), None, 8_000);
+    assert!(live.in_capacity_fault());
+    assert_eq!(live.projection().attempt(n(1)).unwrap().state(), AttemptState::Stopping(StopCause::JournalFull));
+    assert!(start_conflicts(&inventory_with(&frames), &[live.held()]).contains(&StartConflict::CapacityExhausted(run_id())));
+    // Only safety drafts are staged while faulted.
+    let progress = live.stage(&[progress(1, AT)], None, MonoMs::new(9_000), size(live.projection())).err().map(|r| r.refusal);
+    assert_eq!(progress, Some(LiveRefusal::CapacityFault));
+    // The fault changed no history: the recorded frames replay to the live projection.
+    assert_eq!(frames.iter().fold(RunProjection::empty(run_id()), |p, f| apply_recorded(&p, f).unwrap()), *live.projection());
+    // Dropping the supervision does not make the run look settled: its summary blocks on its own.
+    drop(live);
+    assert_eq!(start_conflicts(&inventory_with(&frames), &[]), Vec::from([StartConflict::Unreconciled(run_id(), n(1))]));
+}
+
+#[test]
+fn a_refused_protected_stop_or_exit_faults_the_supervision() {
+    // Four open operation requests, two granted: a stop or an exit generates four consequences. One event short of
+    // room for them, at a stated size below the ceiling, the protected event is refused for capacity.
+    let short = JournalSize { events: MAX_EVENTS + SAFETY_EVENTS - u32::from(MAX_OPEN_APPROVALS), bytes: 0 };
+    assert!(!short.exhausted());
+    for draft in [stop(1, StopReason::JournalFull, AT), exited(1, 0, AT), cancel(CancelScope::Run, AT)] {
+        let (mut live, frames, _) = supervised_running(u64::from(MAX_OPEN_APPROVALS), 2);
+        assert!(!live.in_capacity_fault());
+        let refused = live.stage(&[draft], None, MonoMs::new(7_000), short).err().map(|r| r.refusal);
+        assert_eq!(refused, Some(LiveRefusal::Rejected(Rejection::LimitExceeded)));
+        assert!(live.in_capacity_fault());
+        assert_eq!(live.projection().attempt(n(1)).unwrap().state(), AttemptState::Running);
+        assert!(start_conflicts(&inventory_with(&frames), &[live.held()]).contains(&StartConflict::CapacityExhausted(run_id())));
+    }
+    // A refusal that is not about capacity faults nothing: a stop for an attempt that does not exist.
+    let (mut live, _, _) = supervised_running(0, 0);
+    assert!(live.stage(&[stop(2, StopReason::JournalFull, AT)], None, MonoMs::new(7_000), size(live.projection())).is_err());
+    assert!(!live.in_capacity_fault());
+}
+
+#[test]
+fn a_faulted_supervision_mints_and_accepts_no_grant() {
+    let (mut live, mut frames, mut grants) = supervised_running(2, 1);
+    let outstanding = grants.pop().unwrap();
+    // A decision is staged, then (with that frame still in flight) the stated size reaches the ceiling.
+    let decision = live.stage(&[decide(3, Decision::Granted, T0 + 6_500)], None, MonoMs::new(6_500), size(live.projection())).map_err(|r| r.refusal).unwrap();
+    frames.push(decision.events().to_vec());
+    assert!(live.stage(&[progress(1, AT)], None, MonoMs::new(6_600), EXHAUSTED).is_err());
+    assert!(live.in_capacity_fault());
+    // The decision's frame is durable, but no grant is minted for it.
+    assert!(live.confirm(decision).unwrap().is_empty());
+    assert_eq!(live.projection().approval(a(3)).unwrap().state(), ApprovalState::Granted);
+    // A grant minted before the fault cannot be used; it comes back.
+    let refused = live.stage(&[consumed(2, AT)], Some(outstanding), MonoMs::new(7_000), size(live.projection())).err().unwrap();
+    assert_eq!(refused.refusal, LiveRefusal::CapacityFault);
+    assert!(refused.grant.is_some());
+    // No new decision can be staged either.
+    let (mut other, _, _) = supervised_running(1, 0);
+    assert!(other.stage(&[progress(1, AT)], None, MonoMs::new(7_000), EXHAUSTED).is_err());
+    let refused = other.stage(&[decide(2, Decision::Granted, T0 + 6_000)], None, MonoMs::new(7_100), size(other.projection())).err().map(|r| r.refusal);
+    assert_eq!(refused, Some(LiveRefusal::CapacityFault));
+}
+
+#[test]
+fn due_at_the_ceiling_faults_and_proposes_a_stop() {
+    let (mut live, frames, _) = supervised_running(0, 0);
+    let due = live.due(MonoMs::new(7_000), AT, EXHAUSTED);
+    assert!(live.in_capacity_fault());
+    assert_eq!(due.drafts.len(), 1);
+    assert_eq!(due.drafts[0].body(), &EventBody::StopRequested { attempt: n(1), reason: StopReason::JournalFull });
+    // Even with honest sizes afterwards, it keeps proposing the stop and the run keeps blocking while held.
+    let again = live.due(MonoMs::new(8_000), AT, size(live.projection()));
+    assert_eq!(again.drafts[0].body(), &EventBody::StopRequested { attempt: n(1), reason: StopReason::JournalFull });
+    assert!(start_conflicts(&inventory_with(&frames), &[live.held()]).contains(&StartConflict::CapacityExhausted(run_id())));
+}
+
+#[test]
+fn a_run_opened_at_the_ceiling_opens_faulted() {
+    // A quiescent history (nothing to reconcile) opened with a stated size at the ceiling.
+    let history = other_run(7, T0);
+    let frame = reconciled(&history, &[]).frame;
+    let Ok(Opening::Ready(live)) = begin_reconciled(EPOCH, history, frame, MonoMs::new(MONO), EXHAUSTED) else { panic!("not ready") };
+    assert!(live.in_capacity_fault());
+    let mut summaries: Vec<(u64, RunSummary)> = (1..=6).map(|number| (number, RunSummary::NeverCreated)).collect();
+    summaries.push((7, locked(&other_run(7, T0))));
+    assert_eq!(start_conflicts(&enumerated(7, summaries), &[live.held()]), Vec::from([StartConflict::CapacityExhausted(run_id())]));
 }

@@ -582,6 +582,9 @@ pub(crate) enum StartConflict {
     Unreconciled(RunId, AttemptNo),
     /// Repair records the journal still lacks.
     RepairPending(RunId),
+    /// The run is held by a capacity-faulted supervision (D3.2c-1): its journal may be unable to record a stop, an end or
+    /// a repair, so nothing about it is settled while it is held.
+    CapacityExhausted(RunId),
 }
 
 /// Every start conflict in `inventory`, sorted and without repeats. `supervised` names the runs the caller's own live
@@ -636,7 +639,9 @@ pub(crate) fn start_conflicts(inventory: &RunInventory, supervised: &[Supervised
                 if held && !owned {
                     conflicts.push(StartConflict::Contradictory(*run));
                 }
-                if let (Some(attempt), false) = (verified.in_flight, owned) {
+                // A capacity-faulted supervision excuses nothing (D3.2c-1).
+                let excused = owned && !holders[0].capacity_faulted();
+                if let (Some(attempt), false) = (verified.in_flight, excused) {
                     conflicts.push(StartConflict::Unreconciled(*run, attempt));
                 }
             }
@@ -645,6 +650,9 @@ pub(crate) fn start_conflicts(inventory: &RunInventory, supervised: &[Supervised
     for held in supervised {
         if !seen.contains(&held.run()) {
             conflicts.push(StartConflict::Contradictory(held.run()));
+        }
+        if held.capacity_faulted() {
+            conflicts.push(StartConflict::CapacityExhausted(held.run()));
         }
         // A supervision may be ahead of every summary (an orphan its opening frame just raised, for example): its own
         // unresolved blocking concerns count too. This only ever adds conflicts.
