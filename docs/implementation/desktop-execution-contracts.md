@@ -78,7 +78,7 @@ Decision 12.8 amends the rules for this module:
   - `use crate::agents::evidence::{Sha256, Token};`
 - Any other copy or position is held to the full rules and fails.
 - It may not name `super`, and it may name the agents module nowhere else.
-- No identifier may contain authoriz/authoris, dispatch, enforc or terminat, in any letter case and at any position.
+- No identifier may contain authoriz/authoris, dispatch, enforc, terminat or execute_now, in any letter case and at any position.
 - The agents module never names the lifecycle model.
 - `lib.rs` declares the module once, in the same pinned form as `mod agents;`, and no other compiled production file names it.
 
@@ -88,7 +88,9 @@ Bypass fixtures pin each amendment:
 - a re-export, including one split over two lines;
 - a spaced path, a second copy, an import after other code, the imports swapped, an import in the wrong file, a full path;
 - authority-like names as a prefix, inside a name and as a type;
-- the usual process, file, clock, environment and macro cases. `native-sources.json` lists the new files, so the compiler's dep-info check covers them. The ten commands, their grants, the generated permissions, the dependency set and the release-isolation verifier are unchanged.
+- the usual process, file, clock, environment and macro cases.
+
+`native-sources.json` lists the new files, so the compiler's dep-info check covers them. The ten commands, their grants, the generated permissions, the dependency set and the release-isolation verifier are unchanged.
 
 ## Tests
 
@@ -120,5 +122,6 @@ Bypass fixtures pin each amendment:
 - This is vocabulary only. No transition is decided here; the reducer is the next step and is not authorized.
 - Values may still change without a schema version bump until the first persistence adapter freezes v1.
 - `EventDraft` has crate-visible fields, so any code in the crate can label a draft with any producer. r5 fixes a producer by which typed constructor built the draft. **b-2 must close this before any caller exists:** private fields, per-producer construction, and a provider-relay interface that cannot build a user draft.
+- The `terminat` rule also matches r5's b-3 type `termination_proposal`. b-3 needs a recorded, reviewed amendment for that one name (for example `terminat(?!ion_proposal)`), never a silent loosening.
 - The module allows dead code in test builds too, because nothing uses the vocabulary yet; b-2's reducer is its first user.
 - Open items from the design's gate review (recorded on #108) must be settled before b-2, b-3, b-4 or the adapter.
