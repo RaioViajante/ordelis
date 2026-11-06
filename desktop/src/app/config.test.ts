@@ -388,6 +388,25 @@ function replayViolations(files: Record<string, string>): string[] {
 // D3.2c-2 (#122): a write outcome and torn-tail evidence are live values too: built once each, by `verify_write` and
 // `discard`, never copied, formatted or named outside live.rs.
 const LIVE_TYPES = ["LiveGrant", "LiveSupervision", "PendingSupervision", "Staged", "Abandoned", "WriteOutcome", "TornTailEvidence"];
+const EVIDENCE_IMPLS: [string, string][] = [
+  ["WriteOutcome", "impl WriteOutcome {\n    pub(crate) const fn check(&self) -> PersistCheck {\n        self.check\n    }\n}"],
+  [
+    "TornTailEvidence",
+    "impl TornTailEvidence {\n    pub(crate) const fn len(&self) -> u32 {\n        self.owed.len\n    }\n\n    pub(crate) const fn crc32c(&self) -> u32 {\n        self.owed.crc32c\n    }\n}",
+  ],
+];
+const REVIEWED_FAULT_ASSIGNMENTS = [
+  "capacity_fault = live.stated(size).exhausted()",
+  "capacity_fault = true",
+  "clock_fault = true",
+  "poisoned = true",
+  "uncertain = 0",
+  "uncertain = self.uncertain.saturating_add(1)",
+  "owed = None",
+  "owed = Some(owed)",
+  "checked = None",
+  "checked = Some(check)",
+];
 // `Name {` that builds a value: not a declaration, an impl block or a return type.
 const structLiteral = (name: string) => new RegExp(`(?<!(?:\\bstruct|\\bimpl|->|\\blet)\\s*)\\b${name}\\s*\\{`, "g");
 function liveAuthorityViolations(files: Record<string, string>): string[] {
@@ -438,9 +457,26 @@ function liveAuthorityViolations(files: Record<string, string>): string[] {
     if (/\bTornTailEvidence\b/.test(returns) && fn !== "discard") violations.push(`live.rs: ${fn} returns torn-tail evidence`);
     if (/\bTornTailEvidence\b/.test(params) && fn !== "stage_repair") violations.push(`live.rs: ${fn} takes torn-tail evidence`);
   }
-  const frameCalls = live.match(/\bself\.stage_frame\(/g) ?? [];
-  if (frameCalls.length !== 2 || !live.includes("self.stage_frame(drafts, grant, mono, size, false)") || !live.includes("self.stage_frame(&[draft], None, mono, size, true)")) {
-    violations.push("live.rs: stage_frame is called other than by stage and, without a grant, by stage_repair");
+  // Review of #122: every mention of stage_frame is its private declaration or one of the two reviewed calls, so no
+  // path (`Self::stage_frame`, a visible wrapper) stages a journal draft as a repair.
+  const frameMentions = (live.match(/\bstage_frame\b/g) ?? []).length;
+  const frameDeclaration = (live.match(/\n {4}fn stage_frame\(&mut self, drafts: &\[EventDraft\], grant: Option<LiveGrant>, mono: MonoMs, size: JournalSize, repair: bool\)/g) ?? []).length;
+  if (frameMentions !== 3 || frameDeclaration !== 1 || !live.includes("self.stage_frame(drafts, grant, mono, size, false)") || !live.includes("self.stage_frame(&[draft], None, mono, size, true)")) {
+    violations.push("live.rs: stage_frame is not private, or is called other than by stage and, without a grant, by stage_repair");
+  }
+  // The evidence types expose read-only accessors only: one reviewed impl block each, so no setter can turn an Absent
+  // outcome into Landed.
+  for (const [name, block] of EVIDENCE_IMPLS) {
+    if ((live.match(new RegExp(`\\bimpl\\b[^{;]*\\b${name}\\b[^{;]*\\{`, "g")) ?? []).length !== 1 || live.split(block).length !== 2) {
+      violations.push(`live.rs: ${name} has methods other than the reviewed accessors`);
+    }
+  }
+  // Fault states only ever enter (review of #122): poisoned, clock_fault and capacity_fault are only set, the repair
+  // owed and the uncertain count change only at their reviewed sites, and nothing takes, swaps or borrows them.
+  const assignments = [...live.matchAll(/\.(poisoned|capacity_fault|clock_fault|uncertain|owed|checked)\s*=(?![=>])\s*([^;]*);/g)].map((m) => `${m[1]} = ${m[2].trim()}`);
+  for (const assignment of assignments) if (!REVIEWED_FAULT_ASSIGNMENTS.includes(assignment)) violations.push(`live.rs: ${assignment}`);
+  if (/\.(?:poisoned|capacity_fault|clock_fault|uncertain|owed|checked)\s*\.\s*(?:take|replace|get_or_insert\w*|as_mut|insert)\b/.test(live) || /&\s*mut\s+[\w.]*\.(?:poisoned|capacity_fault|clock_fault|uncertain|owed|checked)\b/.test(live) || /\bmem::/.test(live)) {
+    violations.push("live.rs: a fault state changed other than by assignment");
   }
   // SupervisedRun (review of #116) borrows an opened supervision: declared once in live.rs with no attribute and no
   // visible field, built once (by `held`), with no trait.
@@ -1065,6 +1101,16 @@ describe("desktop trust boundary", () => {
       "evidence taken by stage": add("lifecycle/live.rs", "fn stage3(evidence: &TornTailEvidence) {}"),
       "a repair frame staged with a grant": live("self.stage_frame(&[draft], None, mono, size, true)", "self.stage_frame(&[draft], grant, mono, size, true)"),
       "a plain frame staged as a repair": live("self.stage_frame(drafts, grant, mono, size, false)", "self.stage_frame(drafts, grant, mono, size, true)"),
+      // Review of #122 (G2 to G5).
+      "a repair staged through Self": add("lifecycle/live.rs", "impl LiveSupervision { fn sneak(&mut self, d: EventDraft, mono: MonoMs, size: JournalSize) { let _ = Self::stage_frame(self, &[d], None, mono, size, true); } }"),
+      "a visible stage_frame": live("    fn stage_frame(&mut self", "    pub(crate) fn stage_frame(&mut self"),
+      "an outcome setter": add("lifecycle/live.rs", "impl WriteOutcome { pub(crate) fn set(&mut self, check: PersistCheck) { self.check = check; } }"),
+      "an outcome setter in the reviewed block": live("impl WriteOutcome {\n", "impl WriteOutcome {\n    pub(crate) fn set(&mut self, check: PersistCheck) { self.check = check; }\n"),
+      "an evidence setter": add("lifecycle/live.rs", "impl TornTailEvidence { pub(crate) fn grow(&mut self) { self.owed.len += 1; } }"),
+      "an unpoisoned supervision": add("lifecycle/live.rs", "impl LiveSupervision { pub(crate) fn unpoison(&mut self) { self.poisoned = false; self.uncertain = 0; self.owed = None; } }"),
+      "a capacity fault cleared": add("lifecycle/live.rs", "impl LiveSupervision { fn clear(&mut self) { self.capacity_fault = false; } }"),
+      "a repair owed taken": add("lifecycle/live.rs", "impl LiveSupervision { fn forget(&mut self) { let _ = self.owed.take(); } }"),
+      "a poison flag swapped": add("lifecycle/live.rs", "impl LiveSupervision { fn swap(&mut self, other: &mut bool) { std::mem::swap(&mut self.poisoned, other); } }"),
       "an alias of the outcome": add("lifecycle/live.rs", "type O = WriteOutcome;"),
     };
     for (const [name, files] of Object.entries(authority)) {

@@ -13,10 +13,11 @@
 // nothing here, or anywhere in the lifecycle module, turns it or a staged frame into a process start.
 //
 // Uncertain writes are bound to evidence (D3.2c-2, issue #122). `verify_write` is the only producer of a
-// `WriteOutcome`: it encodes the abandoned frame itself, checks that the committed bytes are exactly this supervision's
-// recorded frames, and compares them with the re-read file through the codec's `verify_persisted`. `adopt` takes only a
-// `Landed` outcome for exactly that frame and `discard` only an `Absent` one; `Diverged`, `Unknown` and a second
-// consecutive uncertain append poison the supervision. A torn tail leaves a repair owed, which only `stage_repair` can
+// `WriteOutcome`: it encodes the abandoned frame itself, checks that the committed bytes decode to exactly this
+// supervision's recorded events, and compares them with the re-read file through the codec's `verify_persisted`. `adopt`
+// takes only a `Landed` outcome for exactly that frame and `discard` only an `Absent` one; `Diverged`, `Unknown`, a torn
+// tail the frame does not start with, contradictory re-reads and a second consecutive uncertain append poison the
+// supervision. A torn tail leaves a repair owed, which only `stage_repair` can
 // record, with the length and checksum the verification measured. A byte comparison is not durability: whether the
 // bytes are on stable storage is the adapter's syncs, never this file's conclusion.
 use super::codec::{decode_stream, encode_frame, verify_persisted, Divergence, PersistCheck, StreamEnd};
@@ -227,7 +228,7 @@ pub(crate) enum LiveRefusal {
     Reconciliation,
     /// The supervision is poisoned (D3.2c-2): nothing more is staged or resolved through it.
     Poisoned,
-    /// The committed bytes are not exactly this supervision's recorded frames.
+    /// The committed bytes do not decode, as a clean stream, to exactly this supervision's recorded events.
     NotThisJournal,
     /// The outcome is for another supervision, run or frame, or does not show what the call needs: `Landed` to adopt,
     /// `Absent` to discard.
@@ -460,6 +461,11 @@ impl PendingSupervision {
     pub(crate) fn events(&self) -> &[Event] {
         &self.events
     }
+
+    /// How durable the opening frame must be before `open` (D3.2c-2): the strictest class among its events.
+    pub(crate) fn durability(&self) -> Durability {
+        frame_durability(&self.events)
+    }
 }
 
 /// Call only after the pending frame is durable.
@@ -689,13 +695,13 @@ impl LiveSupervision {
         let count = u32::try_from(applied.events.len()).unwrap_or(u32::MAX);
         let largest = u64::from(count) * (u64::from(MAX_EVENT_BYTES) + 1) + 1 + u64::from(MAX_TAIL_BYTES - MAX_FRAME_BYTES);
         let after = JournalSize { events: stated.events.saturating_add(count), bytes: stated.bytes.saturating_add(largest) };
+        if after.exhausted() {
+            self.capacity_fault = true;
+        }
         let bytes = match encoded(&applied.events) {
             Ok(bytes) => bytes,
             Err(refusal) => return refuse(refusal, grant),
         };
-        if after.exhausted() {
-            self.capacity_fault = true;
-        }
         self.frames += 1;
         self.in_flight = Some((self.frames, applied.events.clone()));
         Ok(Staged { epoch: self.epoch, frame: self.frames, events: applied.events, projection: applied.projection, mono, progress, descriptions, grant, bytes })
@@ -779,11 +785,12 @@ impl LiveSupervision {
         Ok(Abandoned { epoch, frame, events, projection, mono, progress, descriptions, bytes })
     }
 
-    /// Compares the re-read journal with the abandoned frame (S3). `committed` must be exactly this supervision's
-    /// recorded frames; `file` is the journal as the adapter re-read it under the run's lock, which this core cannot
+    /// Compares the re-read journal with the abandoned frame (S3). `committed` must decode, as a clean stream, to exactly
+    /// this supervision's recorded events (framed otherwise, the comparison then diverges and poisons); `file` is the journal as the adapter re-read it under the run's lock, which this core cannot
     /// check. The expected bytes are this supervision's own encoding of the frame, never the caller's. A `Diverged` or
-    /// `Unknown` result poisons the supervision at once, whatever the caller does with the outcome next, and so does a
-    /// second verification of the same frame that shows anything other than the first.
+    /// `Unknown` result poisons the supervision at once, whatever the caller does with the outcome next, and so do a torn
+    /// tail that is not a prefix of the frame and a second verification of the same frame that shows anything other
+    /// than the first.
     pub(crate) fn verify_write(&mut self, abandoned: &Abandoned, committed: &[u8], file: &[u8]) -> Result<WriteOutcome, LiveRefusal> {
         if self.poisoned {
             return Err(LiveRefusal::Poisoned);
@@ -807,7 +814,10 @@ impl LiveSupervision {
             verify_persisted(file, committed, &expected)
         };
         // The same frame re-read twice must show the same thing: a caller cannot shop for the outcome it wants.
-        if matches!(check, PersistCheck::Diverged(_) | PersistCheck::Unknown(_)) || self.checked.is_some_and(|seen| seen != check) {
+        // A torn tail that is not a prefix of the frame written is bytes this supervision never wrote: foreign, as after an
+        // empty frame (review of #122).
+        let foreign_tail = matches!(check, PersistCheck::Absent { torn: Some(tail) } if !tail.pending_prefix);
+        if matches!(check, PersistCheck::Diverged(_) | PersistCheck::Unknown(_)) || foreign_tail || self.checked.is_some_and(|seen| seen != check) {
             self.poisoned = true;
         }
         self.checked = Some(check);

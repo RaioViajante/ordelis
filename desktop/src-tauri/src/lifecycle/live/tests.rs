@@ -1300,6 +1300,36 @@ fn a_diverged_or_unknown_outcome_poisons_for_good() {
 }
 
 #[test]
+fn a_torn_tail_the_frame_does_not_start_with_poisons() {
+    // Review of #122 (P1): bytes after the committed ones that are not a prefix of the frame written were never written
+    // by this supervision. As after an empty frame, they poison; they are never repaired as this frame's tail.
+    let (mut live, abandoned) = uncertain_decision();
+    let outcome = verified_write(&mut live, &abandoned, |committed, _| [committed, &b"ORDL1 999"[..]].concat());
+    assert!(matches!(outcome.check(), PersistCheck::Absent { torn: Some(tail) } if !tail.pending_prefix));
+    assert!(live.poisoned());
+    assert_eq!(live.discard(abandoned, outcome).err(), Some(LiveRefusal::Poisoned));
+    // A zero-filled tail is not this frame's either.
+    let (mut live, abandoned) = uncertain_decision();
+    let _ = verified_write(&mut live, &abandoned, |committed, _| [committed, &[0u8; 64][..]].concat());
+    assert!(live.poisoned());
+    // After an empty frame, the same bytes are foreign too: one verdict for both.
+    let mut fresh = self::live();
+    commit(&mut fresh, attempt_pair(1, 1, T0 + 1_000), None, 1_000);
+    let duplicate = stage_one(&mut fresh, attempt_pair(1, 1, T0 + 1_000), None, 1_100);
+    let empty = fresh.abandon(duplicate).ok().unwrap();
+    let outcome = verified_write(&mut fresh, &empty, |committed, _| [committed, &b"ORDL1 999"[..]].concat());
+    assert!(matches!(outcome.check(), PersistCheck::Diverged(_)));
+    assert!(fresh.poisoned());
+}
+
+#[test]
+fn an_opening_frame_states_its_durability() {
+    let pending = begin_new(EPOCH, run_id(), created(T0), m(0)).ok().unwrap();
+    assert_eq!(pending.durability(), Durability::EffectGate);
+    drop_pending(pending);
+}
+
+#[test]
 fn contradictory_verifications_of_one_frame_poison() {
     // The same re-read twice is consistent, and the frame resolves.
     let (mut live, abandoned) = uncertain_decision();
