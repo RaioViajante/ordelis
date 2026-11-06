@@ -180,8 +180,8 @@ function pureContentViolations(files: Record<string, string>, superRule: (file: 
 // comments come before them, so nothing such as `pub(crate)` can prefix them). Anything else, including another copy,
 // is held to the agents rules, with no name of the agents module and no identifier that could mean authorized,
 // dispatched, enforced or terminated anywhere in it. The module root names no `super`; a submodule names `super` only
-// to reach a sibling (`super::model`, `super::reduce`, `super::live`; decision 12.8(b), D3.2b-2), and no file imports
-// with a glob.
+// to reach a sibling (`super::model`, `super::reduce`, `super::live`, `super::reconcile`; decision 12.8(b), D3.2b-2 and
+// D3.2b-3), and no file imports with a glob.
 const LIFECYCLE_IMPORTS = ["use crate::agents::catalog::ProviderId;", "use crate::agents::evidence::{Sha256, Token};"];
 function withoutLifecycleImports(file: string, text: string): string {
   if (file !== "lifecycle/model.rs") return text;
@@ -191,14 +191,44 @@ function withoutLifecycleImports(file: string, text: string): string {
   lines.splice(first, 2);
   return lines.join("\n");
 }
+// D3.2b-3 (#116): the one reviewed exception to the `terminat` rule. Design r5 names an inert reconciliation
+// recommendation `termination_proposal`. It exists as exactly the identifier `TerminationProposal`, only in
+// lifecycle/reconcile.rs, exactly twice: as a variant of `Recommendation` whose whole declaration is pinned below (plain
+// data: an attempt number and two one-value enums, the derives fixed), and in the one place that value is built and
+// pushed. Only then are those two occurrences set aside before the rules run. Any other spelling, letter case, prefix,
+// suffix, raw identifier, file, declaration or count is held to the unchanged rule and fails; nothing else about
+// termination is relaxed. reconciliationViolations pins that nothing consumes a recommendation.
+const REVIEWED_PROPOSAL = /(?<![\w#])TerminationProposal(?!\w)/g;
+const RECOMMENDATION_DECLARATION =
+  "#[derive(Clone, Copy, Debug, PartialEq, Eq)]\npub(crate) enum Recommendation {\n    ReviewAttempt(AttemptNo),\n" +
+  "    TerminationProposal { attempt: AttemptNo, basis: ProposalBasis, policy: PolicyRequirement },\n    RetryPossible(AttemptNo),\n}\n";
+const PROPOSAL_DATA = [
+  "#[derive(Clone, Copy, Debug, PartialEq, Eq)]\npub(crate) enum ProposalBasis {\n    PidStartTokenAndHash,\n}\n",
+  "#[derive(Clone, Copy, Debug, PartialEq, Eq)]\npub(crate) enum PolicyRequirement {\n    SeparatePolicy,\n}\n",
+];
+const PROPOSAL_CONSTRUCTION =
+  /\brecommendations\.push\(Recommendation::TerminationProposal \{\s*attempt,\s*basis: ProposalBasis::PidStartTokenAndHash,\s*policy: PolicyRequirement::SeparatePolicy,\s*\}\);/g;
+function withoutReviewedProposal(file: string, text: string): string {
+  if (file !== "lifecycle/reconcile.rs") return text;
+  const code = rustCodeOnly(text);
+  const reviewed =
+    (code.match(REVIEWED_PROPOSAL) ?? []).length === 2 &&
+    code.split(RECOMMENDATION_DECLARATION).length === 2 &&
+    PROPOSAL_DATA.every((data) => code.split(data).length === 2) &&
+    (code.match(PROPOSAL_CONSTRUCTION) ?? []).length === 1;
+  return reviewed ? text.replace(REVIEWED_PROPOSAL, "ReviewedProposal") : text;
+}
 function lifecycleContentViolations(files: Record<string, string>): string[] {
-  const stripped = Object.fromEntries(Object.entries(files).map(([file, text]) => [file, withoutLifecycleImports(file, text)]));
+  const stripped = Object.fromEntries(
+    Object.entries(files).map(([file, text]) => [file, withoutReviewedProposal(file, withoutLifecycleImports(file, text))]),
+  );
   const violations = pureContentViolations(stripped, (file) =>
-    file === "lifecycle.rs" ? /\bsuper\b/ : /\bsuper\b(?!::(?:model|reduce|live)\b)/,
+    file === "lifecycle.rs" ? /\bsuper\b/ : /\bsuper\b(?!::(?:model|reduce|live|reconcile)\b)/,
   );
   for (const [file, text] of Object.entries(stripped)) {
     const code = rustCodeOnly(text);
-    for (const pattern of [/\bagents\b/, /\w*(?:authori[sz]|dispatch|enforc|terminat|execute_now)\w*/i, /\buse\b[^;]*\*/]) {
+    // Code is printable ASCII (review of #116): a look-alike letter must not slip a word past the rules above.
+    for (const pattern of [/\bagents\b/, /\w*(?:authori[sz]|dispatch|enforc|terminat|execute_now)\w*/i, /\buse\b[^;]*\*/, /[^\t\n\r -~]/]) {
       const hit = code.match(pattern);
       if (hit) violations.push(`${file}: ${hit[0]}`);
     }
@@ -228,7 +258,8 @@ function liveAuthorityViolations(files: Record<string, string>): string[] {
       if (file !== "lifecycle/live.rs" && new RegExp(`\\b${name}\\b`).test(code)) violations.push(`${file}: names ${name}`);
     }
   }
-  // A grant is built in one place (mint), a supervision in one place (begin_new).
+  // A grant is built in one place (mint), a supervision and a pending supervision in one place each (the private
+  // `supervision` and `pending` helpers that begin_new and begin_reconciled share).
   for (const name of LIVE_TYPES) {
     const literals = live.match(structLiteral(name)) ?? [];
     if (literals.length !== 1) violations.push(`live.rs: ${name} built ${literals.length} times`);
@@ -251,6 +282,24 @@ function liveAuthorityViolations(files: Record<string, string>): string[] {
     if (/LiveGrant/.test(params) && !["stage", "check_grant"].includes(fn)) violations.push(`live.rs: ${fn} takes a grant`);
     if (/LiveGrant/.test(returns) && !["confirm", "settle", "mint"].includes(fn)) violations.push(`live.rs: ${fn} returns a grant`);
   }
+  // SupervisedRun (review of #116) borrows an opened supervision: declared once in live.rs with no attribute and no
+  // visible field, built once (by `held`), with no trait.
+  const supervisedRuns = [...live.matchAll(/((?:#\[[^\]]*\]\s*)*)pub\(crate\) struct SupervisedRun<'a> \{([^}]*)\}/g)];
+  if (supervisedRuns.length !== 1 || supervisedRuns[0][1].trim() || /\bpub\b/.test(supervisedRuns[0][2])) violations.push("live.rs: SupervisedRun is not the reviewed declaration");
+  if ((live.match(structLiteral("SupervisedRun")) ?? []).length !== 1) violations.push("live.rs: SupervisedRun built more than once");
+  for (const [file, text] of Object.entries(files)) {
+    const code = rustCodeOnly(text);
+    if (/\bimpl\b[^{;]*\bfor\s+[(\s]*(?:[\w:]*::)?SupervisedRun\b/.test(code)) violations.push(`${file}: a trait is implemented for SupervisedRun`);
+    if (file !== "lifecycle/live.rs" && structLiteral("SupervisedRun").test(code)) violations.push(`${file}: builds a SupervisedRun`);
+  }
+  // Opening (D3.2b-3) holds a supervision: declared once in live.rs with no attribute, no trait, named nowhere else.
+  const openings = [...live.matchAll(/((?:#\[[^\]]*\]\s*)*)pub\(crate\) enum Opening\b/g)];
+  if (openings.length !== 1 || openings[0][1].trim()) violations.push("live.rs: Opening is not declared once without attributes");
+  for (const [file, text] of Object.entries(files)) {
+    const code = rustCodeOnly(text);
+    if (/\bimpl\b[^{;]*\bfor\s+[(\s]*(?:[\w:]*::)?Opening\b/.test(code)) violations.push(`${file}: a trait is implemented for Opening`);
+    if (file !== "lifecycle/live.rs" && /\bOpening\b/.test(code)) violations.push(`${file}: names Opening`);
+  }
   // EventDraft: private fields, built by one private constructor, which the typed constructors (and the test-only
   // forging helper) call.
   const model = rustCodeOnly(files["lifecycle/model.rs"] ?? "");
@@ -260,6 +309,67 @@ function liveAuthorityViolations(files: Record<string, string>): string[] {
   if (!/#\[cfg\(test\)\]\s*pub\(crate\) fn forged\b/.test(model)) violations.push("model.rs: forged is not test-only");
   for (const [file, text] of Object.entries(files)) {
     if (file !== "lifecycle/model.rs" && structLiteral("EventDraft").test(rustCodeOnly(text))) violations.push(`${file}: builds an EventDraft`);
+  }
+  return violations;
+}
+
+// D3.2b-3 (#116): reconciliation output is inert history. A recommendation is plain data that is built and pushed,
+// never consumed: no method, no trait beyond its pinned derives, no alias, no match, no function taking one, and no
+// other file naming it. The list that holds them is a private field read only by a test-only accessor, and no other
+// production file names `recommendations` at all (review of #116: `r.recommendations.len()` would otherwise be a
+// consumer that names no recommendation). The opening frame and the recorded history are built in one place each, with private fields,
+// no derive and no trait, so a frame cannot be forged or reused by the live layer. Returns what breaks those rules.
+const RECONCILE_TYPES = ["ReconciledFrame", "RecordedHistory"];
+const RECOMMENDATIONS_ACCESSOR =
+  "#[cfg(test)]\n    pub(crate) fn recommendations(&self) -> &[Recommendation] {\n        &self.recommendations\n    }";
+const INERT_TYPES = ["Recommendation", "ProposalBasis", "PolicyRequirement"];
+function reconciliationViolations(files: Record<string, string>): string[] {
+  const violations: string[] = [];
+  const reconcile = rustCodeOnly(files["lifecycle/reconcile.rs"] ?? "");
+  if (reconcile.split(RECOMMENDATION_DECLARATION).length !== 2) violations.push("reconcile.rs: Recommendation is not the reviewed declaration");
+  for (const data of PROPOSAL_DATA) if (reconcile.split(data).length !== 2) violations.push("reconcile.rs: a proposal type is not the reviewed declaration");
+  // Every other mention of Recommendation is the one private field that holds them, a value pushed onto it, or the
+  // test-only accessor; every mention of that field is its declaration, the local list, a push, the struct literal or
+  // the accessor.
+  const mentions = (reconcile.match(/\bRecommendation\b/g) ?? []).length;
+  const pushes = (reconcile.match(/\brecommendations\.push\(Recommendation::\w+\b/g) ?? []).length;
+  const field = (reconcile.match(/\n {4}recommendations: Vec<Recommendation>,\n/g) ?? []).length;
+  const accessor = reconcile.split(RECOMMENDATIONS_ACCESSOR).length - 1;
+  const local = (reconcile.match(/\blet mut recommendations = Vec::new\(\);/g) ?? []).length;
+  const literal = (reconcile.match(/\bReconciliation \{ frame, findings, recommendations, blocking, informational \}/g) ?? []).length;
+  const uses = (reconcile.match(/\brecommendations\b/g) ?? []).length;
+  if (field !== 1 || accessor !== 1 || local !== 1 || literal !== 1 || mentions !== 3 + pushes || uses !== 5 + pushes) {
+    violations.push("reconcile.rs: a recommendation is used other than built and pushed");
+  }
+  for (const m of reconcile.matchAll(/\bfn\s+(\w+)([^{;]*)[{;]/g)) {
+    const arrow = m[2].lastIndexOf("->");
+    const params = arrow < 0 ? m[2] : m[2].slice(0, arrow);
+    if (/\b(?:Recommendation|ProposalBasis|PolicyRequirement)\b/.test(params)) violations.push(`reconcile.rs: ${m[1]} takes a recommendation`);
+  }
+  for (const [file, text] of Object.entries(files)) {
+    const code = rustCodeOnly(text);
+    for (const name of [...INERT_TYPES, ...RECONCILE_TYPES]) {
+      if (new RegExp(`\\bimpl\\b[^{;]*\\bfor\\s+[(\\s]*(?:[\\w:]*::)?${name}\\b`).test(code)) violations.push(`${file}: a trait is implemented for ${name}`);
+      if (new RegExp(`\\btype\\s+\\w+[^=;]*=[^;]*\\b${name}\\b`).test(code)) violations.push(`${file}: an alias of ${name}`);
+      if (new RegExp(`\\b${name}\\s+as\\b`).test(code)) violations.push(`${file}: ${name} renamed`);
+    }
+    if (file !== "lifecycle/reconcile.rs" && /\brecommendations\b/.test(code)) violations.push(`${file}: reads recommendations`);
+    for (const name of INERT_TYPES) {
+      if (new RegExp(`\\bimpl\\s+${name}\\b`).test(code)) violations.push(`${file}: a method on ${name}`);
+      if (file !== "lifecycle/reconcile.rs" && new RegExp(`\\b${name}\\b`).test(code)) violations.push(`${file}: names ${name}`);
+    }
+    if (file !== "lifecycle/reconcile.rs") {
+      for (const name of RECONCILE_TYPES) if (structLiteral(name).test(code)) violations.push(`${file}: builds a ${name}`);
+    }
+  }
+  for (const name of RECONCILE_TYPES) {
+    const declared = [...reconcile.matchAll(new RegExp(`((?:#\\[[^\\]]*\\]\\s*)*)pub\\(crate\\) struct ${name}\\b([^{;]*)\\{([^}]*)\\}`, "g"))];
+    if (declared.length !== 1) violations.push(`reconcile.rs: ${name} declared ${declared.length} times`);
+    for (const [, attributes, , body] of declared) {
+      if (attributes.trim()) violations.push(`reconcile.rs: ${name} has ${attributes.trim()}`);
+      if (/\bpub\b/.test(body)) violations.push(`reconcile.rs: ${name} has a visible field`);
+    }
+    if ((reconcile.match(structLiteral(name)) ?? []).length !== 1) violations.push(`reconcile.rs: ${name} built more than once`);
   }
   return violations;
 }
@@ -606,11 +716,15 @@ describe("desktop trust boundary", () => {
   // of the crate only through two reviewed imports.
   it("keeps the lifecycle model pure, unreachable from the interface and limited to its reviewed imports", () => {
     const files = lifecycleSources();
-    expect(Object.keys(files).sort()).toEqual(["lifecycle.rs", "lifecycle/live.rs", "lifecycle/model.rs", "lifecycle/reduce.rs"]);
+    expect(Object.keys(files).sort()).toEqual(["lifecycle.rs", "lifecycle/live.rs", "lifecycle/model.rs", "lifecycle/reconcile.rs", "lifecycle/reduce.rs"]);
     expect(lifecycleContentViolations(files)).toEqual([]);
     expect(liveAuthorityViolations(files)).toEqual([]);
-    expect(files["lifecycle/model.rs"]).toMatch(/\n#\[cfg\(test\)\]\nmod tests;\n$/);
-    expect(files["lifecycle/live.rs"]).toMatch(/\n#\[cfg\(test\)\]\nmod tests;\n$/);
+    expect(reconciliationViolations(files)).toEqual([]);
+    // The reviewed termination-proposal exception applies: without it, the reconciliation file fails the rule.
+    expect(withoutReviewedProposal("lifecycle/reconcile.rs", files["lifecycle/reconcile.rs"])).not.toEqual(files["lifecycle/reconcile.rs"]);
+    expect(pureContentViolations({ "lifecycle/reconcile.rs": files["lifecycle/reconcile.rs"] }, () => /\bsuper\b(?!::(?:model|reduce|live)\b)/)).toEqual([]);
+    expect(rustCodeOnly(files["lifecycle/reconcile.rs"])).toMatch(/\w*terminat\w*/i);
+    for (const file of ["lifecycle/model.rs", "lifecycle/live.rs", "lifecycle/reconcile.rs"]) expect(files[file]).toMatch(/\n#\[cfg\(test\)\]\nmod tests;\n$/);
     // The reducer's test fixtures are shared with the live layer's tests, in test builds only.
     expect(files["lifecycle/reduce.rs"]).toMatch(/\n#\[cfg\(test\)\]\npub\(crate\) mod tests;\n$/);
     for (const line of LIFECYCLE_IMPORTS) expect(files["lifecycle/model.rs"].split("\n").filter((l) => l === line)).toHaveLength(1);
@@ -628,6 +742,10 @@ describe("desktop trust boundary", () => {
     const actual = lifecycleSources();
     const add = (file: string, text: string) => ({ ...actual, [file]: actual[file] + "\n" + text });
     const model = (from: string, to: string) => ({ ...actual, "lifecycle/model.rs": actual["lifecycle/model.rs"].replace(from, to) });
+    const replace = (file: string, from: string, to: string) => {
+      expect(actual[file]).toContain(from);
+      return { ...actual, [file]: actual[file].replace(from, to) };
+    };
     const bypasses: Record<string, Record<string, string>> = {
       "a process": add("lifecycle/model.rs", 'fn a() { let _ = std::process::Command::new("codex"); }'),
       "a file read": add("lifecycle/model.rs", 'fn b() { let _ = std::fs::read("/tmp/r1.ordj"); }'),
@@ -676,6 +794,37 @@ describe("desktop trust boundary", () => {
       "a sleep in the live layer": add("lifecycle/live.rs", "fn sl() { thread::sleep(d); }"),
       "a launch word in the live layer": add("lifecycle/live.rs", "fn launch_grant() {}"),
       "serialization in the reducer": add("lifecycle/reduce.rs", "#[derive(serde::Serialize)]\nstruct Wire;"),
+      // D3.2b-3 (#116): the termination-proposal exception is the exact identifier, in its file, twice, nowhere else.
+      "a proposal in snake case": add("lifecycle/reconcile.rs", "fn p0() -> u8 { let termination_proposal = 0; termination_proposal }"),
+      "a proposal in upper case": add("lifecycle/reconcile.rs", "const TERMINATION_PROPOSAL: u8 = 0;"),
+      "a proposal in lower camel case": add("lifecycle/reconcile.rs", "fn p1() -> u8 { let terminationProposal = 0; terminationProposal }"),
+      "a proposal with a prefix": add("lifecycle/reconcile.rs", "struct XTerminationProposal;"),
+      "a proposal with a suffix": add("lifecycle/reconcile.rs", "struct TerminationProposals;"),
+      "a proposal with a digit": add("lifecycle/reconcile.rs", "struct TerminationProposal2;"),
+      "a proposal with an underscore suffix": add("lifecycle/reconcile.rs", "struct TerminationProposal_;"),
+      "a proposal as a raw identifier": add("lifecycle/reconcile.rs", "struct r#TerminationProposal;"),
+      "a third mention of the proposal": add("lifecycle/reconcile.rs", "fn p2(r: Recommendation) -> bool { matches!(r, Recommendation::TerminationProposal { .. }) }"),
+      "a proposal imported under an alias": add("lifecycle/reconcile.rs", "use self::Recommendation::TerminationProposal as Proposal;"),
+      "a proposal in the live layer": add("lifecycle/live.rs", "fn p3() { let _ = TerminationProposal; }"),
+      "a proposal in the reducer": add("lifecycle/reduce.rs", "enum P4 { TerminationProposal }"),
+      "a proposal in the module root": add("lifecycle.rs", "enum P5 { TerminationProposal }"),
+      "a proposal in the model": add("lifecycle/model.rs", "struct TerminationProposal;"),
+      "a proposal assembled by a macro": add("lifecycle/reconcile.rs", "fn p6() { concat_idents!(Termination, Proposal); }"),
+      "a proposal carrying an action": replace("lifecycle/reconcile.rs", "policy: PolicyRequirement },", "policy: PolicyRequirement, act: fn(u32) },"),
+      "a proposal carrying a process id": replace("lifecycle/reconcile.rs", "policy: PolicyRequirement },", "policy: PolicyRequirement, pid: u32 },"),
+      "a proposal built a second time": add("lifecycle/reconcile.rs", "fn p7(attempt: AttemptNo) -> Recommendation { Recommendation::TerminationProposal { attempt, basis: ProposalBasis::PidStartTokenAndHash, policy: PolicyRequirement::SeparatePolicy } }"),
+      "a termination method beside the proposal": add("lifecycle/reconcile.rs", "fn terminate_attempt() {}"),
+      "a terminating state beside the proposal": add("lifecycle/reconcile.rs", "enum P8 { Terminating }"),
+      "a kill beside the proposal": add("lifecycle/reconcile.rs", "fn p9() { kill(4242); }"),
+      "a signal beside the proposal": add("lifecycle/reconcile.rs", "fn p10() { let _ = signal::SIGTERM; }"),
+      "a process in reconciliation": add("lifecycle/reconcile.rs", 'fn p11() { let _ = std::process::Command::new("kill"); }'),
+      "a clock in reconciliation": add("lifecycle/reconcile.rs", "fn p12() { let _ = Instant::now(); }"),
+      "a process table read in reconciliation": add("lifecycle/reconcile.rs", 'fn p13() { let _ = std::fs::read_dir("/proc"); }'),
+      "a command in reconciliation": add("lifecycle/reconcile.rs", "#[tauri::command]\nfn p14() {}"),
+      "serialization in reconciliation": add("lifecycle/reconcile.rs", "#[derive(serde::Serialize)]\nstruct P15;"),
+      "super escaping reconciliation": add("lifecycle/reconcile.rs", "use super::super::store;"),
+      // Review of #116: a look-alike letter (Cyrillic i) in a forbidden word.
+      "a look-alike letter": add("lifecycle/reconcile.rs", "fn term\u0456nate_attempt() {}"),
     };
     for (const [name, files] of Object.entries(bypasses)) {
       expect(lifecycleContentViolations(files), name).not.toEqual([]);
@@ -717,6 +866,52 @@ describe("desktop trust boundary", () => {
     };
     for (const [name, files] of Object.entries(authority)) {
       expect(liveAuthorityViolations(files), name).not.toEqual([]);
+    }
+    // The opening of a reconciled run (D3.2b-3).
+    const opening: Record<string, Record<string, string>> = {
+      "a cloneable opening": replace("lifecycle/live.rs", "pub(crate) enum Opening", "#[derive(Clone)]\npub(crate) enum Opening"),
+      "a trait for an opening": add("lifecycle/live.rs", "impl Default for Opening { fn default() -> Opening { todo() } }"),
+      "an opening named by reconciliation": add("lifecycle/reconcile.rs", "fn o(_: super::live::Opening) {}"),
+      "a supervised run claimed without a supervision": add("lifecycle/reconcile.rs", "fn claim(live: &'static u8) -> SupervisedRun<'static> { SupervisedRun { live } }"),
+      "a supervised run built twice": add("lifecycle/live.rs", "fn claim(live: &LiveSupervision) -> SupervisedRun<'_> { SupervisedRun { live } }"),
+      "a cloneable supervised run": replace("lifecycle/live.rs", "pub(crate) struct SupervisedRun<'a>", "#[derive(Clone, Copy)]\npub(crate) struct SupervisedRun<'a>"),
+      "a visible supervised field": replace("lifecycle/live.rs", "    live: &'a LiveSupervision,\n}", "    pub(crate) live: &'a LiveSupervision,\n}"),
+      "a supervision built by begin_reconciled": add("lifecycle/live.rs", "fn again(live: LiveSupervision) -> LiveSupervision { LiveSupervision { ..live } }"),
+    };
+    for (const [name, files] of Object.entries(opening)) {
+      expect(liveAuthorityViolations(files), name).not.toEqual([]);
+    }
+    // Recommendations stay inert; the opening frame and history are built only in reconcile.rs.
+    const inert: Record<string, Record<string, string>> = {
+      "a method on Recommendation": add("lifecycle/reconcile.rs", "impl Recommendation { pub(crate) fn act(&self) {} }"),
+      "a trait for Recommendation": add("lifecycle/reconcile.rs", "impl Default for Recommendation { fn default() -> Recommendation { todo() } }"),
+      "a trait for a proposal basis": add("lifecycle/reconcile.rs", "impl Default for ProposalBasis { fn default() -> ProposalBasis { todo() } }"),
+      "another derive on Recommendation": replace("lifecycle/reconcile.rs", "#[derive(Clone, Copy, Debug, PartialEq, Eq)]\npub(crate) enum Recommendation", "#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]\npub(crate) enum Recommendation"),
+      "another recommendation": replace("lifecycle/reconcile.rs", "    RetryPossible(AttemptNo),\n}", "    RetryPossible(AttemptNo),\n    StopNow(AttemptNo),\n}"),
+      "a function taking a recommendation": add("lifecycle/reconcile.rs", "fn act_on(_r: &Recommendation) {}"),
+      "a match on a recommendation": add("lifecycle/reconcile.rs", "fn p0(r: Vec<u8>) -> u8 { match r.len() { 0 => { let _ = Recommendation::RetryPossible; 1 } _ => 0 } }"),
+      "a recommendation read back": add("lifecycle/reconcile.rs", "fn p1(r: &Reconciliation) -> bool { r.recommendations.iter().any(|x| matches!(x, Recommendation::ReviewAttempt(_))) }"),
+      "recommendations counted in the live layer": add("lifecycle/live.rs", "use super::reconcile::Reconciliation;\nfn proposes_stop(r: &Reconciliation) -> bool { r.recommendations.len() > 1 }"),
+      "recommendations counted in reconciliation": add("lifecycle/reconcile.rs", "fn proposes_stop(r: &Reconciliation) -> bool { r.recommendations.len() > 1 }"),
+      "recommendations counted through the accessor": add("lifecycle/live.rs", "fn proposes_stop(r: &super::reconcile::Reconciliation) -> usize { r.recommendations().len() }"),
+      "a recommendation pushed into another list": add("lifecycle/reconcile.rs", "fn sink() { let mut other = Vec::new(); other.push(Recommendation::RetryPossible); }"),
+      "a production accessor": replace("lifecycle/reconcile.rs", "    #[cfg(test)]\n    pub(crate) fn recommendations", "    pub(crate) fn recommendations"),
+      "a visible recommendations field": replace("lifecycle/reconcile.rs", "\n    recommendations: Vec<Recommendation>,\n", "\n    pub(crate) recommendations: Vec<Recommendation>,\n"),
+      "a recommendation named by the live layer": add("lifecycle/live.rs", "use super::reconcile::Recommendation;"),
+      "a recommendation named by the reducer": add("lifecycle/reduce.rs", "fn p2(_: &[super::reconcile::Recommendation]) {}"),
+      "an alias of Recommendation": add("lifecycle/reconcile.rs", "type R = Recommendation;"),
+      "Recommendation renamed": add("lifecycle/reconcile.rs", "use self::Recommendation as R;"),
+      "a cloneable frame": replace("lifecycle/reconcile.rs", "pub(crate) struct ReconciledFrame", "#[derive(Clone)]\npub(crate) struct ReconciledFrame"),
+      "a cloneable history": replace("lifecycle/reconcile.rs", "pub(crate) struct RecordedHistory", "#[derive(Clone)]\npub(crate) struct RecordedHistory"),
+      "a visible frame field": replace("lifecycle/reconcile.rs", "    drafts: Vec<EventDraft>,\n}", "    pub(crate) drafts: Vec<EventDraft>,\n}"),
+      "a frame built twice": add("lifecycle/reconcile.rs", "fn fake(f: ReconciledFrame) -> ReconciledFrame { ReconciledFrame { ..f } }"),
+      "a frame built by the live layer": add("lifecycle/live.rs", "fn fake(f: ReconciledFrame) -> ReconciledFrame { ReconciledFrame { ..f } }"),
+      "a history built twice": add("lifecycle/reconcile.rs", "fn fake(h: RecordedHistory) -> RecordedHistory { RecordedHistory { ..h } }"),
+      "a trait for a frame": add("lifecycle/live.rs", "impl Clone for ReconciledFrame { fn clone(&self) -> ReconciledFrame { todo() } }"),
+      "an alias of a frame": add("lifecycle/live.rs", "type F = ReconciledFrame;"),
+    };
+    for (const [name, files] of Object.entries(inert)) {
+      expect(reconciliationViolations(files), name).not.toEqual([]);
     }
     // The agents module may never name the lifecycle model.
     const agents = agentSources();

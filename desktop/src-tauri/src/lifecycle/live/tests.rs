@@ -843,3 +843,218 @@ fn seeded_property_runs_keep_every_invariant_and_replay_identically() {
     assert!(events > (SEEDS as usize) * 10, "few events were recorded: {events}");
     assert!(terminal > SEEDS as usize, "few attempts ended: {terminal}");
 }
+
+// ---------------------------------------------------------------------------------------------------------------
+// Seeded crash-reconciliation property test (D3.2b-3, issue #116). The generator above runs a supervision to a random
+// crash point. Then the process "ends": only the recorded frames remain. They are reconciled with random repair
+// records and random observations (fresh, stale, mismatched, contradictory, of other attempts), opened through
+// begin_reconciled, and driven further by the same generator, still holding the dead supervision's grants. After the
+// crash: reconciliation is deterministic and idempotent, never says "never started" after a repair, ends every attempt
+// in flight, preserves every earlier concern, proposes termination only on a fresh matching identity, and the reopened
+// supervision has no grant, clock or description from before; no old grant is ever accepted again.
+
+use crate::lifecycle::reconcile::{
+    is_quiescent, reconcile, start_conflicts, summarize, AttemptObservation, HistoryStatus, ReadBasis, ReconcileInput,
+    Recommendation, RecordedHistory, RunInventory, RunSummary, Seen, StartConflict,
+};
+
+/// Seeds that failed during development, kept as regression fixtures.
+const CRASH_REGRESSION_SEEDS: [u64; 0] = [];
+const CRASH_SEEDS: u64 = 300;
+
+#[derive(Default)]
+struct CrashStats {
+    outcomes: Vec<String>,
+    ready: usize,
+    pending: usize,
+    proposals: usize,
+}
+
+fn replay_frames(frames: &[Vec<Event>]) -> RunProjection {
+    frames.iter().fold(RunProjection::empty(run_id()), |projection, frame| match apply_recorded(&projection, frame) {
+        Ok(next) => next,
+        Err(fault) => panic!("recorded frame faulted: {fault:?}"),
+    })
+}
+
+fn inventory_with(summary: RunSummary) -> RunInventory {
+    let mut summaries: Vec<(RunId, RunSummary)> = (1..=6).map(|number| (RunId::new(number).unwrap(), RunSummary::NeverCreated)).collect();
+    summaries.push((run_id(), summary));
+    RunInventory::Enumerated { allocated: 7, summaries }
+}
+
+fn crash_and_reconcile(seed: u64, stats: &mut CrashStats) {
+    let mut world = World::new(seed ^ 0x5eed_0b3a);
+    let crash_at = 1 + world.rng.below(STEPS as u64) as usize;
+    for _ in 0..crash_at {
+        world.step();
+        // Crash more often while a child's identity is recorded, a short-lived state in the generator.
+        let identified = world.live.projection().current_attempt().is_some_and(|record| record.identity().is_some());
+        if identified && world.rng.chance(30) {
+            break;
+        }
+    }
+    let recorded = replay_frames(&world.frames);
+    assert_eq!(&recorded, world.live.projection());
+    let old_approvals = recorded.approvals().len() as u64;
+    // Repair records still missing from the journal: usually none, sometimes new sidecars, sometimes one already recorded.
+    let fresh_repair = |sidecar| JournalRepair::new(sidecar, 1 + sidecar % 40, 7, RepairCause::IncompleteTail).unwrap();
+    let already = recorded.events().iter().find_map(|e| match &e.body {
+        EventBody::JournalRepaired(repair) => Some(*repair),
+        _ => None,
+    });
+    let repairs = match world.rng.below(10) {
+        0..=5 => Vec::new(),
+        6 | 7 => Vec::from([fresh_repair(10)]),
+        8 => Vec::from([fresh_repair(10), fresh_repair(11)]),
+        _ => Vec::from([already.unwrap_or(fresh_repair(12))]),
+    };
+    // A new process: a new monotonic clock, and an epoch that is new (or, against the caller's promise, reused).
+    let mono = 6_000 + world.rng.below(10_000);
+    let epoch = if world.rng.chance(50) { EPOCH } else { LiveEpoch::new(2) };
+    let mut observations = Vec::new();
+    let in_flight = world.live.projection().current_attempt().map(|record| record.attempt());
+    for index in 0..world.rng.below(4) {
+        // The first observation is usually about the attempt in flight; the others about any attempt.
+        let attempt = match in_flight {
+            Some(attempt) if index == 0 && world.rng.chance(80) => attempt,
+            _ => n(world.attempt_no()),
+        };
+        let recorded_identity = if world.rng.chance(80) { identity() } else { OsIdentity::new(4243, token("start-17"), hash('a')).unwrap() };
+        let seen = [Seen::IdentityMatches, Seen::GoneConfirmed, Seen::PidAbsent, Seen::PidReused, Seen::IdentityMatches, Seen::Unobservable][world.rng.below(6) as usize];
+        let observed_epoch = if world.rng.chance(85) { epoch } else { LiveEpoch::new(77) };
+        let taken = if world.rng.chance(10) { mono + 1 } else { mono.saturating_sub(world.rng.below(7_000)) };
+        observations.push(AttemptObservation { attempt, recorded: recorded_identity, seen, epoch: observed_epoch, taken_mono: MonoMs::new(taken) });
+    }
+    let size = JournalSize { events: recorded.events().len() as u32, bytes: 0 };
+    let stated = if world.rng.chance(5) { u64::MAX } else { world.wall + world.rng.below(5_000) };
+    let input = ReconcileInput { epoch, mono: MonoMs::new(mono), stated_at_ms: stated, size };
+    let history = || RecordedHistory::new(recorded.clone(), HistoryStatus::Verified, repairs.clone());
+    let reconciliation = match reconcile(&history(), &observations, input) {
+        Ok(reconciliation) => reconciliation,
+        Err(refused) => panic!("seed {seed}: reconciliation refused: {refused:?}"),
+    };
+    // Determinism, whatever the order of the observations.
+    let mut reversed = observations.clone();
+    reversed.reverse();
+    for again in [reconcile(&history(), &observations, input), reconcile(&history(), &reversed, input)] {
+        let again = again.ok().unwrap();
+        assert_eq!(again.frame.drafts(), reconciliation.frame.drafts(), "seed {seed}");
+        assert_eq!(again.findings, reconciliation.findings);
+        assert_eq!(again.recommendations(), reconciliation.recommendations());
+        assert_eq!(again.blocking, reconciliation.blocking);
+        assert_eq!(again.informational, reconciliation.informational);
+    }
+    // The frame: repair records first, then at most one reconciler end; no stop, no cancel, nothing else.
+    let drafts = reconciliation.frame.drafts();
+    let repair_count = drafts.iter().take_while(|d| d.producer() == Producer::Journal).count();
+    assert!(drafts[repair_count..].iter().all(|d| d.producer() == Producer::Reconciler));
+    assert!(drafts.len() - repair_count <= 1);
+    assert!(drafts.iter().all(|d| matches!(d.body().kind(), EventKind::JournalRepaired | EventKind::AttemptInterrupted | EventKind::AttemptNotStarted)));
+    let current = recorded.current_attempt().cloned();
+    assert_eq!(current.is_some(), drafts.len() > repair_count, "seed {seed}: the attempt in flight is ended, and only it");
+    let ending = drafts.last().filter(|d| d.producer() == Producer::Reconciler).map(|d| d.body().clone());
+    if let (Some(record), Some(body)) = (&current, &ending) {
+        let repaired = repair_count > 0 || recorded.events().iter().any(|e| e.seq > record.last_change() && e.body.kind() == EventKind::JournalRepaired);
+        match body {
+            EventBody::AttemptNotStarted { .. } => {
+                assert!(!repaired, "seed {seed}: never started after a repair");
+                assert!(matches!(record.state(), AttemptState::Proposed | AttemptState::Approved));
+            }
+            EventBody::AttemptInterrupted { observation, .. } => {
+                stats.outcomes.push(format!("{observation:?}"));
+                let fresh_match = observations.iter().any(|o| {
+                    o.attempt == record.attempt()
+                        && Some(&o.recorded) == record.identity()
+                        && o.seen == Seen::IdentityMatches
+                        && o.epoch == epoch
+                        && o.taken_mono.ms() <= mono
+                        && mono - o.taken_mono.ms() <= MAX_OBSERVATION_AGE_MS
+                });
+                if *observation == InterruptObservation::PossiblyRunning {
+                    assert!(fresh_match, "seed {seed}: possibly running without a fresh matching observation");
+                }
+            }
+            _ => panic!("seed {seed}: unexpected reconciliation draft"),
+        }
+        if matches!(body, EventBody::AttemptNotStarted { .. }) {
+            stats.outcomes.push("NotStarted".into());
+        }
+    }
+    let proposals = reconciliation.recommendations().iter().filter(|r| matches!(r, Recommendation::TerminationProposal { .. })).count();
+    let possibly = matches!(ending, Some(EventBody::AttemptInterrupted { observation: InterruptObservation::PossiblyRunning, .. }));
+    assert_eq!(proposals, usize::from(possibly), "seed {seed}: a proposal exactly for a fresh matching identity");
+    stats.proposals += proposals;
+    // Before opening, the run blocks every start: its attempt in flight was never reconciled, or a repair is pending.
+    let conflicts = start_conflicts(&inventory_with(summarize(&history(), ReadBasis::Locked)), &[]);
+    if let Some(record) = &current {
+        assert!(conflicts.contains(&StartConflict::Unreconciled(run_id(), record.attempt())), "seed {seed}");
+    }
+    // Opening.
+    let wrong_epoch = reconcile(&history(), &observations, ReconcileInput { epoch: LiveEpoch::new(55), ..input }).ok().unwrap();
+    assert!(begin_reconciled(epoch, history(), wrong_epoch.frame, MonoMs::new(mono), size).is_err());
+    let mut live = match begin_reconciled(epoch, history(), reconciliation.frame, MonoMs::new(mono), size) {
+        Ok(Opening::Ready(live)) => {
+            assert_eq!(repair_count + usize::from(current.is_some()), 0);
+            stats.ready += 1;
+            live
+        }
+        Ok(Opening::Pending(pending)) => {
+            stats.pending += 1;
+            world.frames.push(pending.events().to_vec());
+            open(pending)
+        }
+        Err(refused) => panic!("seed {seed}: begin_reconciled refused: {refused:?}"),
+    };
+    let after = live.projection().clone();
+    assert_eq!(replay_frames(&world.frames), after, "seed {seed}: the opening frame replays");
+    assert!(is_quiescent(&after, &repairs));
+    check_invariants(&recorded, &after);
+    // Every concern recorded before stays, with its resolution; the attempt it ended is a blocking orphan unless it
+    // never started.
+    assert_eq!(recorded.concerns(), &after.concerns()[..recorded.concerns().len()]);
+    if let Some(record) = &current {
+        if after.attempt(record.attempt()).unwrap().state().outcome() == Some(OutcomeClass::Unknown) {
+            assert!(reconciliation.blocking.iter().any(|c| c.kind() == ConcernKind::PossibleOrphan && c.attempt() == Some(record.attempt())));
+        }
+    }
+    let unresolved_blocking: Vec<ConcernRef> = after.concerns().iter().filter(|c| c.is_unresolved_blocking()).map(Concern::concern).collect();
+    assert_eq!(reconciliation.blocking, unresolved_blocking);
+    // No authority crosses: no grant, no clock, no description, no outstanding frame.
+    assert!(live.outstanding.is_empty() && live.approvals.is_empty() && live.attempts.is_empty() && live.descriptions.is_empty());
+    assert!(live.in_flight.is_none() && live.unresolved.is_none() && !live.clock_fault);
+    // Idempotence: the opened history reconciles to nothing.
+    let settled = RecordedHistory::new(after.clone(), HistoryStatus::Verified, repairs.clone());
+    let again = reconcile(&settled, &observations, input).ok().unwrap();
+    assert!(again.frame.drafts().is_empty(), "seed {seed}: reconciliation is not idempotent");
+    assert_eq!(again.blocking, reconciliation.blocking);
+    assert_eq!(again.informational, reconciliation.informational);
+    // Once supervised, the run blocks starts only through its unresolved orphans.
+    let orphans: Vec<StartConflict> = unresolved_blocking.iter().map(|c| StartConflict::PossibleOrphan(run_id(), c.attempt().unwrap())).collect();
+    assert_eq!(start_conflicts(&inventory_with(summarize(&settled, ReadBasis::Locked)), &[live.held()]), orphans);
+    // Keep going with the reopened supervision, still holding the dead supervision's grants.
+    std::mem::swap(&mut world.live, &mut live);
+    world.mono = mono;
+    for _ in 0..world.rng.below(STEPS as u64 / 2) {
+        world.step();
+        assert!(world.live.outstanding.iter().all(|approval| approval.number() > old_approvals), "seed {seed}: an old approval became usable");
+    }
+}
+
+#[test]
+fn seeded_crash_reconciliation_never_carries_authority_across_a_restart() {
+    let mut stats = CrashStats::default();
+    for seed in CRASH_REGRESSION_SEEDS {
+        crash_and_reconcile(seed, &mut stats);
+    }
+    for seed in 0..CRASH_SEEDS {
+        crash_and_reconcile(seed, &mut stats);
+    }
+    // The generator reaches every reconciliation outcome, both openings and the termination proposal.
+    for outcome in ["NotStarted", "EvidenceLost", "NoIdentity", "NotRunning", "Unknown", "PossiblyRunning"] {
+        let count = stats.outcomes.iter().filter(|o| *o == outcome).count();
+        assert!(count > 3, "{outcome} reached {count} times");
+    }
+    assert!(stats.ready > 0 && stats.pending > 0, "ready {} pending {}", stats.ready, stats.pending);
+    assert!(stats.proposals > 0);
+}

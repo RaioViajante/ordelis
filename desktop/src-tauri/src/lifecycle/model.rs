@@ -1612,8 +1612,9 @@ pub(crate) enum Rejection {
 }
 
 /// Why replay stopped. The run is then quarantined: read-only, never repaired, never reconciled, and a blocking
-/// condition for every start. `Codec` details belong to the codec (b-4).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// condition for every start. `Codec` details belong to the codec (b-4). Ordered only so that start conflicts can be
+/// sorted deterministically (D3.2b-3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum JournalFault {
     Codec,
     NewerVersion,
