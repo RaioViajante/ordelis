@@ -67,7 +67,7 @@ This is the boundary proposed in the [desktop architecture](../implementation/de
 | Platforms and distribution | [Cross-platform](cross-platform.md) | macOS only |
 | Desktop IPC and trust boundaries | [Desktop architecture](../implementation/desktop-architecture.md) | Implemented |
 | Provider catalog and evidence vocabulary (desktop) | [Desktop agents](../implementation/desktop-agents.md) | Foundation: pure, no command or caller |
-| Execution lifecycle model (desktop) | [Execution lifecycle contracts](../implementation/desktop-execution-contracts.md) | Foundation: pure types, no reducer, command or caller |
+| Execution lifecycle model (desktop) | [Execution lifecycle contracts](../implementation/desktop-execution-contracts.md) | Foundation: pure types, a deterministic reducer and in-memory live authority; no journal, command or caller |
 | Local project registration | [Desktop local projects](../implementation/desktop-local-projects.md) | Backend implemented |
 | Runtime status bridge | [Desktop runtime bridge](../implementation/desktop-runtime-bridge.md) | Implemented, development-only |
 | Execution Safety Gate | [Execution safety gate](../implementation/execution-safety-gate.md) | Implemented, always denies |
