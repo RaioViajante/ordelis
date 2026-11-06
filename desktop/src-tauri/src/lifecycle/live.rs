@@ -12,11 +12,11 @@
 // A grant is consent made usable for recording one consumption. It is never Execution Safety Gate satisfaction, and
 // nothing here, or anywhere in the lifecycle module, turns it or a staged frame into a process start.
 use super::model::{
-    ApprovalId, ApprovalKind, ApprovalRequest, ApprovalState, AttemptNo, AttemptState, ConcernRef, Decision, Event,
+    ApprovalId, ApprovalKind, ApprovalRequest, ApprovalState, AttemptNo, AttemptState, ConcernClass, ConcernRef, Decision, Event,
     EventBody, EventDraft, EventKind, ExpiryBasis, JournalSize, LiveEpoch, MonoMs, OperationDescription, Producer,
     Rejection, RunId,
-    StopReason, SupervisorDraft, VoidReason, WallMs, DeadlineKind, GRANT_USE_MS, MAX_APPROVAL_LIFETIME_MS, MAX_EVENTS,
-    MAX_WALL_MS, RESERVED_EVENTS,
+    StopReason, SupervisorDraft, VoidReason, WallMs, DeadlineKind, GRANT_USE_MS, MAX_APPROVAL_LIFETIME_MS, MAX_BATCH, MAX_EVENTS,
+    MAX_EVENT_BYTES, MAX_FRAME_BYTES, MAX_TAIL_BYTES, MAX_WALL_MS, RESERVED_EVENTS,
 };
 use super::reconcile::{is_quiescent, HistoryStatus, QuarantineReason, ReconciledFrame, RecordedHistory};
 use super::reduce::{apply, RunProjection};
@@ -60,6 +60,12 @@ pub(crate) struct LiveSupervision {
     last_mono: MonoMs,
     /// Entered on a monotonic regression and never left: no decision, consumption or grant, only safety drafts.
     clock_fault: bool,
+    /// Entered for good when the journal may be out of capacity (D3.2c-1): a stated size at the absolute ceiling, or a
+    /// protected draft refused with `LimitExceeded`. Memory only, for this supervision's lifetime; never cleared, by a
+    /// smaller stated size or anything else. A faulted supervision mints and accepts no grant and no decision, stages
+    /// only safety drafts, and its claim on its run excuses nothing in `start_conflicts`: the run then blocks every start
+    /// while it is held. It is not a durable quarantine and records nothing.
+    capacity_fault: bool,
     /// Frames staged so far; the number, with the frame's events, identifies the outstanding one.
     frames: u64,
     in_flight: Option<(u64, Vec<Event>)>,
@@ -132,6 +138,8 @@ pub(crate) enum LiveRefusal {
     Unresolved,
     /// The supervision is in `clock_fault`: only stop, cancel, end, expiry, void, start-identity and repair drafts.
     ClockFault,
+    /// The supervision is capacity-faulted (D3.2c-1): the same drafts as in `clock_fault`, and no grant.
+    CapacityFault,
     /// A decision or consumption outside its monotonic window, or a window that cannot be computed.
     WindowClosed,
     /// A consumption without a grant.
@@ -166,8 +174,8 @@ pub(crate) struct Due {
     pub(crate) clock: ClockCheck,
 }
 
-/// The kinds accepted while in `clock_fault`: the supervisor can still stop and end its own child (r5 6.5), record the
-/// identity of a child that started meanwhile, and record a repair (F2).
+/// The kinds accepted while in `clock_fault` or a capacity fault: the supervisor can still stop and end its own child
+/// (r5 6.5), record the identity of a child that started meanwhile, and record a repair (F2, D3.2c-1).
 const fn safe_in_clock_fault(kind: EventKind) -> bool {
     matches!(
         kind,
@@ -183,6 +191,15 @@ const fn safe_in_clock_fault(kind: EventKind) -> bool {
     )
 }
 
+/// A draft the safety tier admits (D3.2c-1, as the reducer's `protected`): its refusal for capacity faults the supervision.
+fn protected_draft(draft: &EventDraft) -> bool {
+    match draft.body() {
+        EventBody::AttentionResolved(resolved) => resolved.concern().kind().class() == ConcernClass::Blocking,
+        EventBody::JournalRepaired(_) => true,
+        body => body.kind().safety(),
+    }
+}
+
 /// `a + b` in monotonic time; an overflowing deadline is already passed (fail closed).
 fn deadline(start: MonoMs, duration: u64) -> MonoMs {
     MonoMs::new(start.ms().checked_add(duration).unwrap_or(0))
@@ -196,6 +213,7 @@ fn supervision(epoch: LiveEpoch, projection: RunProjection, mono: MonoMs) -> Liv
         projection,
         last_mono: mono,
         clock_fault: false,
+        capacity_fault: false,
         frames: 0,
         in_flight: None,
         unresolved: None,
@@ -230,6 +248,12 @@ pub(crate) struct SupervisedRun<'a> {
 impl SupervisedRun<'_> {
     pub(crate) fn run(&self) -> RunId {
         self.live.projection.run()
+    }
+
+    /// Whether the supervision is capacity-faulted (D3.2c-1): its claim then excuses nothing, and the run blocks every
+    /// start while it is held.
+    pub(crate) fn capacity_faulted(&self) -> bool {
+        self.live.capacity_fault
     }
 
     /// Whether this supervision's recorded history starts with `events`: it recorded what was summarized.
@@ -300,7 +324,9 @@ pub(crate) fn begin_reconciled(epoch: LiveEpoch, history: RecordedHistory, frame
     if !is_quiescent(&projection, history.unrecorded_repairs()) {
         return Err(BeginRefused::NotQuiescent);
     }
-    let live = supervision(epoch, projection, mono);
+    let mut live = supervision(epoch, projection, mono);
+    // A run opened at the ceiling opens capacity-faulted (D3.2c-1).
+    live.capacity_fault = live.stated(size).exhausted();
     Ok(if events.is_empty() { Opening::Ready(live) } else { Opening::Pending(pending(live, events)) })
 }
 
@@ -333,6 +359,16 @@ impl LiveSupervision {
 
     pub(crate) const fn in_clock_fault(&self) -> bool {
         self.clock_fault
+    }
+
+    pub(crate) const fn in_capacity_fault(&self) -> bool {
+        self.capacity_fault
+    }
+
+    /// The caller's stated size, never less than what this supervision holds.
+    fn stated(&self, size: JournalSize) -> JournalSize {
+        let held = u32::try_from(self.projection.events().len()).unwrap_or(u32::MAX);
+        JournalSize { events: size.events.max(held), bytes: size.bytes }
     }
 
     /// The memory-only description of a pending approval.
@@ -372,6 +408,9 @@ impl LiveSupervision {
     /// matching grant). Mints nothing. At most one frame is outstanding.
     pub(crate) fn stage(&mut self, drafts: &[EventDraft], grant: Option<LiveGrant>, mono: MonoMs, size: JournalSize) -> Result<Staged, StageRejected> {
         let (mono, _) = self.observe(mono);
+        if self.stated(size).exhausted() {
+            self.capacity_fault = true;
+        }
         let refuse = |refusal, grant| Err(StageRejected { refusal, grant });
         if self.in_flight.is_some() {
             return refuse(LiveRefusal::InFlight, grant);
@@ -384,6 +423,9 @@ impl LiveSupervision {
         }
         if self.clock_fault && (grant.is_some() || drafts.iter().any(|draft| !safe_in_clock_fault(draft.body().kind()))) {
             return refuse(LiveRefusal::ClockFault, grant);
+        }
+        if self.capacity_fault && (grant.is_some() || drafts.iter().any(|draft| !safe_in_clock_fault(draft.body().kind()))) {
+            return refuse(LiveRefusal::CapacityFault, grant);
         }
         let consumptions: Vec<&EventDraft> =
             drafts.iter().filter(|draft| matches!(draft.body().kind(), EventKind::StartBegun | EventKind::ApprovalConsumed)).collect();
@@ -407,7 +449,15 @@ impl LiveSupervision {
         }
         let applied = match apply(&self.projection, drafts, size) {
             Ok(applied) => applied,
-            Err(rejection) => return refuse(LiveRefusal::Rejected(rejection), grant),
+            Err(rejection) => {
+                // A protected draft refused for capacity (D3.2c-1): its stop, end or repair could not be recorded, so
+                // nothing about this run may be taken as settled while it is supervised. Conservative: a protected
+                // draft in an oversized batch faults too.
+                if rejection == Rejection::LimitExceeded && drafts.len() <= MAX_BATCH && drafts.iter().any(protected_draft) {
+                    self.capacity_fault = true;
+                }
+                return refuse(LiveRefusal::Rejected(rejection), grant);
+            }
         };
         let progress = drafts
             .iter()
@@ -424,6 +474,17 @@ impl LiveSupervision {
             })
             .filter(|(approval, _)| applied.events.iter().any(|event| matches!(&event.body, EventBody::ApprovalRequested(request) if request.fields().approval == *approval)))
             .collect();
+        // A frame that brings the journal to a ceiling leaves no room for what may follow (the end of the attempt it
+        // stops, for example): the supervision faults now, whether the frame is then confirmed or abandoned (review of
+        // #120). Bytes are counted at the largest a frame of these events can take: each event at its largest with its
+        // separator, the payload's brackets, and the frame's header and newline.
+        let stated = self.stated(size);
+        let count = u32::try_from(applied.events.len()).unwrap_or(u32::MAX);
+        let largest = u64::from(count) * (u64::from(MAX_EVENT_BYTES) + 1) + 1 + u64::from(MAX_TAIL_BYTES - MAX_FRAME_BYTES);
+        let after = JournalSize { events: stated.events.saturating_add(count), bytes: stated.bytes.saturating_add(largest) };
+        if after.exhausted() {
+            self.capacity_fault = true;
+        }
         self.frames += 1;
         self.in_flight = Some((self.frames, applied.events.clone()));
         Ok(Staged { epoch: self.epoch, frame: self.frames, events: applied.events, projection: applied.projection, mono, progress, descriptions, grant })
@@ -555,7 +616,7 @@ impl LiveSupervision {
                     };
                     self.approvals[index].use_by = Some(use_by.unwrap_or(MonoMs::new(0)));
                     let still_granted = self.projection.approval(*approval).map(|record| record.state()) == Some(ApprovalState::Granted);
-                    if let (true, false, true, Some(use_by)) = (mint, self.clock_fault, still_granted, use_by) {
+                    if let (true, false, false, true, Some(use_by)) = (mint, self.clock_fault, self.capacity_fault, still_granted, use_by) {
                         if let Some(grant) = self.mint(*approval, use_by) {
                             self.outstanding.push(*approval);
                             grants.push(grant);
@@ -601,6 +662,9 @@ impl LiveSupervision {
     /// generated consequences end that attempt's approvals.
     pub(crate) fn due(&mut self, mono: MonoMs, stated_at_ms: u64, size: JournalSize) -> Due {
         let (mono, clock) = self.observe(mono);
+        if self.stated(size).exhausted() {
+            self.capacity_fault = true;
+        }
         let mut drafts = Vec::new();
         let Some(current) = self.projection.current_attempt() else { return Due { drafts, clock } };
         let attempt = current.attempt();
@@ -621,7 +685,7 @@ impl LiveSupervision {
         let stop = match (started_or_starting, limits) {
             (false, _) | (_, None) => None,
             (true, _) if self.clock_fault => Some(StopReason::ClockFault),
-            (true, _) if in_reserve => Some(StopReason::JournalFull),
+            (true, _) if in_reserve || self.capacity_fault => Some(StopReason::JournalFull),
             (true, Some(limits)) => match state {
                 AttemptState::Starting if passed(times.and_then(|t| t.begun), limits.start_ms()) => Some(StopReason::Deadline(DeadlineKind::Start)),
                 AttemptState::Running if passed(times.and_then(|t| t.started), limits.run_ms()) => Some(StopReason::Deadline(DeadlineKind::Run)),

@@ -596,3 +596,176 @@ fn a_repair_already_recorded_never_vouches_for_a_new_tail() {
     assert!(matches!(&bodies[0], EventBody::JournalRepaired(repair) if repair.sidecar() == 2));
     assert_eq!(bodies[1], EventBody::AttemptInterrupted { attempt: n(1), observation: InterruptObservation::EvidenceLost });
 }
+
+// ---------------------------------------------------------------------------------------------------------------
+// D3.2c-1 (#120): the frame and capacity rules hold on recorded bytes
+
+#[test]
+fn a_recorded_start_followed_by_anything_quarantines() {
+    let journal = approved();
+    let start = crate::lifecycle::reduce::apply(&journal.projection, &[begin(1, 1, T0 + 3_000)], journal.size()).unwrap();
+    let identity = crate::lifecycle::reduce::apply(&start.projection, &[started(1, T0 + 4_000)], journal.size()).unwrap();
+    let joined: Vec<Event> = start.events.iter().chain(identity.events.iter()).cloned().collect();
+    let mut frames = journal.frames.clone();
+    frames.push(joined);
+    let bytes = stream(&frames);
+    let history = replayed(&bytes);
+    assert_eq!(history.fault(), Some(JournalFault::StartNotLast));
+    assert_eq!(history.projection(), &journal.projection);
+    let recorded = RecordedHistory::from_replay(history, evidence(mark_after(&frames, frames.len()), Vec::new())).unwrap();
+    assert_eq!(recorded.status(), HistoryStatus::Quarantined(QuarantineReason::Fault(JournalFault::StartNotLast)));
+    // The valid order replays.
+    let mut valid = journal.frames.clone();
+    valid.push(start.events.clone());
+    valid.push(identity.events.clone());
+    assert_eq!(replayed(&stream(&valid)).projection(), &identity.projection);
+}
+
+#[test]
+fn near_exhaustion_a_run_still_stops_reconciles_and_resolves_its_orphan() {
+    use crate::lifecycle::reduce::tests::filled;
+    // A running attempt whose journal holds MAX_EVENTS real events (repair records 1 to 64 fill the reserve).
+    let journal = filled(MAX_EVENTS);
+    let bytes = stream(&journal.frames);
+    let full = replayed(&bytes);
+    assert_eq!(full.fault(), None);
+    assert_eq!(full.projection(), &journal.projection);
+    // A crash leaves a torn tail; the new repair must use a sidecar above every recorded one.
+    let mut torn = bytes.clone();
+    torn.extend_from_slice(b"ORDJ1 4");
+    let tail = &torn[bytes.len()..];
+    let mark = mark_after(&journal.frames, journal.frames.len());
+    let highest = highest_sidecar(&journal);
+    let stale = JournalRepair::new(highest, tail.len() as u32, crc32c(tail), RepairCause::IncompleteTail).unwrap();
+    assert_eq!(RecordedHistory::from_replay(replayed(&torn), evidence(mark, Vec::from([stale]))).err(), Some(HistoryRefused::TailNotRepaired));
+    let history = RecordedHistory::from_replay(replayed(&torn), evidence(mark, Vec::from([tail_repair(highest + 1, tail)]))).unwrap();
+    // Reconciliation fits in the safety tier: the repair and the interruption are recorded together.
+    let size = JournalSize { events: MAX_EVENTS, bytes: torn.len() as u64 };
+    let input = ReconcileInput { epoch: EPOCH, mono: MonoMs::new(MONO), stated_at_ms: AT, size };
+    let reconciliation = reconcile(&history, &[], input).unwrap();
+    let kinds: Vec<EventKind> = reconciliation.frame.drafts().iter().map(|draft| draft.body().kind()).collect();
+    assert_eq!(kinds, [EventKind::JournalRepaired, EventKind::AttemptInterrupted]);
+    let Ok(Opening::Pending(pending)) = begin_reconciled(EPOCH, history, reconciliation.frame, MonoMs::new(MONO), size) else { panic!("not pending") };
+    let mut frames = journal.frames.clone();
+    frames.push(pending.events().to_vec());
+    let mut live = open(pending);
+    // The orphan is a blocking concern: its resolution is admitted past MAX_EVENTS; an informational one is not.
+    let orphan = live.projection().concerns().iter().find(|c| c.concern().kind() == ConcernKind::PossibleOrphan).unwrap().concern();
+    let workspace = live.projection().concerns().iter().find(|c| c.concern().kind() == ConcernKind::WorkspaceUnknown).unwrap().concern();
+    let size = JournalSize { events: live.projection().events().len() as u32, bytes: 0 };
+    assert!(live.stage(&[resolve(workspace, Resolution::Reviewed, AT)], None, MonoMs::new(MONO + 1), size).is_err());
+    let staged = live.stage(&[resolve(orphan, Resolution::AcceptedRisk, AT)], None, MonoMs::new(MONO + 1), size).map_err(|r| r.refusal).unwrap();
+    frames.push(staged.events().to_vec());
+    live.confirm(staged).unwrap();
+    assert!(!live.projection().has_unresolved_blocking_concern());
+    // The recorded bytes replay to the live projection, and no conflict remains from this run.
+    let bytes = stream(&frames);
+    assert_eq!(replayed(&bytes).projection(), live.projection());
+    let reopened = RecordedHistory::from_replay(replayed(&bytes), evidence(mark_after(&frames, frames.len()), Vec::new())).unwrap();
+    let mut summaries: Vec<_> = (1..7).map(|k| (RunId::new(k).unwrap(), crate::lifecycle::reconcile::RunSummary::NeverCreated)).collect();
+    summaries.push((run_id(), summarize(&reopened, ReadBasis::Locked)));
+    assert_eq!(start_conflicts(&RunInventory::Enumerated { allocated: 7, summaries }, &[]), []);
+}
+
+#[test]
+fn replay_refuses_unprotected_records_past_the_event_limit() {
+    use crate::lifecycle::reduce::tests::filled;
+    let journal = filled(MAX_EVENTS);
+    let last = journal.projection.events().last().unwrap().clone();
+    let next = |body: EventBody, producer: Producer| Event { seq: Seq::new(last.seq.number() + 1).unwrap(), producer, body, ..last.clone() };
+    // A progress report and a session report past MAX_EVENTS: the live path refuses them, and so does replay.
+    for record in [
+        next(EventBody::Progress { attempt: n(1), kind: ProgressKind::ToolActivity }, Producer::ProviderRelay),
+        next(EventBody::ProviderSessionObserved { attempt: n(1), session: token("session-9") }, Producer::ProviderRelay),
+    ] {
+        let mut frames = journal.frames.clone();
+        frames.push(Vec::from([record]));
+        let history = replayed(&stream(&frames));
+        assert_eq!(history.fault(), Some(JournalFault::LimitExceeded));
+        assert_eq!(history.projection(), &journal.projection);
+    }
+    // A protected one is accepted, as live.
+    let mut frames = journal.frames.clone();
+    frames.push(Vec::from([next(EventBody::StopRequested { attempt: n(1), reason: StopReason::JournalFull }, Producer::Supervisor)]));
+    assert_eq!(replayed(&stream(&frames)).fault(), None);
+}
+
+fn highest_sidecar(journal: &Journal) -> u32 {
+    journal.projection.events().iter().filter_map(|event| match &event.body {
+        EventBody::JournalRepaired(repair) => Some(repair.sidecar()),
+        _ => None,
+    }).max().unwrap_or(0)
+}
+
+/// Reopens `bytes` (whose last `cut` bytes are a torn tail) as the adapter would, with a repair above every recorded one,
+/// and returns the reconciliation's drafts and the conflicts once it is open and summarized again.
+fn reopen_after_tear(journal_frames: &[Vec<Event>], bytes: &[u8], cut: usize, highest: u32) -> (Vec<EventKind>, Vec<StartConflict>) {
+    let tail = &bytes[bytes.len() - cut..];
+    let mark = mark_after(journal_frames, journal_frames.len());
+    let history = RecordedHistory::from_replay(replayed(bytes), evidence(mark, Vec::from([tail_repair(highest + 1, tail)]))).unwrap();
+    let size = JournalSize { events: history.projection().events().len() as u32, bytes: bytes.len() as u64 };
+    let input = ReconcileInput { epoch: EPOCH, mono: MonoMs::new(MONO), stated_at_ms: AT, size };
+    let reconciliation = reconcile(&history, &[], input).unwrap();
+    let kinds: Vec<EventKind> = reconciliation.frame.drafts().iter().map(|draft| draft.body().kind()).collect();
+    let mut frames = journal_frames.to_vec();
+    match begin_reconciled(EPOCH, history, reconciliation.frame, MonoMs::new(MONO), size) {
+        Ok(Opening::Pending(pending)) => frames.push(pending.events().to_vec()),
+        Ok(Opening::Ready(_)) => {}
+        Err(refused) => panic!("{refused:?}"),
+    }
+    let clean = stream(&frames);
+    let reopened = RecordedHistory::from_replay(replayed(&clean), evidence(mark_after(&frames, frames.len()), Vec::new())).unwrap();
+    let mut summaries: Vec<_> = (1..7).map(|k| (RunId::new(k).unwrap(), crate::lifecycle::reconcile::RunSummary::NeverCreated)).collect();
+    summaries.push((run_id(), summarize(&reopened, ReadBasis::Locked)));
+    (kinds, start_conflicts(&RunInventory::Enumerated { allocated: 7, summaries }, &[]))
+}
+
+#[test]
+fn a_torn_protected_write_after_the_attempt_ended_is_still_repairable_past_the_limit() {
+    use crate::lifecycle::reduce::tests::filled;
+    // Review of #120 (q1): past MAX_EVENTS, the orphan's resolution is written after the attempt ended, and tears. At
+    // the next opening nothing is in flight, so reconciliation drafts the repair alone: it must be admitted, or the run
+    // would block every start for good with `RepairPending`.
+    let mut journal = filled(MAX_EVENTS);
+    journal.ok(Vec::from([repaired(highest_sidecar(&journal) + 1, AT), interrupted(1, InterruptObservation::Unknown, AT)]));
+    let orphan = journal.projection.concerns().iter().find(|c| c.concern().kind() == ConcernKind::PossibleOrphan).unwrap().concern();
+    let resolution = crate::lifecycle::reduce::apply(&journal.projection, &[resolve(orphan, Resolution::AcceptedRisk, AT)], journal.size()).unwrap();
+    let whole = encode_frame(&resolution.events).unwrap();
+    let mut bytes = stream(&journal.frames);
+    bytes.extend_from_slice(&whole[..whole.len() / 2]);
+    let (kinds, conflicts) = reopen_after_tear(&journal.frames, &bytes, whole.len() / 2, highest_sidecar(&journal));
+    assert_eq!(kinds, [EventKind::JournalRepaired]);
+    // The resolution was lost with the tail: the orphan still blocks, and nothing else does.
+    assert_eq!(conflicts, [StartConflict::PossibleOrphan(run_id(), n(1))]);
+
+    // Review of #120 (q1b): no orphan at all; the run is stopped and ended past the limit, then a run cancel tears.
+    let mut journal = filled(MAX_EVENTS);
+    journal.one(stop(1, StopReason::JournalFull, AT));
+    journal.one(exited(1, 0, AT));
+    let cancel_run = crate::lifecycle::reduce::apply(&journal.projection, &[cancel(CancelScope::Run, AT)], journal.size()).unwrap();
+    let whole = encode_frame(&cancel_run.events).unwrap();
+    let mut bytes = stream(&journal.frames);
+    bytes.extend_from_slice(&whole[..whole.len() - 1]);
+    let (kinds, conflicts) = reopen_after_tear(&journal.frames, &bytes, whole.len() - 1, highest_sidecar(&journal));
+    assert_eq!(kinds, [EventKind::JournalRepaired]);
+    assert_eq!(conflicts, []);
+}
+
+#[test]
+fn a_tail_past_the_repair_cap_is_refused_for_quarantine() {
+    // Review of #120 (N6): a torn tail that would be the run's 41st repair is refused as `TooManyRepairs`, the refusal that
+    // already tells the adapter to quarantine, never as a generic rejection.
+    let mut journal = running();
+    for sidecar in 1..=MAX_REPAIRS {
+        journal.one(repaired(sidecar, AT));
+    }
+    let mut bytes = stream(&journal.frames);
+    bytes.extend_from_slice(b"ORDJ1 9");
+    let tail = &bytes[bytes.len() - 7..];
+    let history = RecordedHistory::from_replay(replayed(&bytes), evidence(mark_after(&journal.frames, journal.frames.len()), Vec::from([tail_repair(MAX_REPAIRS + 1, tail)]))).unwrap();
+    assert_eq!(reconcile(&history, &[], input(history.projection())).err(), Some(crate::lifecycle::reconcile::ReconcileRefused::TooManyRepairs));
+    // The run stays unreconciled and blocks every start.
+    let mut summaries: Vec<_> = (1..7).map(|k| (RunId::new(k).unwrap(), crate::lifecycle::reconcile::RunSummary::NeverCreated)).collect();
+    summaries.push((run_id(), summarize(&history, ReadBasis::Locked)));
+    assert!(!start_conflicts(&RunInventory::Enumerated { allocated: 7, summaries }, &[]).is_empty());
+}
