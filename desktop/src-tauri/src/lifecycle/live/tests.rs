@@ -1483,12 +1483,12 @@ fn the_size_is_derived_from_the_frames_and_a_caller_can_only_raise_it() {
     live.confirm(duplicate).ok().unwrap();
     assert_eq!(live.journal_size().bytes, encoded(&frames));
     // An understated size cannot hide what the supervision holds: at the ceiling it faults (c-1's second defense).
-    live.bytes = MAX_JOURNAL_BYTES + SAFETY_JOURNAL_BYTES;
+    live.known_bytes = MAX_JOURNAL_BYTES + SAFETY_JOURNAL_BYTES;
     assert_eq!(refusal(&mut live, Vec::from([decide(1, Decision::Granted, T0 + 2_000)]), None, 2_000).0, LiveRefusal::CapacityFault);
     assert!(live.in_capacity_fault());
     // In the reserve by bytes alone, `due` proposes the journal-full stop with a size of zero stated.
     let mut running = running_live();
-    running.bytes = MAX_JOURNAL_BYTES - RESERVED_JOURNAL_BYTES;
+    running.known_bytes = MAX_JOURNAL_BYTES - RESERVED_JOURNAL_BYTES;
     let due = running.due(m(5_000), T0 + 5_000, JournalSize { events: 0, bytes: 0 });
     assert_eq!(*due.drafts[0].body(), EventBody::StopRequested { attempt: n(1), reason: StopReason::JournalFull });
 }

@@ -395,6 +395,7 @@ const EVIDENCE_IMPLS: [string, string][] = [
     "impl TornTailEvidence {\n    pub(crate) const fn len(&self) -> u32 {\n        self.owed.len\n    }\n\n    pub(crate) const fn crc32c(&self) -> u32 {\n        self.owed.crc32c\n    }\n}",
   ],
 ];
+const GUARDED_FIELD_MENTIONS: Record<string, number> = { poisoned: 13, capacity_fault: 12, clock_fault: 9, uncertain: 6, owed: 19, checked: 5, known_bytes: 9, last_mono: 5 };
 const REVIEWED_FAULT_ASSIGNMENTS = [
   "capacity_fault = live.stated(size).exhausted()",
   "capacity_fault = true",
@@ -406,6 +407,10 @@ const REVIEWED_FAULT_ASSIGNMENTS = [
   "owed = Some(owed)",
   "checked = None",
   "checked = Some(check)",
+  "known_bytes = encoded_len(&applied.events).ok_or(Rejection::InvalidDraft)?",
+  "known_bytes = history.journal_bytes().saturating_add(opening)",
+  "known_bytes = self.known_bytes.saturating_add(bytes.len() as u64)",
+  "last_mono = mono",
 ];
 // `Name {` that builds a value: not a declaration, an impl block or a return type.
 const structLiteral = (name: string) => new RegExp(`(?<!(?:\\bstruct|\\bimpl|->|\\blet)\\s*)\\b${name}\\s*\\{`, "g");
@@ -473,8 +478,14 @@ function liveAuthorityViolations(files: Record<string, string>): string[] {
   }
   // Fault states only ever enter (review of #122): poisoned, clock_fault and capacity_fault are only set, the repair
   // owed and the uncertain count change only at their reviewed sites, and nothing takes, swaps or borrows them.
-  const assignments = [...live.matchAll(/\.(poisoned|capacity_fault|clock_fault|uncertain|owed|checked)\s*=(?![=>])\s*([^;]*);/g)].map((m) => `${m[1]} = ${m[2].trim()}`);
+  const assignments = [...live.matchAll(/\.(poisoned|capacity_fault|clock_fault|uncertain|owed|checked|known_bytes|last_mono)\s*=(?![=>])\s*([^;]*);/g)].map((m) => `${m[1]} = ${m[2].trim()}`);
   for (const assignment of assignments) if (!REVIEWED_FAULT_ASSIGNMENTS.includes(assignment)) violations.push(`live.rs: ${assignment}`);
+  // Re-review of #122: every mention of a guarded field is counted, so no new site (a destructuring, a compound
+  // assignment, a mutable borrow, a `ref mut` pattern) can lower one; the size and the monotonic floor too.
+  for (const [field, count] of Object.entries(GUARDED_FIELD_MENTIONS)) {
+    const found = (live.match(new RegExp(`\\b${field}\\b`, "g")) ?? []).length;
+    if (found !== count) violations.push(`live.rs: ${field} named ${found} times, reviewed ${count}`);
+  }
   if (/\.(?:poisoned|capacity_fault|clock_fault|uncertain|owed|checked)\s*\.\s*(?:take|replace|get_or_insert\w*|as_mut|insert)\b/.test(live) || /&\s*mut\s+[\w.]*\.(?:poisoned|capacity_fault|clock_fault|uncertain|owed|checked)\b/.test(live) || /\bmem::/.test(live)) {
     violations.push("live.rs: a fault state changed other than by assignment");
   }
@@ -1110,6 +1121,15 @@ describe("desktop trust boundary", () => {
       "an unpoisoned supervision": add("lifecycle/live.rs", "impl LiveSupervision { pub(crate) fn unpoison(&mut self) { self.poisoned = false; self.uncertain = 0; self.owed = None; } }"),
       "a capacity fault cleared": add("lifecycle/live.rs", "impl LiveSupervision { fn clear(&mut self) { self.capacity_fault = false; } }"),
       "a repair owed taken": add("lifecycle/live.rs", "impl LiveSupervision { fn forget(&mut self) { let _ = self.owed.take(); } }"),
+      // Re-review of #122 (N1 to N8, and the size and monotonic floor).
+      "resets at a new site": add("lifecycle/live.rs", "impl LiveSupervision { fn reset(&mut self) { self.owed = None; self.uncertain = 0; self.checked = None; } }"),
+      "a destructured poison flag": add("lifecycle/live.rs", "impl LiveSupervision { fn d(&mut self) { let LiveSupervision { poisoned, uncertain, .. } = self; *poisoned = false; *uncertain = 0; } }"),
+      "a compound decrement": add("lifecycle/live.rs", "impl LiveSupervision { fn d(&mut self) { self.uncertain -= 1; } }"),
+      "a compound clear": add("lifecycle/live.rs", "impl LiveSupervision { fn d(&mut self) { self.poisoned &= false; self.capacity_fault &= false; } }"),
+      "a parenthesized borrow": add("lifecycle/live.rs", "impl LiveSupervision { fn d(&mut self) { *(&mut (self.poisoned)) = false; let _ = Option::take(&mut (self.owed)); } }"),
+      "a ref mut pattern": add("lifecycle/live.rs", "impl LiveSupervision { fn d(&mut self) { match self.poisoned { ref mut p => *p = false } } }"),
+      "a lowered size": add("lifecycle/live.rs", "impl LiveSupervision { fn d(&mut self, committed: &[u8]) { self.known_bytes = committed.len() as u64; } }"),
+      "a lowered monotonic floor": add("lifecycle/live.rs", "impl LiveSupervision { fn d(&mut self) { self.last_mono = MonoMs::new(0); } }"),
       "a poison flag swapped": add("lifecycle/live.rs", "impl LiveSupervision { fn swap(&mut self, other: &mut bool) { std::mem::swap(&mut self.poisoned, other); } }"),
       "an alias of the outcome": add("lifecycle/live.rs", "type O = WriteOutcome;"),
     };

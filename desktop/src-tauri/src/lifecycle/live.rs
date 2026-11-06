@@ -88,7 +88,7 @@ pub(crate) struct LiveSupervision {
     outstanding: Vec<ApprovalId>,
     /// The canonical bytes of every frame this supervision knows is in the journal (D3.2c-2): the replayed base, a torn
     /// tail included, and each frame confirmed or adopted since. Never lowered.
-    bytes: u64,
+    known_bytes: u64,
     /// Uncertain appends (`abandon`) since the last confirmed one. Reaching `MAX_CONSECUTIVE_UNCERTAIN` poisons.
     uncertain: u32,
     /// Entered for good when the stream can no longer be trusted (r5 5.4): an outcome `Diverged` or `Unknown`, or too
@@ -307,7 +307,7 @@ fn supervision(epoch: LiveEpoch, projection: RunProjection, mono: MonoMs) -> Liv
         attempts: Vec::new(),
         descriptions: Vec::new(),
         outstanding: Vec::new(),
-        bytes: 0,
+        known_bytes: 0,
         uncertain: 0,
         poisoned: false,
         owed: None,
@@ -340,7 +340,7 @@ pub(crate) fn begin_new(epoch: LiveEpoch, run: RunId, run_created: EventDraft, m
     }
     let applied = apply(&RunProjection::empty(run), &[run_created], JournalSize { events: 0, bytes: 0 })?;
     let mut live = supervision(epoch, applied.projection, mono);
-    live.bytes = encoded_len(&applied.events).ok_or(Rejection::InvalidDraft)?;
+    live.known_bytes = encoded_len(&applied.events).ok_or(Rejection::InvalidDraft)?;
     Ok(pending(live, applied.events))
 }
 
@@ -450,7 +450,7 @@ pub(crate) fn begin_reconciled(epoch: LiveEpoch, history: RecordedHistory, frame
     // The replayed bytes, a torn tail included (removed by the opening frame's repair, but counted for this lifetime),
     // and the opening frame's.
     let opening = encoded_len(&events).ok_or(BeginRefused::Rejected(Rejection::InvalidDraft))?;
-    live.bytes = history.journal_bytes().saturating_add(opening);
+    live.known_bytes = history.journal_bytes().saturating_add(opening);
     // A run opened at the ceiling opens capacity-faulted (D3.2c-1).
     live.capacity_fault = live.stated(size).exhausted();
     Ok(if events.is_empty() { Opening::Ready(live) } else { Opening::Pending(pending(live, events)) })
@@ -505,7 +505,7 @@ impl LiveSupervision {
     pub(crate) fn journal_size(&self) -> JournalSize {
         let events = u32::try_from(self.projection.events().len()).unwrap_or(u32::MAX);
         let tail = self.owed.map_or(0, |owed| u64::from(owed.len));
-        JournalSize { events, bytes: self.bytes.saturating_add(tail) }
+        JournalSize { events, bytes: self.known_bytes.saturating_add(tail) }
     }
 
     /// The size used for every check: the derived one, raised (never lowered) by the caller's stated size.
@@ -760,7 +760,7 @@ impl LiveSupervision {
         if events.iter().any(|event| matches!(event.body, EventBody::JournalRepaired(_))) {
             self.owed = None;
         }
-        self.bytes = self.bytes.saturating_add(bytes.len() as u64);
+        self.known_bytes = self.known_bytes.saturating_add(bytes.len() as u64);
         Ok(self.settle(&events, projection, mono, &progress, descriptions, true))
     }
 
@@ -844,7 +844,7 @@ impl LiveSupervision {
         }
         self.unresolved = None;
         let Abandoned { events, projection, mono, progress, descriptions, bytes, .. } = abandoned;
-        self.bytes = self.bytes.saturating_add(bytes.len() as u64);
+        self.known_bytes = self.known_bytes.saturating_add(bytes.len() as u64);
         self.settle(&events, projection, mono, &progress, descriptions, false);
         Ok(())
     }
