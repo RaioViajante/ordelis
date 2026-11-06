@@ -15,6 +15,7 @@ use super::model::{
     JournalFault, JournalRepair, JournalSize, LiveEpoch, MonoMs, NotStartedCause, NotStartedReason, OsIdentity,
     ReconcilerDraft, Rejection, RunId, RunState, MAX_OBSERVATION_AGE_MS,
 };
+use super::live::SupervisedRun;
 use super::reduce::{apply, AttemptRecord, RunProjection};
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -177,11 +178,14 @@ pub(crate) enum Recommendation {
 // ---------------------------------------------------------------------------------------------------------------
 // Reconciliation
 
-/// The opening frame `reconcile` computed for one recorded history, one epoch and one monotonic time. Built only here;
-/// `begin_reconciled` accepts it only for that history and epoch. It cannot be cloned, so it opens at most once.
+/// The opening frame `reconcile` computed for one recorded history (its projection, status and missing repairs), one
+/// epoch and one monotonic time. Built only here; `begin_reconciled` accepts it only for exactly that history and
+/// epoch. It cannot be cloned and is consumed by value, so each frame opens at most once. That one run has at most one
+/// supervision is the adapter's lock (r5 5.3): `reconcile` called twice gives two frames.
 pub(crate) struct ReconciledFrame {
     epoch: LiveEpoch,
     mono: MonoMs,
+    status: HistoryStatus,
     basis: RunProjection,
     repairs: Vec<JournalRepair>,
     drafts: Vec<EventDraft>,
@@ -201,21 +205,29 @@ impl ReconciledFrame {
         self.mono
     }
 
-    /// Whether this frame was computed for exactly this history.
+    /// Whether this frame was computed for exactly this history: the same status, projection and missing repairs.
     pub(crate) fn computed_for(&self, history: &RecordedHistory) -> bool {
-        self.basis == history.projection && self.repairs == history.unrecorded_repairs
+        self.status == history.status && self.basis == history.projection && self.repairs == history.unrecorded_repairs
     }
 }
 
 /// What reconciliation found. `blocking` and `informational` are the run's unresolved concerns after the frame, kept
 /// apart: each blocking concern stops a new attempt in this run and every start elsewhere until the user resolves it;
-/// informational ones never block.
+/// informational ones never block. The recommendations are private and nothing outside tests reads them: showing them
+/// belongs to a later, separately reviewed interface.
 pub(crate) struct Reconciliation {
     pub(crate) frame: ReconciledFrame,
     pub(crate) findings: Vec<Finding>,
-    pub(crate) recommendations: Vec<Recommendation>,
+    recommendations: Vec<Recommendation>,
     pub(crate) blocking: Vec<ConcernRef>,
     pub(crate) informational: Vec<ConcernRef>,
+}
+
+impl Reconciliation {
+    #[cfg(test)]
+    pub(crate) fn recommendations(&self) -> &[Recommendation] {
+        &self.recommendations
+    }
 }
 
 /// Why no reconciliation could be computed. The run then stays unreconciled, which blocks every start.
@@ -225,7 +237,7 @@ pub(crate) enum ReconcileRefused {
     NoRun,
     /// More than two repair records are missing: opening failed repeatedly, and the adapter quarantines (r5 5.7).
     TooManyRepairs,
-    /// A reported repair names a sidecar already recorded with other content.
+    /// A reported repair names a sidecar already recorded with other content, or a sidecar reported twice.
     RepairConflict,
     /// The reducer refused the frame.
     Rejected(Rejection),
@@ -253,7 +265,10 @@ pub(crate) fn reconcile(history: &RecordedHistory, observations: &[AttemptObserv
     } else if projection.spec().is_none() {
         return Err(ReconcileRefused::NoRun);
     } else {
-        for repair in &history.unrecorded_repairs {
+        for (index, repair) in history.unrecorded_repairs.iter().enumerate() {
+            if history.unrecorded_repairs[..index].iter().any(|earlier| earlier.sidecar() == repair.sidecar()) {
+                return Err(ReconcileRefused::RepairConflict);
+            }
             match recorded_repair(projection, repair.sidecar()) {
                 Some(recorded) if recorded == *repair => {}
                 Some(_) => return Err(ReconcileRefused::RepairConflict),
@@ -328,6 +343,7 @@ pub(crate) fn reconcile(history: &RecordedHistory, observations: &[AttemptObserv
     let frame = ReconciledFrame {
         epoch: input.epoch,
         mono: input.mono,
+        status: history.status,
         basis: projection.clone(),
         repairs: history.unrecorded_repairs.clone(),
         drafts,
@@ -411,6 +427,8 @@ pub(crate) struct VerifiedRun {
     run: RunId,
     read: ReadBasis,
     orphans: Vec<AttemptNo>,
+    /// An unresolved blocking concern about the run rather than one attempt (none exists in v1).
+    run_blocked: bool,
     in_flight: Option<AttemptNo>,
     repairs_pending: bool,
 }
@@ -434,11 +452,12 @@ pub(crate) fn summarize(history: &RecordedHistory, read: ReadBasis) -> RunSummar
     if projection.spec().is_none() {
         return RunSummary::Unverified(Unverified::NoRunCreated);
     }
-    let orphans = projection.concerns().iter().filter(|concern| concern.is_unresolved_blocking()).filter_map(|concern| concern.concern().attempt()).collect();
+    let blocking: Vec<ConcernRef> = projection.concerns().iter().filter(|concern| concern.is_unresolved_blocking()).map(|concern| concern.concern()).collect();
     RunSummary::Verified(VerifiedRun {
         run: projection.run(),
         read,
-        orphans,
+        orphans: blocking.iter().filter_map(ConcernRef::attempt).collect(),
+        run_blocked: blocking.iter().any(|concern| concern.attempt().is_none()),
         in_flight: projection.current_attempt().map(AttemptRecord::attempt),
         repairs_pending: history.unrecorded_repairs.iter().any(|repair| recorded_repair(projection, repair.sidecar()) != Some(*repair)),
     })
@@ -460,13 +479,15 @@ pub(crate) enum StartConflict {
     /// Allocated ids with no summary.
     Unaccounted { from: RunId, through: RunId },
     /// A summary that contradicts the inventory: a second one for an id, an id the counter never allocated, a summary
-    /// of another run, or a supervised run that is not verified.
+    /// of another run, or a supervised run that is missing from the inventory or said never to have been created.
     Contradictory(RunId),
     Quarantined(RunId, QuarantineReason),
     Unverified(RunId, Unverified),
     /// Read without the lock or from an index: it can block, never clear.
     UnverifiedRead(RunId),
     PossibleOrphan(RunId, AttemptNo),
+    /// An unresolved blocking concern about the run itself.
+    BlockingConcern(RunId),
     /// An attempt that is not terminal and not supervised by the caller: never reconciled, a failed reconciliation
     /// append, or held by another instance.
     Unreconciled(RunId, AttemptNo),
@@ -474,11 +495,13 @@ pub(crate) enum StartConflict {
     RepairPending(RunId),
 }
 
-/// Every start conflict in `inventory`, sorted and without repeats. `supervised` lists the runs the caller's own live
-/// supervisions hold. Nothing here orders events across journals. An empty result says only that the supplied data
+/// Every start conflict in `inventory`, sorted and without repeats. `supervised` names the runs the caller's own live
+/// supervisions hold; each entry borrows an opened `LiveSupervision`, so a pending, dropped or invented supervision
+/// cannot be claimed. Nothing here orders events across journals. An empty result says only that the supplied data
 /// shows no conflict: it permits nothing, and the future execution boundary must still refuse to record a start while
 /// any conflict exists and apply its own policy and the Execution Safety Gate.
-pub(crate) fn start_conflicts(inventory: &RunInventory, supervised: &[RunId]) -> Vec<StartConflict> {
+pub(crate) fn start_conflicts(inventory: &RunInventory, supervised: &[SupervisedRun<'_>]) -> Vec<StartConflict> {
+    let supervised: Vec<RunId> = supervised.iter().map(SupervisedRun::run).collect();
     let RunInventory::Enumerated { allocated, summaries } = inventory else { return Vec::from([StartConflict::InventoryUnknown]) };
     let allocated = *allocated;
     if allocated > 0 && RunId::new(allocated).is_err() {
@@ -507,6 +530,9 @@ pub(crate) fn start_conflicts(inventory: &RunInventory, supervised: &[RunId]) ->
                 for attempt in &verified.orphans {
                     conflicts.push(StartConflict::PossibleOrphan(*run, *attempt));
                 }
+                if verified.run_blocked {
+                    conflicts.push(StartConflict::BlockingConcern(*run));
+                }
                 if verified.repairs_pending {
                     conflicts.push(StartConflict::RepairPending(*run));
                 }
@@ -516,7 +542,7 @@ pub(crate) fn start_conflicts(inventory: &RunInventory, supervised: &[RunId]) ->
             }
         }
     }
-    for run in supervised {
+    for run in &supervised {
         if !seen.contains(run) {
             conflicts.push(StartConflict::Contradictory(*run));
         }

@@ -220,6 +220,18 @@ pub(crate) fn begin_new(epoch: LiveEpoch, run: RunId, run_created: EventDraft, m
     Ok(pending(supervision(epoch, applied.projection, mono), applied.events))
 }
 
+/// That the caller holds an opened supervision of `run`, for `start_conflicts`. It borrows the supervision, so it exists
+/// only while that supervision does, and exposes nothing but the run id.
+pub(crate) struct SupervisedRun<'a> {
+    live: &'a LiveSupervision,
+}
+
+impl SupervisedRun<'_> {
+    pub(crate) fn run(&self) -> RunId {
+        self.live.projection.run()
+    }
+}
+
 /// How a reconciled run opens: at once when reconciliation had nothing to record, or after its opening frame is
 /// durable (`open`; `drop_pending` if the write was uncertain or failed).
 pub(crate) enum Opening {
@@ -234,7 +246,8 @@ pub(crate) enum BeginRefused {
     Quarantined(QuarantineReason),
     /// The history holds no `RunCreated`.
     NoRun,
-    /// The frame was computed for another history or epoch, or the monotonic time went back since.
+    /// The frame was computed for another history (status, projection or missing repairs) or epoch, or `mono` is earlier
+    /// than the frame's. A later `mono` is accepted however late: every interruption blocks anyway.
     NotThisHistory,
     /// A draft of the frame is neither a repair record nor a reconciler draft.
     NotReconciliation,
@@ -300,6 +313,11 @@ pub(crate) fn drop_pending(pending: PendingSupervision) {
 impl LiveSupervision {
     pub(crate) fn projection(&self) -> &RunProjection {
         &self.projection
+    }
+
+    /// That this supervision holds its run, for cross-run start conflicts.
+    pub(crate) fn held(&self) -> SupervisedRun<'_> {
+        SupervisedRun { live: self }
     }
 
     pub(crate) const fn in_clock_fault(&self) -> bool {

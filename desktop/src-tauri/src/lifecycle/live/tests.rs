@@ -941,7 +941,7 @@ fn crash_and_reconcile(seed: u64, stats: &mut CrashStats) {
         let again = again.ok().unwrap();
         assert_eq!(again.frame.drafts(), reconciliation.frame.drafts(), "seed {seed}");
         assert_eq!(again.findings, reconciliation.findings);
-        assert_eq!(again.recommendations, reconciliation.recommendations);
+        assert_eq!(again.recommendations(), reconciliation.recommendations());
         assert_eq!(again.blocking, reconciliation.blocking);
         assert_eq!(again.informational, reconciliation.informational);
     }
@@ -981,7 +981,7 @@ fn crash_and_reconcile(seed: u64, stats: &mut CrashStats) {
             stats.outcomes.push("NotStarted".into());
         }
     }
-    let proposals = reconciliation.recommendations.iter().filter(|r| matches!(r, Recommendation::TerminationProposal { .. })).count();
+    let proposals = reconciliation.recommendations().iter().filter(|r| matches!(r, Recommendation::TerminationProposal { .. })).count();
     let possibly = matches!(ending, Some(EventBody::AttemptInterrupted { observation: InterruptObservation::PossiblyRunning, .. }));
     assert_eq!(proposals, usize::from(possibly), "seed {seed}: a proposal exactly for a fresh matching identity");
     stats.proposals += proposals;
@@ -1031,7 +1031,7 @@ fn crash_and_reconcile(seed: u64, stats: &mut CrashStats) {
     assert_eq!(again.informational, reconciliation.informational);
     // Once supervised, the run blocks starts only through its unresolved orphans.
     let orphans: Vec<StartConflict> = unresolved_blocking.iter().map(|c| StartConflict::PossibleOrphan(run_id(), c.attempt().unwrap())).collect();
-    assert_eq!(start_conflicts(&inventory_with(summarize(&settled, ReadBasis::Locked)), &[run_id()]), orphans);
+    assert_eq!(start_conflicts(&inventory_with(summarize(&settled, ReadBasis::Locked)), &[live.held()]), orphans);
     // Keep going with the reopened supervision, still holding the dead supervision's grants.
     std::mem::swap(&mut world.live, &mut live);
     world.mono = mono;

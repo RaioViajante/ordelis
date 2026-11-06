@@ -2,7 +2,7 @@
 // nothing reads a file, a clock or a process table, and nothing is started or stopped.
 use super::*;
 use crate::agents::catalog::ProviderId;
-use crate::lifecycle::live::{begin_reconciled, open, BeginRefused, LiveRefusal, Opening};
+use crate::lifecycle::live::{begin_new, begin_reconciled, open, BeginRefused, LiveRefusal, LiveSupervision, Opening};
 use crate::lifecycle::model::*;
 use crate::lifecycle::reduce::tests::*;
 use crate::lifecycle::reduce::{apply_recorded, Applied};
@@ -72,7 +72,7 @@ fn finding(kind: FindingKind) -> Finding {
     Finding { attempt: Some(n(1)), kind }
 }
 
-fn opened(history: RecordedHistory, frame: ReconciledFrame) -> crate::lifecycle::live::LiveSupervision {
+fn opened(history: RecordedHistory, frame: ReconciledFrame) -> LiveSupervision {
     let journal_size = size(history.projection());
     match begin_reconciled(EPOCH, history, frame, MonoMs::new(MONO), journal_size) {
         Ok(Opening::Ready(live)) => live,
@@ -398,6 +398,7 @@ fn begin_reconciled_refuses_another_history_epoch_or_time() {
     let forged = |history: &RecordedHistory, drafts: Vec<EventDraft>| ReconciledFrame {
         epoch: EPOCH,
         mono: MonoMs::new(MONO),
+        status: history.status(),
         basis: history.projection().clone(),
         repairs: history.unrecorded_repairs().to_vec(),
         drafts,
@@ -425,13 +426,38 @@ fn begin_reconciled_refuses_another_history_epoch_or_time() {
 }
 
 #[test]
+fn a_frame_is_bound_to_its_history_status_and_sidecars() {
+    // A frame computed for a quarantined history does not open the same projection relabelled as verified.
+    let quarantined = RecordedHistory::new(with(running(), exited(1, 3, T0 + 5_000)).projection, HistoryStatus::Quarantined(QuarantineReason::Fault(JournalFault::NewerVersion)), Vec::new());
+    let frame = reconciled(&quarantined, &[]).frame;
+    let relabelled = RecordedHistory::new(quarantined.projection().clone(), HistoryStatus::Verified, Vec::new());
+    let journal_size = size(relabelled.projection());
+    assert_eq!(begin_reconciled(EPOCH, relabelled, frame, MonoMs::new(MONO), journal_size).err(), Some(BeginRefused::NotThisHistory));
+    // A sidecar reported twice is refused.
+    let twice = RecordedHistory::new(proposed().projection, HistoryStatus::Verified, Vec::from([repair(1), repair(1)]));
+    assert_eq!(reconcile(&twice, &[], input(twice.projection())).err(), Some(ReconcileRefused::RepairConflict));
+}
+
+#[test]
+fn one_supervision_per_run_is_the_adapters_lock_not_the_frames() {
+    // Each frame opens at most once (it is consumed), but reconciling the same history twice gives two frames, and the
+    // core cannot tell that a second supervision of the run exists: r5 5.3 makes that the adapter's lock. Neither
+    // supervision carries anything from before.
+    let first = reconciled(&verified(&running()), &[observe(Seen::PidAbsent)]);
+    let second = reconciled(&verified(&running()), &[observe(Seen::PidAbsent)]);
+    let one = opened(verified(&running()), first.frame);
+    let two = opened(verified(&running()), second.frame);
+    assert_eq!(one.projection(), two.projection());
+}
+
+#[test]
 fn a_reconciled_run_carries_no_historical_grant_and_needs_fresh_consent() {
     // Attempt 1 had a granted, unused start approval when the process ended.
     let history = verified(&approved());
     let reconciliation = reconciled(&history, &[]);
     let mut live = opened(history, reconciliation.frame);
     assert_eq!(live.projection().approval(a(1)).unwrap().state(), ApprovalState::Voided);
-    let size = |live: &crate::lifecycle::live::LiveSupervision| JournalSize { events: live.projection().events().len() as u32, bytes: 0 };
+    let size = |live: &LiveSupervision| JournalSize { events: live.projection().events().len() as u32, bytes: 0 };
     // The historical start cannot be consumed: there is no grant, and the approval is void.
     let refused = live.stage(&[begin(1, 1, AT)], None, MonoMs::new(MONO + 1), size(&live)).err().unwrap();
     assert_eq!(refused.refusal, LiveRefusal::GrantRequired);
@@ -453,7 +479,7 @@ fn a_blocking_orphan_stays_until_the_user_resolves_it() {
     let history = verified(&running());
     let reconciliation = reconciled(&history, &[observe(Seen::IdentityMatches)]);
     let mut live = opened(history, reconciliation.frame);
-    let size = |live: &crate::lifecycle::live::LiveSupervision| JournalSize { events: live.projection().events().len() as u32, bytes: 0 };
+    let size = |live: &LiveSupervision| JournalSize { events: live.projection().events().len() as u32, bytes: 0 };
     let orphan = orphan(live.projection(), 1);
     // A later observation never clears it: reconciling the opened run again drafts nothing and keeps it blocking.
     let again = RecordedHistory::new(live.projection().clone(), HistoryStatus::Verified, Vec::new());
@@ -528,6 +554,11 @@ fn orphaned() -> RecordedHistory {
     RecordedHistory::new(after(&history, &reconciliation), HistoryStatus::Verified, Vec::new())
 }
 
+/// An opened supervision of run `number` (the only way to name a run as supervised).
+fn supervising(number: u64) -> LiveSupervision {
+    open(begin_new(EPOCH, rid(number), created(T0), MonoMs::new(0)).unwrap())
+}
+
 fn enumerated(allocated: u64, summaries: Vec<(u64, RunSummary)>) -> RunInventory {
     RunInventory::Enumerated { allocated, summaries: summaries.into_iter().map(|(number, summary)| (rid(number), summary)).collect() }
 }
@@ -543,7 +574,7 @@ fn an_orphan_anywhere_blocks_every_start_whatever_the_run_id_or_project() {
     let mut summaries = Vec::from([(1, locked(&other_run(1, T0 + 9_000))), (2, locked(&other_run(2, T0)))]);
     summaries.extend((3..=6).map(|number| (number, RunSummary::NeverCreated)));
     summaries.push((7, locked(&orphaned())));
-    let conflicts = start_conflicts(&enumerated(7, summaries.clone()), &[rid(2)]);
+    let conflicts = start_conflicts(&enumerated(7, summaries.clone()), &[supervising(2).held()]);
     assert_eq!(conflicts, Vec::from([StartConflict::PossibleOrphan(rid(7), n(1))]));
     // Once the user resolves it, nothing in the supplied data conflicts (which is still not permission to start).
     let mut journal = running();
@@ -551,7 +582,7 @@ fn an_orphan_anywhere_blocks_every_start_whatever_the_run_id_or_project() {
     let concern = orphan(&journal.projection, 1);
     journal.one(resolve(concern, Resolution::ConfirmedGone, AT));
     summaries[6] = (7, locked(&verified(&journal)));
-    assert_eq!(start_conflicts(&enumerated(7, summaries), &[rid(2)]), Vec::new());
+    assert_eq!(start_conflicts(&enumerated(7, summaries), &[supervising(2).held()]), Vec::new());
 }
 
 #[test]
@@ -569,14 +600,14 @@ fn quarantined_unverified_and_unreconciled_runs_block() {
         (summarize(&other_run(2, T0), ReadBasis::DerivedIndex), StartConflict::UnverifiedRead(rid(2))),
     ];
     for (summary, conflict) in cases {
-        assert_eq!(start_conflicts(&enumerated(2, Vec::from([clean(), (2, summary)])), &[rid(1)]), Vec::from([conflict]));
+        assert_eq!(start_conflicts(&enumerated(2, Vec::from([clean(), (2, summary)])), &[supervising(1).held()]), Vec::from([conflict]));
     }
     // A run with an attempt in flight that nobody here supervises was never reconciled: it blocks. Supervised, it does
     // not (its supervisor owns the attempt).
     let running_history = verified(&running());
     let inventory = enumerated(7, (1..=6).map(|number| (number, RunSummary::NeverCreated)).chain([(7, locked(&running_history))]).collect());
     assert_eq!(start_conflicts(&inventory, &[]), Vec::from([StartConflict::Unreconciled(rid(7), n(1))]));
-    assert_eq!(start_conflicts(&inventory, &[rid(7)]), Vec::new());
+    assert_eq!(start_conflicts(&inventory, &[supervising(7).held()]), Vec::new());
     // A repair the journal still lacks blocks until it is recorded.
     let pending = RecordedHistory::new(other_run(1, T0).projection().clone(), HistoryStatus::Verified, Vec::from([repair(1)]));
     assert_eq!(start_conflicts(&enumerated(1, Vec::from([(1, locked(&pending))])), &[]), Vec::from([StartConflict::RepairPending(rid(1))]));
@@ -616,8 +647,8 @@ fn contradictory_inventories_block() {
     let renamed = enumerated(2, Vec::from([(1, RunSummary::NeverCreated), (2, clean.clone())]));
     assert_eq!(start_conflicts(&renamed, &[]), Vec::from([StartConflict::Contradictory(rid(2))]));
     // A supervised run that is not in the inventory, or that is said never to have been created.
-    assert_eq!(start_conflicts(&enumerated(1, Vec::from([(1, clean)])), &[rid(3)]), Vec::from([StartConflict::Contradictory(rid(3))]));
-    assert_eq!(start_conflicts(&enumerated(1, Vec::from([(1, RunSummary::NeverCreated)])), &[rid(1)]), Vec::from([StartConflict::Contradictory(rid(1))]));
+    assert_eq!(start_conflicts(&enumerated(1, Vec::from([(1, clean)])), &[supervising(3).held()]), Vec::from([StartConflict::Contradictory(rid(3))]));
+    assert_eq!(start_conflicts(&enumerated(1, Vec::from([(1, RunSummary::NeverCreated)])), &[supervising(1).held()]), Vec::from([StartConflict::Contradictory(rid(1))]));
 }
 
 #[test]
@@ -631,13 +662,13 @@ fn start_conflicts_depend_on_no_order_across_journals() {
         (6, RunSummary::NeverCreated),
         (7, locked(&orphaned())),
     ]);
-    let forward = start_conflicts(&enumerated(7, summaries.clone()), &[rid(4)]);
+    let forward = start_conflicts(&enumerated(7, summaries.clone()), &[supervising(4).held()]);
     let mut reversed = summaries.clone();
     reversed.reverse();
-    assert_eq!(start_conflicts(&enumerated(7, reversed), &[rid(4)]), forward);
+    assert_eq!(start_conflicts(&enumerated(7, reversed), &[supervising(4).held()]), forward);
     let mut rotated = summaries;
     rotated.rotate_left(3);
-    assert_eq!(start_conflicts(&enumerated(7, rotated), &[rid(4)]), forward);
+    assert_eq!(start_conflicts(&enumerated(7, rotated), &[supervising(4).held()]), forward);
     // The other runs' recorded times differ wildly (T0 + 50 s, T0), and nothing compares them.
     let mut sorted = forward.clone();
     sorted.sort();
