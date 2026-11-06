@@ -37,9 +37,13 @@ use super::model::{
 const MAGIC: &[u8] = b"ORDJ1 ";
 const MAX_LENGTH_DIGITS: usize = 5;
 const CHECKSUM_DIGITS: usize = 8;
-/// JSON arrays and objects may nest at most this deep. The deepest v1 record nests six levels (the payload array, the
-/// event, its body, a run specification, its context, its limits); the bound is checked before serde parses anything.
+/// JSON arrays and objects may nest at most this deep in a v1 payload. The deepest v1 record nests six levels (the
+/// payload array, the event, its body, a run specification, its context, its limits).
 const MAX_NESTING: usize = 8;
+/// The nesting bound of every ORDJ1 payload, whatever its version, checked by a byte scan before serde parses anything
+/// (the version peek included). Future versions must keep it, with the frame format, so that a newer record is always
+/// read as newer rather than as damage.
+const MAX_FRAME_NESTING: usize = 64;
 /// The largest stream this codec reads. A journal accepts no ordinary event at or above MAX_JOURNAL_BYTES, so beyond
 /// it only the frame that crossed it, repair records (exempt from limits, about 200 bytes each) and one torn tail can
 /// follow; one more MiB leaves room for thousands of repairs. A longer stream is not decoded at all.
@@ -380,15 +384,13 @@ struct Peek {
 
 fn decode_payload(payload: &[u8]) -> Result<Vec<Event>, PayloadFault> {
     let corrupt = PayloadFault::Corrupt;
-    if !nesting_within(payload, MAX_NESTING) {
+    if !nesting_within(payload, MAX_FRAME_NESTING) {
         return Err(corrupt(CorruptReason::Nesting));
     }
+    // The version of every record first (F14); only then the limits of v1.
     let peeks: Vec<Peek> = serde_json::from_slice(payload).map_err(|_| corrupt(CorruptReason::Schema))?;
     if peeks.is_empty() {
         return Err(corrupt(CorruptReason::EmptyBatch));
-    }
-    if peeks.len() > MAX_BATCH {
-        return Err(corrupt(CorruptReason::BatchTooLarge));
     }
     if peeks.iter().any(|peek| peek.v > MAX_WALL_MS) {
         return Err(corrupt(CorruptReason::Integer));
@@ -398,6 +400,12 @@ fn decode_payload(payload: &[u8]) -> Result<Vec<Event>, PayloadFault> {
     }
     if let Some(peek) = peeks.iter().find(|peek| peek.v > u64::from(RECORD_VERSION)) {
         return Err(PayloadFault::Newer(peek.v));
+    }
+    if peeks.len() > MAX_BATCH {
+        return Err(corrupt(CorruptReason::BatchTooLarge));
+    }
+    if !nesting_within(payload, MAX_NESTING) {
+        return Err(corrupt(CorruptReason::Nesting));
     }
     let records: Vec<WireRecord> = serde_json::from_slice(payload).map_err(|_| corrupt(CorruptReason::Schema))?;
     let mut events = Vec::with_capacity(records.len());
@@ -506,8 +514,8 @@ pub(crate) fn scan_after_corruption(bytes: &[u8], offset: u64) -> (Vec<Unverifie
         match read_frame(&bytes[at..limit]) {
             Read::Whole { digits, payload, stated, len, newline: true } => {
                 let checksum_matches = frame_crc(digits, payload) == stated;
-                let kinds = match decode_payload(payload) {
-                    Ok(events) if checksum_matches => events.iter().map(|event| event.body.kind()).collect(),
+                let kinds = match checksum_matches.then(|| decode_payload(payload)) {
+                    Some(Ok(events)) => events.iter().map(|event| event.body.kind()).collect(),
                     _ => Vec::new(),
                 };
                 found.push(UnverifiedFrame { offset: at as u64, len: len as u64, checksum_matches, kinds });

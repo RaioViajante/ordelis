@@ -239,7 +239,7 @@ fn every_recorded_history_fault_quarantines_at_its_frame() {
 }
 
 #[test]
-fn damaged_bytes_and_newer_versions_quarantine_without_touching_the_bytes() {
+fn damaged_bytes_and_newer_versions_quarantine_at_their_frame() {
     let journal = golden_supervised();
     let bytes = stream(&journal.frames);
     let boundaries = ends(&journal.frames);
@@ -260,12 +260,10 @@ fn damaged_bytes_and_newer_versions_quarantine_without_touching_the_bytes() {
     let mut newer = stream(&journal.frames[..3]);
     newer.extend(reframe(payload.replacen("\"v\":1", "\"v\":2", 1).as_bytes()));
     newer.extend(stream(&journal.frames[3..]));
-    let original = newer.clone();
     let history = replayed(&newer);
     assert_eq!(history.fault(), Some(JournalFault::NewerVersion));
     assert_eq!(history.damage(), None);
     assert_eq!(history.projection(), replayed(&bytes[..boundaries[2].0 as usize]).projection());
-    assert_eq!(newer, original);
     // A complete final frame with a bad checksum is corruption, not a repairable tail.
     let mut last = bytes.clone();
     let at = last.len() - 4;
@@ -366,8 +364,22 @@ fn property_no_damaged_or_truncated_journal_reconciles_a_possible_start_as_not_s
             let acknowledged = rng.below(journal.frames.len() as u64 + 1) as usize;
             let prefix = &bytes[..cut];
             let decoded = decode_stream(prefix);
+            // The next unused sidecar, as the adapter would choose it.
+            let next = 1 + decoded.frames().iter().flat_map(|frame| frame.events()).filter_map(|event| match &event.body {
+                EventBody::JournalRepaired(recorded) => Some(recorded.sidecar()),
+                _ => None,
+            }).max().unwrap_or(0);
             let repairs = match decoded.end() {
-                StreamEnd::IncompleteTail { offset, .. } => Vec::from([tail_repair(1, &prefix[offset as usize..])]),
+                StreamEnd::IncompleteTail { offset, .. } => {
+                    let tail = &prefix[offset as usize..];
+                    // A stale report (a sidecar the journal already records) never vouches for the tail.
+                    if next > 1 {
+                        let stale = JournalRepair::new(next - 1, tail.len() as u32, crc32c(tail), RepairCause::IncompleteTail).unwrap();
+                        let refused = RecordedHistory::from_replay(replay(run_id(), &decoded), evidence(mark_after(&journal.frames, acknowledged), Vec::from([stale])));
+                        assert!(refused.is_err(), "fixture {index}: a recorded sidecar vouched for a new tail");
+                    }
+                    Vec::from([tail_repair(next, tail)])
+                }
                 _ => Vec::new(),
             };
             let result = RecordedHistory::from_replay(replay(run_id(), &decoded), evidence(mark_after(&journal.frames, acknowledged), repairs));
@@ -552,4 +564,35 @@ fn a_landed_uncertain_decision_is_adopted_without_a_grant() {
     assert!(live.stage(&[begin(1, 1, T0 + 3_000)], None, mono(3_000), size(&live)).is_err());
     // The adopted projection is exactly what the file replays to.
     assert_eq!(replayed(&file).projection(), live.projection());
+}
+
+#[test]
+fn a_repair_already_recorded_never_vouches_for_a_new_tail() {
+    // Review of #118: two zero-filled tails of one block have the same length and CRC-32C. A repair the journal already
+    // records (sidecar 1) must not stand in for the new tail: otherwise no new repair record is drafted and an approved
+    // attempt whose start may have been in the lost bytes would end as "not started".
+    let zeros = [0u8; 4096];
+    let earlier = tail_repair(1, &zeros);
+    let mut journal = Journal::new();
+    journal.one(EventDraft::journal(JournalDraft::Repaired(earlier), T0 + 500));
+    journal.ok(attempt_pair(1, 1, T0 + 1_000));
+    journal.one(decide(1, Decision::Granted, T0 + 2_000));
+    let mut bytes = stream(&journal.frames);
+    bytes.extend_from_slice(&zeros);
+    let mark = mark_after(&journal.frames, journal.frames.len());
+    let open = |repairs: Vec<JournalRepair>| RecordedHistory::from_replay(replayed(&bytes), evidence(mark, repairs));
+    assert_eq!(open(Vec::from([earlier])).err(), Some(HistoryRefused::TailNotRepaired));
+    // A new sidecar below a recorded one is not the next sidecar either.
+    let mut later = Journal::new();
+    later.one(EventDraft::journal(JournalDraft::Repaired(JournalRepair::new(5, 9, 1, RepairCause::IncompleteTail).unwrap()), T0 + 500));
+    later.ok(attempt_pair(1, 1, T0 + 1_000));
+    let mut torn = stream(&later.frames);
+    torn.extend_from_slice(&zeros);
+    let below = RecordedHistory::from_replay(replayed(&torn), evidence(mark_after(&later.frames, later.frames.len()), Vec::from([tail_repair(2, &zeros)])));
+    assert_eq!(below.err(), Some(HistoryRefused::TailNotRepaired));
+    // A new sidecar, recorded by the opening frame, keeps the attempt from ending as "not started".
+    let history = open(Vec::from([tail_repair(2, &zeros)])).unwrap();
+    let bodies = reconciler_bodies(&history);
+    assert!(matches!(&bodies[0], EventBody::JournalRepaired(repair) if repair.sidecar() == 2));
+    assert_eq!(bodies[1], EventBody::AttemptInterrupted { attempt: n(1), observation: InterruptObservation::EvidenceLost });
 }

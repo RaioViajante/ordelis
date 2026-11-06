@@ -110,8 +110,21 @@ impl RecordedHistory {
             return Err(HistoryRefused::NoRunCreated);
         }
         if let Some(tail) = replayed.tail() {
+            // The repair that removes this tail is a new one: no record holds its sidecar, and its sidecar comes after
+            // every recorded one. A recorded repair of equal size and checksum (two zero-filled blocks, for example)
+            // removed earlier bytes and would draft no new record (review of #118).
+            let projection = replayed.projection();
+            let highest = projection.events().iter().filter_map(|event| match &event.body {
+                EventBody::JournalRepaired(recorded) => Some(recorded.sidecar()),
+                _ => None,
+            });
+            let newest = highest.max();
             let removes_tail = |repair: &JournalRepair| {
-                repair.cause() == RepairCause::IncompleteTail && repair.removed_bytes() == tail.len && repair.removed_crc32c() == tail.crc32c
+                repair.cause() == RepairCause::IncompleteTail
+                    && repair.removed_bytes() == tail.len
+                    && repair.removed_crc32c() == tail.crc32c
+                    && recorded_repair(projection, repair.sidecar()).is_none()
+                    && newest.is_none_or(|recorded| repair.sidecar() > recorded)
             };
             if !evidence.repairs.iter().any(removes_tail) {
                 return Err(HistoryRefused::TailNotRepaired);

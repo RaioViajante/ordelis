@@ -224,7 +224,7 @@ function withoutReviewedProposal(file: string, text: string): string {
 // Any other serde or serde_json item (a reader, a writer, a custom (de)serializer, another attribute), a second import,
 // an import elsewhere or in another file stays a violation. serializationViolations pins what the derives may be on.
 const REVIEWED_SERDE_IMPORT = "use serde::{Deserialize, Serialize};";
-const REVIEWED_SERDE_JSON = /\bserde_json::(?:from_slice|to_vec|from_value|Value)\b/g;
+const REVIEWED_SERDE_JSON = /\bserde_json::(?:from_slice|to_vec|from_value|Value)\b(?!\s+as\b)/g;
 const REVIEWED_SERDE_ATTRIBUTE = /^[ \t]*#\[serde\(deny_unknown_fields\)\]\n/gm;
 function withoutReviewedSerde(file: string, text: string): string {
   if (file !== "lifecycle/codec.rs") return text;
@@ -277,6 +277,8 @@ function serializationViolations(files: Record<string, string>): string[] {
     const code = rustCodeOnly(text);
     if (file !== "lifecycle/codec.rs" && /\b(?:Serialize|Deserialize|Serializer|Deserializer|serde|serde_json)\b/.test(code)) violations.push(`${file}: names serialization`);
     if (/\bimpl\b[^{;]*\b(?:Serialize|Deserialize|Serializer|Deserializer|Visitor)\b/.test(code)) violations.push(`${file}: implements serialization by hand`);
+    // A conditional attribute could derive or rename anything the rules below never see (review of #118).
+    if (/#\s*\[\s*cfg_attr\b/.test(code)) violations.push(`${file}: a conditional attribute`);
   }
   const codec = rustCodeOnly(files["lifecycle/codec.rs"] ?? "");
   for (const m of codec.matchAll(/#\[derive\(([^)]*)\)\]\s*/g)) {
@@ -332,6 +334,23 @@ function replayViolations(files: Record<string, string>): string[] {
   if (replayed.length !== 1 || replayed[0][1].trim() || /\bpub\b/.test(replayed[0][2])) violations.push("replay.rs: ReplayedHistory is not declared once, plain, with private fields");
   if ((replay.match(structLiteral("ReplayedHistory")) ?? []).length !== 1) violations.push("replay.rs: ReplayedHistory built more than once");
   if (/&\s*mut\s+self\b/.test(replay)) violations.push("replay.rs: mutable access");
+  // No history is changed after it is built (review of #118): no mutable reference to one or mutable binding of one
+  // anywhere, no assignment to their fields in their files, and only `replay` returns a replayed history.
+  for (const [file, text] of Object.entries(files)) {
+    const code = rustCodeOnly(text);
+    if (/&\s*mut\s+(?:[\w:]*::)?(?:ReplayedHistory|RecordedHistory)\b/.test(code)) violations.push(`${file}: a mutable history`);
+    if (/\bmut\s+\w+\s*:\s*(?:[\w:]*::)?(?:ReplayedHistory|RecordedHistory)\b/.test(code)) violations.push(`${file}: a mutable history binding`);
+  }
+  for (const [file, fields] of [
+    ["lifecycle/replay.rs", "projection|fault|damage|boundaries|tail"],
+    ["lifecycle/reconcile.rs", "projection|status|unrecorded_repairs"],
+  ]) {
+    if (new RegExp(`\\.(?:${fields})\\s*(?:[-+*/|&^]|<<|>>)?=(?!=)`).test(rustCodeOnly(files[file] ?? ""))) violations.push(`${file}: a history field assigned`);
+  }
+  for (const m of replay.matchAll(/\bfn\s+(\w+)([^{;]*)[{;]/g)) {
+    const arrow = m[2].lastIndexOf("->");
+    if (arrow >= 0 && /\bReplayedHistory\b/.test(m[2].slice(arrow)) && m[1] !== "replay") violations.push(`replay.rs: ${m[1]} returns a replayed history`);
+  }
   if (reconcile.split(RECORDED_NEW).length !== 2) violations.push("reconcile.rs: RecordedHistory::new is not test-only");
   if ((reconcileCode.match(/\bRecordedHistory::assemble\(/g) ?? []).length !== 4) violations.push("reconcile.rs: assemble called other than by new and from_replay");
   if (!/\n {4}fn assemble\(/.test(reconcileCode) || /\bpub(?:\([^)]*\))?\s+fn assemble\b/.test(reconcileCode)) violations.push("reconcile.rs: assemble is not private");
@@ -1045,6 +1064,7 @@ describe("desktop trust boundary", () => {
       "a writer in the codec": add(codecFile, "fn r3(v: &u8) { let _ = serde_json::to_writer(Vec::new(), v); }"),
       "a serde path in the codec": add(codecFile, "fn r4<'de, D: serde::Deserializer<'de>>(_d: D) {}"),
       "serde_json renamed in the codec": add(codecFile, "use serde_json as j;"),
+      "a reviewed serde_json item renamed": add(codecFile, "use serde_json::Value as Grant;"),
       "another serde attribute": add(codecFile, '#[derive(Deserialize)]\n#[serde(rename = "x")]\nstruct WOther { a: u8 }'),
       "a custom field deserializer": add(codecFile, '#[derive(Deserialize)]\nstruct WFn { #[serde(deserialize_with = "f")] a: u8 }'),
       "a second serde import": add(codecFile, REVIEWED_SERDE_IMPORT),
@@ -1089,6 +1109,8 @@ describe("desktop trust boundary", () => {
       "a hand-written Deserialize": add(codecFile, "impl<'de> Deserialize<'de> for Decoded {}"),
       "a hand-written visitor": add(codecFile, "struct V;\nimpl<'de> Visitor<'de> for V {}"),
     };
+    serialization["a derive behind a conditional attribute"] = add(codecFile, "#[cfg_attr(all(), derive(Deserialize))]\nstruct Forged { a: u8 }");
+    serialization["a conditional attribute in the model"] = add("lifecycle/model.rs", "#[cfg_attr(test, derive(Clone))]\nstruct C0;");
     for (const [name, files] of Object.entries(serialization)) {
       expect(serializationViolations(files), name).not.toEqual([]);
     }
@@ -1117,6 +1139,14 @@ describe("desktop trust boundary", () => {
       "a cloneable decoded stream": replace(codecFile, "pub(crate) struct Decoded {", "#[derive(Clone)]\npub(crate) struct Decoded {"),
       "a trait for a decoded frame": add(codecFile, "impl Clone for DecodedFrame { fn clone(&self) -> DecodedFrame { todo() } }"),
       "a decoded frame renamed": add("lifecycle/replay.rs", "use super::codec::DecodedFrame as Frame;"),
+      // Review of #118: histories changed after they are built.
+      "a replayed history cleared through a reference": add("lifecycle/replay.rs", "fn clear(h: &mut ReplayedHistory) { h.fault = None; }"),
+      "a replayed history cleared by value": add("lifecycle/replay.rs", "fn clear(mut h: ReplayedHistory) -> ReplayedHistory { h.fault = None; h.tail = None; h }"),
+      "a replayed history relabelled": add("lifecycle/replay.rs", "fn clear(h: ReplayedHistory) -> ReplayedHistory { h }"),
+      "a recorded history relabelled": add("lifecycle/reconcile.rs", "fn relabel(h: &mut RecordedHistory, v: &RecordedHistory) { h.status = v.status; }"),
+      "a recorded history rebound": add("lifecycle/reconcile.rs", "fn relabel(h: RecordedHistory) { let mut x: RecordedHistory = h; }"),
+      "a recorded status assigned": add("lifecycle/reconcile.rs", "fn relabel(mut h: Box<RecordedHistory>) { h.status = HistoryStatus::Quarantined(QuarantineReason::Marker); }"),
+      "a replay field assigned in place": add("lifecycle/replay.rs", "fn grow(h: &mut Vec<u8>, r: ReplayedHistory) { let mut r = r; r.boundaries = Vec::new(); }"),
     };
     for (const [name, files] of Object.entries(replayed)) {
       expect(replayViolations(files), name).not.toEqual([]);

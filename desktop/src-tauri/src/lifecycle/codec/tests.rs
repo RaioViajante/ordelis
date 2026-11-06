@@ -642,11 +642,16 @@ fn deep_nesting_is_refused_before_serde_runs() {
         payload.extend(b"]".repeat(levels));
         payload
     };
-    assert_eq!(corrupt_reason(&reframe(&deep(9))), CorruptReason::Nesting);
-    // Far deeper than any recursion limit, and still bounded by the frame size.
+    // Past the frame bound (64), and far past any recursion limit while still inside one frame: damage, before serde.
+    assert_eq!(corrupt_reason(&reframe(&deep(65))), CorruptReason::Nesting);
     assert_eq!(corrupt_reason(&reframe(&deep(8_000))), CorruptReason::Nesting);
-    let objects = format!("[{}{}]", "{\"v\":".repeat(8), "1}".repeat(8));
-    assert_eq!(corrupt_reason(&reframe(objects.as_bytes())), CorruptReason::Nesting);
+    // Inside the frame bound, arrays that are no records are a schema fault.
+    assert_eq!(corrupt_reason(&reframe(&deep(9))), CorruptReason::Schema);
+    // A v1 record nested deeper than v1 allows (8) is refused before strict decoding.
+    let v1 = format!("[{{\"v\":1,\"x\":{}1{}}}]", "[".repeat(7), "]".repeat(7));
+    assert_eq!(corrupt_reason(&reframe(v1.as_bytes())), CorruptReason::Nesting);
+    let v1_ok = format!("[{{\"v\":1,\"x\":{}1{}}}]", "[".repeat(6), "]".repeat(6));
+    assert_eq!(corrupt_reason(&reframe(v1_ok.as_bytes())), CorruptReason::Schema);
     // Brackets inside strings do not count.
     assert!(nesting_within(br#"[{"a":"[[[[[[[[[[[["}]"#, 2));
     assert!(nesting_within(br#"[{"a":"\"[[[[[[[[[["}]"#, 2));
@@ -662,6 +667,13 @@ fn the_version_is_read_before_strict_decoding() {
         StreamEnd::NewerVersion { offset: 0, v: 2 } => {}
         other => panic!("{other:?}"),
     }
+    // A v2 record nested deeper, or a v2 frame with more records, than v1 allows is still newer (review of #118).
+    assert!(matches!(decode_stream(&reframe(br#"[{"v":2,"x":[[[[[[[[1]]]]]]]]}]"#)).end(), StreamEnd::NewerVersion { v: 2, .. }));
+    let many = format!("[{}]", Vec::from(["{\"v\":2}"; MAX_BATCH + 1]).join(","));
+    assert!(matches!(decode_stream(&reframe(many.as_bytes())).end(), StreamEnd::NewerVersion { v: 2, .. }));
+    // Past the frame nesting bound every version is damage.
+    let deep = format!("[{{\"v\":2,\"x\":{}1{}}}]", "[".repeat(64), "]".repeat(64));
+    assert_eq!(corrupt_reason(&reframe(deep.as_bytes())), CorruptReason::Nesting);
     // Even a v2 record whose shape v1 cannot read at all.
     assert!(matches!(decode_stream(&reframe(br#"[{"v":2}]"#)).end(), StreamEnd::NewerVersion { v: 2, .. }));
     assert!(matches!(decode_stream(&reframe(br#"[{"v":65536,"k":[]}]"#)).end(), StreamEnd::NewerVersion { v: 65536, .. }));
