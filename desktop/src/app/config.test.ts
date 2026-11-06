@@ -178,8 +178,10 @@ function pureContentViolations(files: Record<string, string>, superRule: (file: 
 // The only references to the rest of the crate that the lifecycle model may make (D3.2b decision 12.8): these two
 // imports, as whole lines, adjacent and in this order, as the first lines of code of lifecycle/model.rs (only line
 // comments come before them, so nothing such as `pub(crate)` can prefix them). Anything else, including another copy,
-// is held to the agents rules, with no `super` at all (b-1 has no sibling modules), no name of the agents module, and
-// no identifier that could mean authorized, dispatched, enforced or terminated anywhere in it.
+// is held to the agents rules, with no name of the agents module and no identifier that could mean authorized,
+// dispatched, enforced or terminated anywhere in it. The module root names no `super`; a submodule names `super` only
+// to reach a sibling (`super::model`, `super::reduce`, `super::live`; decision 12.8(b), D3.2b-2), and no file imports
+// with a glob.
 const LIFECYCLE_IMPORTS = ["use crate::agents::catalog::ProviderId;", "use crate::agents::evidence::{Sha256, Token};"];
 function withoutLifecycleImports(file: string, text: string): string {
   if (file !== "lifecycle/model.rs") return text;
@@ -191,13 +193,73 @@ function withoutLifecycleImports(file: string, text: string): string {
 }
 function lifecycleContentViolations(files: Record<string, string>): string[] {
   const stripped = Object.fromEntries(Object.entries(files).map(([file, text]) => [file, withoutLifecycleImports(file, text)]));
-  const violations = pureContentViolations(stripped, () => /\bsuper\b/);
+  const violations = pureContentViolations(stripped, (file) =>
+    file === "lifecycle.rs" ? /\bsuper\b/ : /\bsuper\b(?!::(?:model|reduce|live)\b)/,
+  );
   for (const [file, text] of Object.entries(stripped)) {
     const code = rustCodeOnly(text);
-    for (const pattern of [/\bagents\b/, /\w*(?:authori[sz]|dispatch|enforc|terminat|execute_now)\w*/i]) {
+    for (const pattern of [/\bagents\b/, /\w*(?:authori[sz]|dispatch|enforc|terminat|execute_now)\w*/i, /\buse\b[^;]*\*/]) {
       const hit = code.match(pattern);
       if (hit) violations.push(`${file}: ${hit[0]}`);
     }
+  }
+  return violations;
+}
+
+// D3.2b-2 (#114): live authority exists only in memory, in values that cannot be copied, formatted, serialized or
+// built outside live.rs, and a draft's producer is fixed by its typed constructor. Returns what breaks those rules.
+const LIVE_TYPES = ["LiveGrant", "LiveSupervision", "PendingSupervision", "Staged", "Abandoned"];
+// `Name {` that builds a value: not a declaration, an impl block or a return type.
+const structLiteral = (name: string) => new RegExp(`(?<!(?:\\bstruct|\\bimpl|->|\\blet)\\s*)\\b${name}\\s*\\{`, "g");
+function liveAuthorityViolations(files: Record<string, string>): string[] {
+  const violations: string[] = [];
+  const live = rustCodeOnly(files["lifecycle/live.rs"] ?? "");
+  for (const name of LIVE_TYPES) {
+    // Declared once, with no attribute other than #[must_use] in front, no crate-visible field, and no trait impl.
+    const declared = [...live.matchAll(new RegExp(`((?:#\\[[^\\]]*\\]\\s*)*)pub\\(crate\\) struct ${name}\\b([^{;]*)\\{([^}]*)\\}`, "g"))];
+    if (declared.length !== 1) violations.push(`live.rs: ${name} declared ${declared.length} times`);
+    for (const [, attributes, , body] of declared) {
+      if (attributes.replace(/#\[must_use\]/g, "").trim()) violations.push(`live.rs: ${name} has ${attributes.trim()}`);
+      if (/\bpub\b/.test(body)) violations.push(`live.rs: ${name} has a visible field`);
+    }
+    for (const [file, text] of Object.entries(files)) {
+      const code = rustCodeOnly(text);
+      if (new RegExp(`\\bimpl\\b[^{;]*\\bfor\\s+[(\\s]*(?:[\\w:]*::)?${name}\\b`).test(code)) violations.push(`${file}: a trait is implemented for ${name}`);
+      if (file !== "lifecycle/live.rs" && new RegExp(`\\b${name}\\b`).test(code)) violations.push(`${file}: names ${name}`);
+    }
+  }
+  // A grant is built in one place (mint), a supervision in one place (begin_new).
+  for (const name of LIVE_TYPES) {
+    const literals = live.match(structLiteral(name)) ?? [];
+    if (literals.length !== 1) violations.push(`live.rs: ${name} built ${literals.length} times`);
+  }
+  // No other name for these types or for EventDraft (an alias could be built, returned or given a trait), and no
+  // value built through `Self`: every construction site is a named literal counted below (review of #114).
+  const guarded = [...LIVE_TYPES, "EventDraft"].join("|");
+  for (const [file, text] of Object.entries(files)) {
+    const code = rustCodeOnly(text);
+    if (new RegExp(`\\btype\\s+\\w+[^=;]*=[^;]*\\b(?:${guarded})\\b`).test(code)) violations.push(`${file}: an alias of a guarded type`);
+    if (new RegExp(`\\b(?:${guarded})\\s+as\\b`).test(code)) violations.push(`${file}: a guarded type renamed`);
+    if (/\bSelf\s*\{/.test(code)) violations.push(`${file}: a value built through Self`);
+  }
+  // Only stage (and its private check) takes a grant; only confirm returns grants, through its private settle and mint.
+  for (const m of live.matchAll(/\bfn\s+(\w+)([^{;]*)[{;]/g)) {
+    const [, fn, signature] = m;
+    const arrow = signature.lastIndexOf("->");
+    const params = arrow < 0 ? signature : signature.slice(0, arrow);
+    const returns = arrow < 0 ? "" : signature.slice(arrow);
+    if (/LiveGrant/.test(params) && !["stage", "check_grant"].includes(fn)) violations.push(`live.rs: ${fn} takes a grant`);
+    if (/LiveGrant/.test(returns) && !["confirm", "settle", "mint"].includes(fn)) violations.push(`live.rs: ${fn} returns a grant`);
+  }
+  // EventDraft: private fields, built by one private constructor, which the typed constructors (and the test-only
+  // forging helper) call.
+  const model = rustCodeOnly(files["lifecycle/model.rs"] ?? "");
+  const draft = model.match(/pub\(crate\) struct EventDraft \{([^}]*)\}/);
+  if (!draft || /\bpub\b/.test(draft[1])) violations.push("model.rs: EventDraft fields are visible");
+  if ((model.match(structLiteral("EventDraft")) ?? []).length !== 1) violations.push("model.rs: EventDraft built outside its constructor");
+  if (!/#\[cfg\(test\)\]\s*pub\(crate\) fn forged\b/.test(model)) violations.push("model.rs: forged is not test-only");
+  for (const [file, text] of Object.entries(files)) {
+    if (file !== "lifecycle/model.rs" && structLiteral("EventDraft").test(rustCodeOnly(text))) violations.push(`${file}: builds an EventDraft`);
   }
   return violations;
 }
@@ -544,9 +606,13 @@ describe("desktop trust boundary", () => {
   // of the crate only through two reviewed imports.
   it("keeps the lifecycle model pure, unreachable from the interface and limited to its reviewed imports", () => {
     const files = lifecycleSources();
-    expect(Object.keys(files).sort()).toEqual(["lifecycle.rs", "lifecycle/model.rs"]);
+    expect(Object.keys(files).sort()).toEqual(["lifecycle.rs", "lifecycle/live.rs", "lifecycle/model.rs", "lifecycle/reduce.rs"]);
     expect(lifecycleContentViolations(files)).toEqual([]);
+    expect(liveAuthorityViolations(files)).toEqual([]);
     expect(files["lifecycle/model.rs"]).toMatch(/\n#\[cfg\(test\)\]\nmod tests;\n$/);
+    expect(files["lifecycle/live.rs"]).toMatch(/\n#\[cfg\(test\)\]\nmod tests;\n$/);
+    // The reducer's test fixtures are shared with the live layer's tests, in test builds only.
+    expect(files["lifecycle/reduce.rs"]).toMatch(/\n#\[cfg\(test\)\]\npub\(crate\) mod tests;\n$/);
     for (const line of LIFECYCLE_IMPORTS) expect(files["lifecycle/model.rs"].split("\n").filter((l) => l === line)).toHaveLength(1);
     // lib.rs declares the module once (pinned in the agents test above) and no other compiled production file names
     // it, the agents module included.
@@ -574,7 +640,15 @@ describe("desktop trust boundary", () => {
       "unsafe code": add("lifecycle/model.rs", "fn i() { unsafe {} }"),
       "a public item": add("lifecycle/model.rs", "pub fn j() {}"),
       "another module of the crate": add("lifecycle/model.rs", "use crate::store;"),
-      "a sibling through super": add("lifecycle/model.rs", "use super::model;"),
+      "super in the module root": add("lifecycle.rs", "use super::store;"),
+      "the crate root through super": add("lifecycle/reduce.rs", "use super::super::store;"),
+      "super of super with spaces": add("lifecycle/live.rs", "fn s0() { let _ = super :: super :: tasks::list(); }"),
+      "a module of the crate through super": add("lifecycle/live.rs", "use super::store;"),
+      "the root through super": add("lifecycle/reduce.rs", "use super as root;"),
+      "a glob of a sibling": add("lifecycle/live.rs", "use super::model::*;"),
+      "a glob inside braces": add("lifecycle/live.rs", "use super::model::{*};"),
+      "a glob in a nested tree": add("lifecycle/reduce.rs", "use super::{model::{Event, *}};"),
+      "a prefix of a sibling name": add("lifecycle/reduce.rs", "use super::models;"),
       "the agents root renamed": add("lifecycle/model.rs", "use crate::agents as a;"),
       "an agents module renamed": add("lifecycle/model.rs", "use crate::agents::catalog as c;"),
       "a glob import": add("lifecycle/model.rs", "use crate::agents::evidence::*;"),
@@ -597,9 +671,52 @@ describe("desktop trust boundary", () => {
       "a termination method": add("lifecycle/model.rs", "fn terminate_child() {}"),
       "a terminating state": add("lifecycle/model.rs", "enum M2 { Terminating }"),
       "a search location": add("lifecycle/model.rs", "struct N { executable_path: u8 }"),
+      "a process in the reducer": add("lifecycle/reduce.rs", 'fn sp() { let _ = std::process::Command::new("codex"); }'),
+      "a clock in the live layer": add("lifecycle/live.rs", "fn cl() -> u64 { let _ = std::time::Instant::now(); 0 }"),
+      "a sleep in the live layer": add("lifecycle/live.rs", "fn sl() { thread::sleep(d); }"),
+      "a launch word in the live layer": add("lifecycle/live.rs", "fn launch_grant() {}"),
+      "serialization in the reducer": add("lifecycle/reduce.rs", "#[derive(serde::Serialize)]\nstruct Wire;"),
     };
     for (const [name, files] of Object.entries(bypasses)) {
       expect(lifecycleContentViolations(files), name).not.toEqual([]);
+    }
+    // The live authority and draft construction rules (D3.2b-2).
+    const live = (from: string, to: string) => ({ ...actual, "lifecycle/live.rs": actual["lifecycle/live.rs"].replace(from, to) });
+    const modelText = (from: string, to: string) => ({ ...actual, "lifecycle/model.rs": actual["lifecycle/model.rs"].replace(from, to) });
+    const authority: Record<string, Record<string, string>> = {
+      "a cloneable grant": live("#[must_use]\npub(crate) struct LiveGrant", "#[must_use]\n#[derive(Clone)]\npub(crate) struct LiveGrant"),
+      "a formattable supervision": live("pub(crate) struct LiveSupervision", "#[derive(Debug)]\npub(crate) struct LiveSupervision"),
+      "a trait implemented by hand": add("lifecycle/live.rs", "impl Clone for LiveGrant { fn clone(&self) -> Self { todo() } }"),
+      "a default staged frame": add("lifecycle/live.rs", "impl Default for Staged { fn default() -> Self { todo() } }"),
+      "a visible grant field": live("    use_by: MonoMs,\n}", "    pub(crate) use_by: MonoMs,\n}"),
+      "a grant built twice": add("lifecycle/live.rs", "fn again(g: &LiveGrant) -> LiveGrant { LiveGrant { ..todo() } }"),
+      "a grant named by the reducer": add("lifecycle/reduce.rs", "fn holds(_: &super::live::LiveGrant) {}"),
+      "a grant returned by another function": add("lifecycle/live.rs", "fn keep(&self) -> Option<LiveGrant> { None }"),
+      "a grant taken by another function": add("lifecycle/live.rs", "fn take(grant: LiveGrant) {}"),
+      "a supervision built twice": add("lifecycle/live.rs", "fn other() -> LiveSupervision { LiveSupervision { ..todo() } }"),
+      "a visible draft field": modelText("pub(crate) struct EventDraft {\n    producer: Producer,", "pub(crate) struct EventDraft {\n    pub(crate) producer: Producer,"),
+      "a draft built elsewhere": add("lifecycle/reduce.rs", "fn forge() -> EventDraft { EventDraft { producer: Producer::User } }"),
+      "a forging helper in production": modelText("    #[cfg(test)]\n    pub(crate) fn forged", "    pub(crate) fn forged"),
+      // Independent review of #114: construction through Self, generic signatures, aliases and paths.
+      "a grant twin through Self": add("lifecycle/live.rs", "impl LiveGrant { pub(crate) fn twin(&self) -> Self { Self { epoch: self.epoch, use_by: self.use_by } } }"),
+      "a staged frame through Self": add("lifecycle/live.rs", "impl Staged { fn fake(frame: u64) -> Self { Self { frame } } }"),
+      "a labelled draft through Self": add("lifecycle/model.rs", "impl EventDraft { pub(crate) fn labelled(producer: Producer, body: EventBody) -> Self { Self { producer, body } } }"),
+      "a generic function returning a grant": add("lifecycle/live.rs", "fn keep<'a>(&'a self) -> Option<LiveGrant> { None }"),
+      "a generic function taking a grant": add("lifecycle/live.rs", "fn take<T>(grant: LiveGrant, _t: T) {}"),
+      "a trait for an alias": add("lifecycle/live.rs", "type G = LiveGrant;\nimpl Clone for G { fn clone(&self) -> G { todo() } }"),
+      "a trait for a path": add("lifecycle/live.rs", "impl Clone for self::LiveGrant where Self: Sized { fn clone(&self) -> Self { todo() } }"),
+      "a default for an alias": add("lifecycle/live.rs", "type S = Staged;\nimpl Default for S { fn default() -> S { todo() } }"),
+      "a renamed grant": add("lifecycle/live.rs", "use self::LiveGrant as G;"),
+      "an alias of a draft": add("lifecycle/reduce.rs", "type D = EventDraft;"),
+      // Re-review of #114: tuple parameters, nested generics, a parenthesized impl target, another staged literal.
+      "a grant after a tuple parameter": add("lifecycle/live.rs", "fn take(_t: (u8, u8), grant: LiveGrant) {}"),
+      "a grant returned under nested generics": add("lifecycle/live.rs", "fn keep<T: Into<u8>>(_t: T) -> Option<LiveGrant> { None }"),
+      "a trait for a parenthesized type": add("lifecycle/live.rs", "impl Default for (Staged) { fn default() -> Staged { todo() } }"),
+      "a second staged frame": add("lifecycle/live.rs", "fn fake() -> Staged { Staged { frame: 0 } }"),
+      "a second pending supervision": add("lifecycle/live.rs", "fn fake() -> PendingSupervision { PendingSupervision { events: todo() } }"),
+    };
+    for (const [name, files] of Object.entries(authority)) {
+      expect(liveAuthorityViolations(files), name).not.toEqual([]);
     }
     // The agents module may never name the lifecycle model.
     const agents = agentSources();
