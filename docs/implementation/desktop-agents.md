@@ -2,7 +2,7 @@
 
 **Status:** Foundation. Implemented for [D3.2a (#109)](https://github.com/RaioViajante/ordelis/issues/109), part of the [D3.2 design record (#108)](https://github.com/RaioViajante/ordelis/issues/108). Pure Rust in `desktop/src-tauri/src/agents/`, with no command, no caller and no interface.
 **Scope:** which agent CLIs Ordelis targets, what their vendors' documentation claims, and the vocabulary that keeps claims apart from observations. Nothing here finds, runs or checks an agent.
-**Related:** [Agents](../architecture/agents.md) · [Runtime-validation foundations](../guides/runtime-validation-foundations.md) · [Execution Safety Gate](execution-safety-gate.md) · [Desktop architecture](desktop-architecture.md)
+**Related:** [Agents](../architecture/agents.md) · [Runtime-validation foundations](../guides/runtime-validation-foundations.md) · [Execution Safety Gate](execution-safety-gate.md) · [Desktop architecture](desktop-architecture.md) · [Execution lifecycle contracts](desktop-execution-contracts.md)
 
 ## Where agent integration stands
 

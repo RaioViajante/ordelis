@@ -85,6 +85,14 @@ function agentSources(): Record<string, string> {
   return Object.fromEntries([...production].map((f) => [f.slice("src/".length), read(`src-tauri/${f}`)]));
 }
 
+// The production files of the execution lifecycle model (issue #112), keyed the same way.
+function lifecycleSources(): Record<string, string> {
+  const production = new Set(
+    ["default", "release", "dev-runtime"].flatMap((c) => nativeSources.configurations[c]).filter((f) => f.startsWith("src/lifecycle")),
+  );
+  return Object.fromEntries([...production].map((f) => [f.slice("src/".length), read(`src-tauri/${f}`)]));
+}
+
 // Rust code with comments removed and every string and character literal emptied, so that documentation text (URLs,
 // flag names in notes) is never mistaken for code and code is never hidden in a comment or behind a quote character.
 // Path separators lose their surrounding spaces (`crate :: x` is `crate::x`). Raw strings are refused separately.
@@ -133,6 +141,11 @@ function rustCodeOnly(text: string): string {
 // two modules reach only each other); no identifier that could hold a path, a search location, an argument vector or
 // a command; and no macro other than matches!.
 function agentContentViolations(files: Record<string, string>): string[] {
+  return pureContentViolations(files, (file) => (file === "agents.rs" ? /\bsuper\b/ : /\bsuper\b(?!::(?:catalog|evidence)\b)/));
+}
+
+// The rules above, shared with the lifecycle model. `superRule` says how a file may not name `super`.
+function pureContentViolations(files: Record<string, string>, superRule: (file: string) => RegExp): string[] {
   const violations: string[] = [];
   for (const [file, text] of Object.entries(files)) {
     if (/(?<![A-Za-z0-9_])[bc]?r#*"/.test(text)) violations.push(`${file}: raw string`);
@@ -146,10 +159,10 @@ function agentContentViolations(files: Record<string, string>): string[] {
       /\bstatic\s+mut\b|\b(?:thread_local|OnceLock|OnceCell|LazyLock|LazyCell|lazy_static|Cell|RefCell|Mutex|RwLock|Arc|Rc)\b|\bAtomic\w*/,
       /\b(?:unsafe|extern)\b|#\s*!?\s*\[\s*(?:link|no_mangle|export_name|path|used|link_section)\b/,
       /\b(?:tauri|serde|serde_json|libc|rfd)\b|invoke_handler|generate_handler/,
-      // The rest of the crate: by `crate`, by the sibling modules' names, or through `super` from agents.rs (where it
-      // is the crate root). catalog.rs and evidence.rs may name only each other through `super`.
+      // The rest of the crate: by `crate`, by the sibling modules' names, or through `super` from a module root (where
+      // it is the crate root). Submodules may name only their reviewed siblings through `super`.
       /(?<!pub\()\bcrate\b|\b(?:runtime_bridge|store|projects|tasks|lib|main)\b/,
-      file === "agents.rs" ? /\bsuper\b/ : /\bsuper\b(?!::(?:catalog|evidence)\b)/,
+      superRule(file),
       /\bpub\s+(?!\((?:crate|super)\))/,
       /\b\w*(?:path|argv|args|arguments|dirs?(?![a-z])|director|search|location|candidate|command|cmd|launch|invoke|program|exe(?!cutable)|binar|template|flag)\w*\b/i,
     ];
@@ -158,6 +171,33 @@ function agentContentViolations(files: Record<string, string>): string[] {
       if (hit) violations.push(`${file}: ${hit[0]}`);
     }
     for (const m of code.matchAll(/\b(\w+)\s*!\s*[([{]/g)) if (m[1] !== "matches") violations.push(`${file}: ${m[1]}!`);
+  }
+  return violations;
+}
+
+// The only references to the rest of the crate that the lifecycle model may make (D3.2b decision 12.8): these two
+// imports, as whole lines, adjacent and in this order, as the first lines of code of lifecycle/model.rs (only line
+// comments come before them, so nothing such as `pub(crate)` can prefix them). Anything else, including another copy,
+// is held to the agents rules, with no `super` at all (b-1 has no sibling modules), no name of the agents module, and
+// no identifier that could mean authorized, dispatched, enforced or terminated anywhere in it.
+const LIFECYCLE_IMPORTS = ["use crate::agents::catalog::ProviderId;", "use crate::agents::evidence::{Sha256, Token};"];
+function withoutLifecycleImports(file: string, text: string): string {
+  if (file !== "lifecycle/model.rs") return text;
+  const lines = text.split("\n");
+  const first = lines.findIndex((line) => !line.startsWith("//"));
+  if (lines[first] !== LIFECYCLE_IMPORTS[0] || lines[first + 1] !== LIFECYCLE_IMPORTS[1]) return text;
+  lines.splice(first, 2);
+  return lines.join("\n");
+}
+function lifecycleContentViolations(files: Record<string, string>): string[] {
+  const stripped = Object.fromEntries(Object.entries(files).map(([file, text]) => [file, withoutLifecycleImports(file, text)]));
+  const violations = pureContentViolations(stripped, () => /\bsuper\b/);
+  for (const [file, text] of Object.entries(stripped)) {
+    const code = rustCodeOnly(text);
+    for (const pattern of [/\bagents\b/, /\w*(?:authori[sz]|dispatch|enforc|terminat|execute_now)\w*/i]) {
+      const hit = code.match(pattern);
+      if (hit) violations.push(`${file}: ${hit[0]}`);
+    }
   }
   return violations;
 }
@@ -426,12 +466,15 @@ describe("desktop trust boundary", () => {
     const lib = read("src-tauri/src/lib.rs");
     const production = rustCodeOnly(lib.slice(0, lib.indexOf("#[cfg(test)]")));
     expect(production.match(/\bagents\b/g)).toEqual(["agents"]);
-    expect(lib).toMatch(/\n#\[cfg_attr\(not\(test\), allow\(dead_code\)\)\]\nmod agents;\nmod projects;\n/);
-    // No other compiled production file uses it.
+    expect(lib).toMatch(/\n#\[cfg_attr\(not\(test\), allow\(dead_code\)\)\]\nmod agents;\n#\[cfg_attr\(not\(test\), allow\(dead_code\)\)\]\nmod lifecycle;\nmod projects;\n/);
+    // No other compiled production file uses it, except the lifecycle model's two reviewed imports (decision 12.8).
     const others = ["default", "release", "dev-runtime"]
       .flatMap((c) => nativeSources.configurations[c])
       .filter((f) => !f.startsWith("src/agents") && f !== "src/lib.rs");
-    for (const file of new Set(others)) expect(rustCodeOnly(read(`src-tauri/${file}`)), file).not.toMatch(/\bagents\b/);
+    for (const file of new Set(others)) {
+      const text = withoutLifecycleImports(file.slice("src/".length), read(`src-tauri/${file}`));
+      expect(rustCodeOnly(text), file).not.toMatch(/\bagents\b/);
+    }
     // The vocabulary has no field that could mean authorized, dispatched or enforced.
     const evidence = rustCodeOnly(files["agents/evidence.rs"]);
     expect(evidence).not.toMatch(/\b\w*(?:authori[sz]ed?|dispatch\w*|enforced|Enforced)\b/);
@@ -494,6 +537,74 @@ describe("desktop trust boundary", () => {
     // Documentation text is data: a string or a comment that mentions a process or a path is not code.
     const text = add("agents/catalog.rs", 'const U: &str = "std::process::Command::new(\\"codex\\") in /usr/bin"; // std::fs::read');
     expect(agentContentViolations(text)).toEqual([]);
+  });
+
+  // D3.2b-1 (#112, design #108): the execution lifecycle model is history, never authority. It is compiled in, but no
+  // command, module or initializer reaches it, it can neither find, start nor observe anything, and it names the rest
+  // of the crate only through two reviewed imports.
+  it("keeps the lifecycle model pure, unreachable from the interface and limited to its reviewed imports", () => {
+    const files = lifecycleSources();
+    expect(Object.keys(files).sort()).toEqual(["lifecycle.rs", "lifecycle/model.rs"]);
+    expect(lifecycleContentViolations(files)).toEqual([]);
+    expect(files["lifecycle/model.rs"]).toMatch(/\n#\[cfg\(test\)\]\nmod tests;\n$/);
+    for (const line of LIFECYCLE_IMPORTS) expect(files["lifecycle/model.rs"].split("\n").filter((l) => l === line)).toHaveLength(1);
+    // lib.rs declares the module once (pinned in the agents test above) and no other compiled production file names
+    // it, the agents module included.
+    const lib = read("src-tauri/src/lib.rs");
+    expect(rustCodeOnly(lib.slice(0, lib.indexOf("#[cfg(test)]"))).match(/\blifecycle\b/g)).toEqual(["lifecycle"]);
+    const others = ["default", "release", "dev-runtime"]
+      .flatMap((c) => nativeSources.configurations[c])
+      .filter((f) => !f.startsWith("src/lifecycle") && f !== "src/lib.rs");
+    for (const file of new Set(others)) expect(rustCodeOnly(read(`src-tauri/${file}`)), file).not.toMatch(/\blifecycle\b/);
+  });
+
+  it("finds prohibited operations and unreviewed references in the lifecycle model", () => {
+    const actual = lifecycleSources();
+    const add = (file: string, text: string) => ({ ...actual, [file]: actual[file] + "\n" + text });
+    const model = (from: string, to: string) => ({ ...actual, "lifecycle/model.rs": actual["lifecycle/model.rs"].replace(from, to) });
+    const bypasses: Record<string, Record<string, string>> = {
+      "a process": add("lifecycle/model.rs", 'fn a() { let _ = std::process::Command::new("codex"); }'),
+      "a file read": add("lifecycle/model.rs", 'fn b() { let _ = std::fs::read("/tmp/r1.ordj"); }'),
+      "a clock": add("lifecycle/model.rs", "fn c() { let _ = std::time::Instant::now(); }"),
+      "an environment read": add("lifecycle.rs", 'fn d() { let _ = std::env::var("HOME"); }'),
+      "a map from std": add("lifecycle/model.rs", "struct E { by_key: std::collections::BTreeMap<u8, u8> }"),
+      "serialization": add("lifecycle/model.rs", "#[derive(serde::Serialize)]\nstruct F;"),
+      "a command": add("lifecycle/model.rs", "#[tauri::command]\nfn g() {}"),
+      "a macro other than matches!": add("lifecycle/model.rs", "fn h() -> Vec<u8> { vec![1] }"),
+      "unsafe code": add("lifecycle/model.rs", "fn i() { unsafe {} }"),
+      "a public item": add("lifecycle/model.rs", "pub fn j() {}"),
+      "another module of the crate": add("lifecycle/model.rs", "use crate::store;"),
+      "a sibling through super": add("lifecycle/model.rs", "use super::model;"),
+      "the agents root renamed": add("lifecycle/model.rs", "use crate::agents as a;"),
+      "an agents module renamed": add("lifecycle/model.rs", "use crate::agents::catalog as c;"),
+      "a glob import": add("lifecycle/model.rs", "use crate::agents::evidence::*;"),
+      "a grouped import naming more": model(LIFECYCLE_IMPORTS[1], "use crate::agents::evidence::{Sha256, Token, Record};"),
+      "a re-export": model(LIFECYCLE_IMPORTS[0], "pub(crate) use crate::agents::catalog::ProviderId;"),
+      "a re-export split over two lines": model(LIFECYCLE_IMPORTS[0], `pub(crate)\n${LIFECYCLE_IMPORTS[0]}`),
+      "a reviewed import after other code": model(LIFECYCLE_IMPORTS[0], `const A0: u8 = 0;\n${LIFECYCLE_IMPORTS[0]}`),
+      "the reviewed imports swapped": model(`${LIFECYCLE_IMPORTS[0]}\n${LIFECYCLE_IMPORTS[1]}`, `${LIFECYCLE_IMPORTS[1]}\n${LIFECYCLE_IMPORTS[0]}`),
+      "a spaced path": model(LIFECYCLE_IMPORTS[0], "use crate :: agents :: catalog :: ProviderId;"),
+      "a second copy of a reviewed import": add("lifecycle/model.rs", LIFECYCLE_IMPORTS[0]),
+      "a reviewed import in the module root": add("lifecycle.rs", LIFECYCLE_IMPORTS[0]),
+      "a full path to the agents module": add("lifecycle/model.rs", "fn k(_: crate::agents::evidence::Record) {}"),
+      "the agents module by name": add("lifecycle/model.rs", "use self::agents;"),
+      "an authority field": add("lifecycle/model.rs", "struct L { authorized: bool }"),
+      "an authority prefix": add("lifecycle/model.rs", "enum L2 { AuthorizedStart }"),
+      "an authority word inside a name": add("lifecycle/model.rs", "struct L3 { pre_authorized_grant: bool, authorized_by: u8 }"),
+      "an authorization type": add("lifecycle/model.rs", "struct Authorization;"),
+      "a dispatch state": add("lifecycle/model.rs", "enum M { Dispatched }"),
+      "an enforced limit": add("lifecycle/model.rs", "struct EnforcedLimit;"),
+      "a termination method": add("lifecycle/model.rs", "fn terminate_child() {}"),
+      "a terminating state": add("lifecycle/model.rs", "enum M2 { Terminating }"),
+      "a search location": add("lifecycle/model.rs", "struct N { executable_path: u8 }"),
+    };
+    for (const [name, files] of Object.entries(bypasses)) {
+      expect(lifecycleContentViolations(files), name).not.toEqual([]);
+    }
+    // The agents module may never name the lifecycle model.
+    const agents = agentSources();
+    expect(rustCodeOnly(agents["agents/evidence.rs"] + "\nuse crate::lifecycle;")).toMatch(/\blifecycle\b/);
+    for (const [file, text] of Object.entries(agents)) expect(rustCodeOnly(text), file).not.toMatch(/\blifecycle\b/);
   });
 
   // Reviewed in issue #40: the frontend may depend on @tauri-apps/api, and only to call get_runtime_status.
