@@ -13,7 +13,7 @@
 use super::model::{
     AttemptNo, AttemptState, ConcernClass, ConcernRef, Event, EventBody, EventDraft, InterruptObservation, JournalDraft,
     JournalFault, JournalRepair, JournalSize, LiveEpoch, MonoMs, NotStartedCause, NotStartedReason, OsIdentity,
-    ReconcilerDraft, Rejection, RepairCause, RunId, RunState, MAX_OBSERVATION_AGE_MS,
+    ReconcilerDraft, Rejection, RepairCause, RunId, RunState, MAX_OBSERVATION_AGE_MS, MAX_REPAIRS,
 };
 use super::live::SupervisedRun;
 use super::replay::{MarkProblem, MarkReading, ReplayedHistory};
@@ -313,7 +313,8 @@ impl Reconciliation {
 pub(crate) enum ReconcileRefused {
     /// No `RunCreated`: a run with no valid frame is the adapter's to classify (gate-review finding F6).
     NoRun,
-    /// More than two repair records are missing: opening failed repeatedly, and the adapter quarantines (r5 5.7).
+    /// More than two repair records are missing (opening failed repeatedly, r5 5.7), or recording them would pass the
+    /// run's `MAX_REPAIRS` (D3.2c-1): the adapter quarantines.
     TooManyRepairs,
     /// A reported repair names a sidecar already recorded with other content, or a sidecar reported twice.
     RepairConflict,
@@ -353,7 +354,10 @@ pub(crate) fn reconcile(history: &RecordedHistory, observations: &[AttemptObserv
                 None => drafts.push(EventDraft::journal(JournalDraft::Repaired(*repair), input.stated_at_ms)),
             }
         }
-        if drafts.len() > 2 {
+        // More than two owed repairs, or more than the run may ever record (`MAX_REPAIRS`, D3.2c-1): the adapter
+        // quarantines rather than lose a record.
+        let recorded = projection.events().iter().filter(|event| matches!(event.body, EventBody::JournalRepaired(_))).count();
+        if drafts.len() > 2 || recorded + drafts.len() > MAX_REPAIRS as usize {
             return Err(ReconcileRefused::TooManyRepairs);
         }
     }

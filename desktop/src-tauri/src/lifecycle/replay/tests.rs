@@ -750,3 +750,22 @@ fn a_torn_protected_write_after_the_attempt_ended_is_still_repairable_past_the_l
     assert_eq!(kinds, [EventKind::JournalRepaired]);
     assert_eq!(conflicts, []);
 }
+
+#[test]
+fn a_tail_past_the_repair_cap_is_refused_for_quarantine() {
+    // Review of #120 (N6): a torn tail that would be the run's 41st repair is refused as `TooManyRepairs`, the refusal that
+    // already tells the adapter to quarantine, never as a generic rejection.
+    let mut journal = running();
+    for sidecar in 1..=MAX_REPAIRS {
+        journal.one(repaired(sidecar, AT));
+    }
+    let mut bytes = stream(&journal.frames);
+    bytes.extend_from_slice(b"ORDJ1 9");
+    let tail = &bytes[bytes.len() - 7..];
+    let history = RecordedHistory::from_replay(replayed(&bytes), evidence(mark_after(&journal.frames, journal.frames.len()), Vec::from([tail_repair(MAX_REPAIRS + 1, tail)]))).unwrap();
+    assert_eq!(reconcile(&history, &[], input(history.projection())).err(), Some(crate::lifecycle::reconcile::ReconcileRefused::TooManyRepairs));
+    // The run stays unreconciled and blocks every start.
+    let mut summaries: Vec<_> = (1..7).map(|k| (RunId::new(k).unwrap(), crate::lifecycle::reconcile::RunSummary::NeverCreated)).collect();
+    summaries.push((run_id(), summarize(&history, ReadBasis::Locked)));
+    assert!(!start_conflicts(&RunInventory::Enumerated { allocated: 7, summaries }, &[]).is_empty());
+}
