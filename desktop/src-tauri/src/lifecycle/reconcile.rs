@@ -11,7 +11,7 @@
 // plain value with no method and no consumer, and acting on it needs a separate, future policy decision (#108
 // decision 13).
 use super::model::{
-    AttemptNo, AttemptState, ConcernClass, ConcernRef, EventBody, EventDraft, InterruptObservation, JournalDraft,
+    AttemptNo, AttemptState, ConcernClass, ConcernRef, Event, EventBody, EventDraft, InterruptObservation, JournalDraft,
     JournalFault, JournalRepair, JournalSize, LiveEpoch, MonoMs, NotStartedCause, NotStartedReason, OsIdentity,
     ReconcilerDraft, Rejection, RunId, RunState, MAX_OBSERVATION_AGE_MS,
 };
@@ -431,6 +431,8 @@ pub(crate) struct VerifiedRun {
     run_blocked: bool,
     in_flight: Option<AttemptNo>,
     repairs_pending: bool,
+    /// The recorded events summarized, so that a supervision claiming the run can be checked against them.
+    events: Vec<Event>,
 }
 
 /// The closed summary of one allocated run id (F3).
@@ -459,7 +461,12 @@ pub(crate) fn summarize(history: &RecordedHistory, read: ReadBasis) -> RunSummar
         orphans: blocking.iter().filter_map(ConcernRef::attempt).collect(),
         run_blocked: blocking.iter().any(|concern| concern.attempt().is_none()),
         in_flight: projection.current_attempt().map(AttemptRecord::attempt),
-        repairs_pending: history.unrecorded_repairs.iter().any(|repair| recorded_repair(projection, repair.sidecar()) != Some(*repair)),
+        // A repair not recorded with the same content, or a sidecar reported twice (which `reconcile` refuses), is owed.
+        repairs_pending: history.unrecorded_repairs.iter().enumerate().any(|(index, repair)| {
+            recorded_repair(projection, repair.sidecar()) != Some(*repair)
+                || history.unrecorded_repairs[..index].iter().any(|earlier| earlier.sidecar() == repair.sidecar())
+        }),
+        events: projection.events().to_vec(),
     })
 }
 
@@ -496,12 +503,14 @@ pub(crate) enum StartConflict {
 }
 
 /// Every start conflict in `inventory`, sorted and without repeats. `supervised` names the runs the caller's own live
-/// supervisions hold; each entry borrows an opened `LiveSupervision`, so a pending, dropped or invented supervision
-/// cannot be claimed. Nothing here orders events across journals. An empty result says only that the supplied data
+/// supervisions hold; each entry borrows an opened `LiveSupervision`, so a pending or dropped supervision cannot be
+/// claimed. A supervision excuses a run's attempt in flight only if its own recorded history extends the summarized
+/// one; a supervision that does not (one opened under a reused id, for example) is `Contradictory` and excuses nothing.
+/// That it is the run's only supervisor remains the adapter's lock. Nothing here orders events across journals. An empty result says only that the supplied data
 /// shows no conflict: it permits nothing, and the future execution boundary must still refuse to record a start while
 /// any conflict exists and apply its own policy and the Execution Safety Gate.
 pub(crate) fn start_conflicts(inventory: &RunInventory, supervised: &[SupervisedRun<'_>]) -> Vec<StartConflict> {
-    let supervised: Vec<RunId> = supervised.iter().map(SupervisedRun::run).collect();
+    let claimed = |run: &RunId| supervised.iter().filter(|held| held.run() == *run).collect::<Vec<_>>();
     let RunInventory::Enumerated { allocated, summaries } = inventory else { return Vec::from([StartConflict::InventoryUnknown]) };
     let allocated = *allocated;
     if allocated > 0 && RunId::new(allocated).is_err() {
@@ -514,7 +523,11 @@ pub(crate) fn start_conflicts(inventory: &RunInventory, supervised: &[Supervised
             conflicts.push(StartConflict::Contradictory(*run));
         }
         seen.push(*run);
-        let held = supervised.contains(run);
+        let holders = claimed(run);
+        let held = !holders.is_empty();
+        if holders.len() > 1 {
+            conflicts.push(StartConflict::Contradictory(*run));
+        }
         match summary {
             RunSummary::NeverCreated if held => conflicts.push(StartConflict::Contradictory(*run)),
             RunSummary::NeverCreated => {}
@@ -536,15 +549,19 @@ pub(crate) fn start_conflicts(inventory: &RunInventory, supervised: &[Supervised
                 if verified.repairs_pending {
                     conflicts.push(StartConflict::RepairPending(*run));
                 }
-                if let (Some(attempt), false) = (verified.in_flight, held) {
+                let owned = holders.len() == 1 && holders[0].extends(&verified.events);
+                if held && !owned {
+                    conflicts.push(StartConflict::Contradictory(*run));
+                }
+                if let (Some(attempt), false) = (verified.in_flight, owned) {
                     conflicts.push(StartConflict::Unreconciled(*run, attempt));
                 }
             }
         }
     }
-    for run in &supervised {
-        if !seen.contains(run) {
-            conflicts.push(StartConflict::Contradictory(*run));
+    for held in supervised {
+        if !seen.contains(&held.run()) {
+            conflicts.push(StartConflict::Contradictory(held.run()));
         }
     }
     // Allocated ids with no summary, as ranges.

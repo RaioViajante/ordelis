@@ -554,9 +554,15 @@ fn orphaned() -> RecordedHistory {
     RecordedHistory::new(after(&history, &reconciliation), HistoryStatus::Verified, Vec::new())
 }
 
-/// An opened supervision of run `number` (the only way to name a run as supervised).
+/// A supervision opened for a new, empty run under id `number`: it owns nothing that was recorded before.
 fn supervising(number: u64) -> LiveSupervision {
     open(begin_new(EPOCH, rid(number), created(T0), MonoMs::new(0)).unwrap())
+}
+
+/// The supervision that opened this quiescent history: it owns exactly what was recorded.
+fn holding(history: RecordedHistory) -> LiveSupervision {
+    let frame = reconciled(&history, &[]).frame;
+    opened(history, frame)
 }
 
 fn enumerated(allocated: u64, summaries: Vec<(u64, RunSummary)>) -> RunInventory {
@@ -574,7 +580,7 @@ fn an_orphan_anywhere_blocks_every_start_whatever_the_run_id_or_project() {
     let mut summaries = Vec::from([(1, locked(&other_run(1, T0 + 9_000))), (2, locked(&other_run(2, T0)))]);
     summaries.extend((3..=6).map(|number| (number, RunSummary::NeverCreated)));
     summaries.push((7, locked(&orphaned())));
-    let conflicts = start_conflicts(&enumerated(7, summaries.clone()), &[supervising(2).held()]);
+    let conflicts = start_conflicts(&enumerated(7, summaries.clone()), &[holding(other_run(2, T0)).held()]);
     assert_eq!(conflicts, Vec::from([StartConflict::PossibleOrphan(rid(7), n(1))]));
     // Once the user resolves it, nothing in the supplied data conflicts (which is still not permission to start).
     let mut journal = running();
@@ -582,7 +588,7 @@ fn an_orphan_anywhere_blocks_every_start_whatever_the_run_id_or_project() {
     let concern = orphan(&journal.projection, 1);
     journal.one(resolve(concern, Resolution::ConfirmedGone, AT));
     summaries[6] = (7, locked(&verified(&journal)));
-    assert_eq!(start_conflicts(&enumerated(7, summaries), &[supervising(2).held()]), Vec::new());
+    assert_eq!(start_conflicts(&enumerated(7, summaries), &[holding(other_run(2, T0)).held()]), Vec::new());
 }
 
 #[test]
@@ -600,17 +606,33 @@ fn quarantined_unverified_and_unreconciled_runs_block() {
         (summarize(&other_run(2, T0), ReadBasis::DerivedIndex), StartConflict::UnverifiedRead(rid(2))),
     ];
     for (summary, conflict) in cases {
-        assert_eq!(start_conflicts(&enumerated(2, Vec::from([clean(), (2, summary)])), &[supervising(1).held()]), Vec::from([conflict]));
+        assert_eq!(start_conflicts(&enumerated(2, Vec::from([clean(), (2, summary)])), &[holding(other_run(1, T0)).held()]), Vec::from([conflict]));
     }
-    // A run with an attempt in flight that nobody here supervises was never reconciled: it blocks. Supervised, it does
-    // not (its supervisor owns the attempt).
-    let running_history = verified(&running());
-    let inventory = enumerated(7, (1..=6).map(|number| (number, RunSummary::NeverCreated)).chain([(7, locked(&running_history))]).collect());
+    // A run with an attempt in flight that nobody here supervises was never reconciled: it blocks. Held by the
+    // supervision that recorded it, it does not (that supervisor owns the attempt).
+    let mut owner = supervising(7);
+    let journal_size = JournalSize { events: owner.projection().events().len() as u32, bytes: 0 };
+    let staged = owner.stage(&attempt_pair(1, 1, T0 + 1_000), None, MonoMs::new(1), journal_size).ok().unwrap();
+    assert!(owner.confirm(staged).ok().unwrap().is_empty());
+    let in_flight = RecordedHistory::new(owner.projection().clone(), HistoryStatus::Verified, Vec::new());
+    let inventory = enumerated(7, (1..=6).map(|number| (number, RunSummary::NeverCreated)).chain([(7, locked(&in_flight))]).collect());
     assert_eq!(start_conflicts(&inventory, &[]), Vec::from([StartConflict::Unreconciled(rid(7), n(1))]));
-    assert_eq!(start_conflicts(&inventory, &[supervising(7).held()]), Vec::new());
-    // A repair the journal still lacks blocks until it is recorded.
+    assert_eq!(start_conflicts(&inventory, &[owner.held()]), Vec::new());
+    // A supervision opened under the same id that did not record it excuses nothing, nor do two claims for one run.
+    let impostor = supervising(7);
+    assert_eq!(start_conflicts(&inventory, &[impostor.held()]), Vec::from([StartConflict::Contradictory(rid(7)), StartConflict::Unreconciled(rid(7), n(1))]));
+    assert_eq!(start_conflicts(&inventory, &[owner.held(), impostor.held()]), Vec::from([StartConflict::Contradictory(rid(7)), StartConflict::Unreconciled(rid(7), n(1))]));
+    let running_history = verified(&running());
+    let recorded = enumerated(7, (1..=6).map(|number| (number, RunSummary::NeverCreated)).chain([(7, locked(&running_history))]).collect());
+    assert_eq!(start_conflicts(&recorded, &[supervising(7).held()]), Vec::from([StartConflict::Contradictory(rid(7)), StartConflict::Unreconciled(rid(7), n(1))]));
+    // A repair the journal still lacks blocks until it is recorded; so does a recorded sidecar reported twice.
     let pending = RecordedHistory::new(other_run(1, T0).projection().clone(), HistoryStatus::Verified, Vec::from([repair(1)]));
     assert_eq!(start_conflicts(&enumerated(1, Vec::from([(1, locked(&pending))])), &[]), Vec::from([StartConflict::RepairPending(rid(1))]));
+    let repaired_run = apply(other_run(1, T0).projection(), &[repaired(1, T0 + 1_000)], JournalSize { events: 1, bytes: 0 }).unwrap().projection;
+    let recorded_once = RecordedHistory::new(repaired_run.clone(), HistoryStatus::Verified, Vec::from([repair(1)]));
+    assert_eq!(start_conflicts(&enumerated(1, Vec::from([(1, locked(&recorded_once))])), &[]), Vec::new());
+    let reported_twice = RecordedHistory::new(repaired_run, HistoryStatus::Verified, Vec::from([repair(1), repair(1)]));
+    assert_eq!(start_conflicts(&enumerated(1, Vec::from([(1, locked(&reported_twice))])), &[]), Vec::from([StartConflict::RepairPending(rid(1))]));
     // A lock-free or index read can still add conflicts.
     let indexed = summarize(&orphaned(), ReadBasis::DerivedIndex);
     let inventory = enumerated(7, (1..=6).map(|number| (number, RunSummary::NeverCreated)).chain([(7, indexed)]).collect());
@@ -662,13 +684,13 @@ fn start_conflicts_depend_on_no_order_across_journals() {
         (6, RunSummary::NeverCreated),
         (7, locked(&orphaned())),
     ]);
-    let forward = start_conflicts(&enumerated(7, summaries.clone()), &[supervising(4).held()]);
+    let forward = start_conflicts(&enumerated(7, summaries.clone()), &[holding(other_run(4, T0)).held()]);
     let mut reversed = summaries.clone();
     reversed.reverse();
-    assert_eq!(start_conflicts(&enumerated(7, reversed), &[supervising(4).held()]), forward);
+    assert_eq!(start_conflicts(&enumerated(7, reversed), &[holding(other_run(4, T0)).held()]), forward);
     let mut rotated = summaries;
     rotated.rotate_left(3);
-    assert_eq!(start_conflicts(&enumerated(7, rotated), &[supervising(4).held()]), forward);
+    assert_eq!(start_conflicts(&enumerated(7, rotated), &[holding(other_run(4, T0)).held()]), forward);
     // The other runs' recorded times differ wildly (T0 + 50 s, T0), and nothing compares them.
     let mut sorted = forward.clone();
     sorted.sort();

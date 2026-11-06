@@ -230,6 +230,11 @@ impl SupervisedRun<'_> {
     pub(crate) fn run(&self) -> RunId {
         self.live.projection.run()
     }
+
+    /// Whether this supervision's recorded history starts with `events`: it recorded what was summarized.
+    pub(crate) fn extends(&self, events: &[Event]) -> bool {
+        self.live.projection.events().starts_with(events)
+    }
 }
 
 /// How a reconciled run opens: at once when reconciliation had nothing to record, or after its opening frame is
