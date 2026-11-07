@@ -864,9 +864,9 @@ fn verify_persisted_distinguishes_absent_landed_diverged_and_unknown() {
     // A torn write of the pending frame, and an unexplained short tail (a zero-filled extension).
     assert_eq!(
         verify_persisted(&after(&pending[..pending.len() - 1]), &committed, &pending),
-        PersistCheck::Absent { torn: Some(TornTail { len: pending.len() as u32 - 1, pending_prefix: true }) }
+        PersistCheck::Absent { torn: Some(TornTail { len: pending.len() as u32 - 1, pending_prefix: true, crc32c: crc32c(&pending[..pending.len() - 1]) }) }
     );
-    assert_eq!(verify_persisted(&after(&[0; 64]), &committed, &pending), PersistCheck::Absent { torn: Some(TornTail { len: 64, pending_prefix: false }) });
+    assert_eq!(verify_persisted(&after(&[0; 64]), &committed, &pending), PersistCheck::Absent { torn: Some(TornTail { len: 64, pending_prefix: false, crc32c: crc32c(&[0; 64]) }) });
     // Anything else diverges.
     let mut extra = after(&pending);
     extra.push(b'x');
@@ -925,7 +925,7 @@ fn property_verify_persisted_on_every_frame_of_random_journals() {
             let cut = 1 + rng.below(pending.len() as u64 - 1) as usize;
             assert_eq!(
                 verify_persisted(&with(&pending[..cut]), &committed, &pending),
-                PersistCheck::Absent { torn: Some(TornTail { len: cut as u32, pending_prefix: true }) },
+                PersistCheck::Absent { torn: Some(TornTail { len: cut as u32, pending_prefix: true, crc32c: crc32c(&pending[..cut]) }) },
                 "seed {seed}"
             );
             let mut flipped = pending.clone();

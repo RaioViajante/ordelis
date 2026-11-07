@@ -11,10 +11,20 @@
 //
 // A grant is consent made usable for recording one consumption. It is never Execution Safety Gate satisfaction, and
 // nothing here, or anywhere in the lifecycle module, turns it or a staged frame into a process start.
+//
+// Uncertain writes are bound to evidence (D3.2c-2, issue #122). `verify_write` is the only producer of a
+// `WriteOutcome`: it encodes the abandoned frame itself, checks that the committed bytes decode to exactly this
+// supervision's recorded events, and compares them with the re-read file through the codec's `verify_persisted`. `adopt`
+// takes only a `Landed` outcome for exactly that frame and `discard` only an `Absent` one; `Diverged`, `Unknown`, a torn
+// tail the frame does not start with, contradictory re-reads and a second consecutive uncertain append poison the
+// supervision. A torn tail leaves a repair owed, which only `stage_repair` can
+// record, with the length and checksum the verification measured. A byte comparison is not durability: whether the
+// bytes are on stable storage is the adapter's syncs, never this file's conclusion.
+use super::codec::{decode_stream, encode_frame, verify_persisted, Divergence, PersistCheck, StreamEnd};
 use super::model::{
-    ApprovalId, ApprovalKind, ApprovalRequest, ApprovalState, AttemptNo, AttemptState, ConcernClass, ConcernRef, Decision, Event,
-    EventBody, EventDraft, EventKind, ExpiryBasis, JournalSize, LiveEpoch, MonoMs, OperationDescription, Producer,
-    Rejection, RunId,
+    frame_durability, ApprovalId, ApprovalKind, ApprovalRequest, ApprovalState, AttemptNo, AttemptState, ConcernClass, ConcernRef,
+    Decision, Durability, Event, EventBody, EventDraft, EventKind, ExpiryBasis, JournalDraft, JournalRepair, JournalSize, LiveEpoch,
+    MonoMs, OperationDescription, Producer, Rejection, RepairCause, RunId, MAX_CONSECUTIVE_UNCERTAIN,
     StopReason, SupervisorDraft, VoidReason, WallMs, DeadlineKind, GRANT_USE_MS, MAX_APPROVAL_LIFETIME_MS, MAX_BATCH, MAX_EVENTS,
     MAX_EVENT_BYTES, MAX_FRAME_BYTES, MAX_TAIL_BYTES, MAX_WALL_MS, RESERVED_EVENTS,
 };
@@ -76,6 +86,28 @@ pub(crate) struct LiveSupervision {
     descriptions: Vec<(ApprovalId, OperationDescription)>,
     /// Approvals with a minted, unconsumed grant.
     outstanding: Vec<ApprovalId>,
+    /// The canonical bytes of every frame this supervision knows is in the journal (D3.2c-2): the replayed base, a torn
+    /// tail included, and each frame confirmed or adopted since. Never lowered.
+    known_bytes: u64,
+    /// Uncertain appends (`abandon`) since the last confirmed one. Reaching `MAX_CONSECUTIVE_UNCERTAIN` poisons.
+    uncertain: u32,
+    /// Entered for good when the stream can no longer be trusted (r5 5.4): an outcome `Diverged` or `Unknown`, or too
+    /// many consecutive uncertain appends. A poisoned supervision stages, verifies, adopts and discards nothing, and its
+    /// claim on its run excuses nothing (`JournalPoisoned`). Memory only; the durable quarantine marker is the adapter's.
+    poisoned: bool,
+    /// A torn tail a verification showed and no confirmed `JournalRepaired` has recorded yet: only `stage_repair`.
+    owed: Option<OwedRepair>,
+    /// What the first verification of the unresolved frame showed: a later one that shows anything else is
+    /// contradictory evidence, and poisons.
+    checked: Option<PersistCheck>,
+}
+
+/// A torn tail a verification of this supervision measured.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct OwedRepair {
+    frame: u64,
+    len: u32,
+    crc32c: u32,
 }
 
 struct ApprovalClock {
@@ -113,6 +145,8 @@ pub(crate) struct Staged {
     descriptions: Vec<(ApprovalId, OperationDescription)>,
     /// The grant this frame consumes; dropped, never returned, once the frame is confirmed or abandoned.
     grant: Option<LiveGrant>,
+    /// The canonical encoding of `events` (empty when they are): exactly what the adapter writes.
+    bytes: Vec<u8>,
 }
 
 /// A frame whose write was uncertain. It mints nothing; `adopt` (it landed) or `discard` (it is absent) resolves it.
@@ -125,6 +159,44 @@ pub(crate) struct Abandoned {
     mono: MonoMs,
     progress: Vec<AttemptNo>,
     descriptions: Vec<(ApprovalId, OperationDescription)>,
+    bytes: Vec<u8>,
+}
+
+/// What a re-read journal showed about one abandoned frame (D3.2c-2, S3). Made only by `verify_write`, for exactly one
+/// supervision, run and frame, with the bytes it expected; consumed by `adopt` or `discard`. It is evidence about bytes,
+/// never about durability, and never authority.
+#[must_use]
+pub(crate) struct WriteOutcome {
+    epoch: LiveEpoch,
+    run: RunId,
+    frame: u64,
+    expected: Vec<u8>,
+    check: PersistCheck,
+}
+
+impl WriteOutcome {
+    pub(crate) const fn check(&self) -> PersistCheck {
+        self.check
+    }
+}
+
+/// A torn tail shown by a verification of this supervision (D3.2c-2, N7): its length and CRC-32C as measured. Made only
+/// by `discard`; the adapter moves exactly these bytes to a new sidecar, and `stage_repair` records them.
+#[must_use]
+pub(crate) struct TornTailEvidence {
+    epoch: LiveEpoch,
+    run: RunId,
+    owed: OwedRepair,
+}
+
+impl TornTailEvidence {
+    pub(crate) const fn len(&self) -> u32 {
+        self.owed.len
+    }
+
+    pub(crate) const fn crc32c(&self) -> u32 {
+        self.owed.crc32c
+    }
 }
 
 /// Why the live layer refused a call.
@@ -154,6 +226,20 @@ pub(crate) enum LiveRefusal {
     /// A reconciler draft: a supervised run is never reconciled (r5 5.4); reconciliation opens a run instead, through
     /// `begin_reconciled`.
     Reconciliation,
+    /// The supervision is poisoned (D3.2c-2): nothing more is staged or resolved through it.
+    Poisoned,
+    /// The committed bytes do not decode, as a clean stream, to exactly this supervision's recorded events.
+    NotThisJournal,
+    /// The outcome is for another supervision, run or frame, or does not show what the call needs: `Landed` to adopt,
+    /// `Absent` to discard.
+    OutcomeMismatch,
+    /// A torn tail is owed its repair record: only `stage_repair`.
+    RepairOwed,
+    /// A repair without matching evidence: a journal draft through `stage`, evidence of another tail, a sidecar not
+    /// above every recorded one, or a file that still holds the tail.
+    RepairUnshown,
+    /// The reducer accepted a frame the codec cannot encode; nothing is staged.
+    Unencodable,
 }
 
 /// A refused `stage`. The grant, if one was handed over, comes back: it stays single-use because only one exists.
@@ -221,7 +307,24 @@ fn supervision(epoch: LiveEpoch, projection: RunProjection, mono: MonoMs) -> Liv
         attempts: Vec::new(),
         descriptions: Vec::new(),
         outstanding: Vec::new(),
+        known_bytes: 0,
+        uncertain: 0,
+        poisoned: false,
+        owed: None,
+        checked: None,
     }
+}
+
+/// The canonical bytes of a frame; nothing for an empty one.
+fn encoded(events: &[Event]) -> Result<Vec<u8>, LiveRefusal> {
+    if events.is_empty() {
+        return Ok(Vec::new());
+    }
+    encode_frame(events).map_err(|_| LiveRefusal::Unencodable)
+}
+
+fn encoded_len(events: &[Event]) -> Option<u64> {
+    encoded(events).ok().map(|bytes| bytes.len() as u64)
 }
 
 /// The one place a pending supervision is built.
@@ -236,7 +339,9 @@ pub(crate) fn begin_new(epoch: LiveEpoch, run: RunId, run_created: EventDraft, m
         return Err(Rejection::InvalidTransition);
     }
     let applied = apply(&RunProjection::empty(run), &[run_created], JournalSize { events: 0, bytes: 0 })?;
-    Ok(pending(supervision(epoch, applied.projection, mono), applied.events))
+    let mut live = supervision(epoch, applied.projection, mono);
+    live.known_bytes = encoded_len(&applied.events).ok_or(Rejection::InvalidDraft)?;
+    Ok(pending(live, applied.events))
 }
 
 /// That the caller holds an opened supervision of `run`, for `start_conflicts`. It borrows the supervision, so it exists
@@ -254,6 +359,21 @@ impl SupervisedRun<'_> {
     /// start while it is held.
     pub(crate) fn capacity_faulted(&self) -> bool {
         self.live.capacity_fault
+    }
+
+    /// Whether the supervision is poisoned (D3.2c-2): its claim then excuses nothing, and the run blocks every start.
+    pub(crate) fn poisoned(&self) -> bool {
+        self.live.poisoned
+    }
+
+    /// Whether a torn tail is owed its repair record (D3.2c-2).
+    pub(crate) fn repair_owed(&self) -> bool {
+        self.live.owed.is_some()
+    }
+
+    /// Whether this supervision's history records `repair` with the same content.
+    pub(crate) fn records(&self, repair: &JournalRepair) -> bool {
+        self.live.projection.events().iter().any(|event| matches!(&event.body, EventBody::JournalRepaired(recorded) if recorded == repair))
     }
 
     /// Whether this supervision's recorded history starts with `events`: it recorded what was summarized.
@@ -315,6 +435,8 @@ pub(crate) fn begin_reconciled(epoch: LiveEpoch, history: RecordedHistory, frame
     if frame.drafts().iter().any(|draft| !matches!(draft.producer(), Producer::Journal | Producer::Reconciler)) {
         return Err(BeginRefused::NotReconciliation);
     }
+    // The history's own events and bytes are the floor of the size (D3.2c-2): a stated size can only raise it.
+    let size = history.floor(size).raised(frame.size());
     let (projection, events) = if frame.drafts().is_empty() {
         (history.projection().clone(), Vec::new())
     } else {
@@ -325,6 +447,10 @@ pub(crate) fn begin_reconciled(epoch: LiveEpoch, history: RecordedHistory, frame
         return Err(BeginRefused::NotQuiescent);
     }
     let mut live = supervision(epoch, projection, mono);
+    // The replayed bytes, a torn tail included (removed by the opening frame's repair, but counted for this lifetime),
+    // and the opening frame's.
+    let opening = encoded_len(&events).ok_or(BeginRefused::Rejected(Rejection::InvalidDraft))?;
+    live.known_bytes = history.journal_bytes().saturating_add(opening);
     // A run opened at the ceiling opens capacity-faulted (D3.2c-1).
     live.capacity_fault = live.stated(size).exhausted();
     Ok(if events.is_empty() { Opening::Ready(live) } else { Opening::Pending(pending(live, events)) })
@@ -334,6 +460,11 @@ impl PendingSupervision {
     /// The `RunCreated` frame to write.
     pub(crate) fn events(&self) -> &[Event] {
         &self.events
+    }
+
+    /// How durable the opening frame must be before `open` (D3.2c-2): the strictest class among its events.
+    pub(crate) fn durability(&self) -> Durability {
+        frame_durability(&self.events)
     }
 }
 
@@ -365,10 +496,27 @@ impl LiveSupervision {
         self.capacity_fault
     }
 
-    /// The caller's stated size, never less than what this supervision holds.
+    pub(crate) const fn poisoned(&self) -> bool {
+        self.poisoned
+    }
+
+    /// The journal size this supervision derives (D3.2c-2): its events, and the canonical bytes of its known frames plus
+    /// an owed torn tail.
+    pub(crate) fn journal_size(&self) -> JournalSize {
+        let events = u32::try_from(self.projection.events().len()).unwrap_or(u32::MAX);
+        let tail = self.owed.map_or(0, |owed| u64::from(owed.len));
+        JournalSize { events, bytes: self.known_bytes.saturating_add(tail) }
+    }
+
+    /// The size used for every check: the derived one, raised (never lowered) by the caller's stated size.
     fn stated(&self, size: JournalSize) -> JournalSize {
-        let held = u32::try_from(self.projection.events().len()).unwrap_or(u32::MAX);
-        JournalSize { events: size.events.max(held), bytes: size.bytes }
+        size.raised(self.journal_size())
+    }
+
+    /// Whether `committed` is exactly this supervision's recorded history as a clean stream of frames.
+    fn holds(&self, committed: &[u8]) -> bool {
+        let decoded = decode_stream(committed);
+        decoded.end() == StreamEnd::Clean && decoded.frames().iter().flat_map(|frame| frame.events()).eq(self.projection.events().iter())
     }
 
     /// The memory-only description of a pending approval.
@@ -407,16 +555,81 @@ impl LiveSupervision {
     /// Stages one batch as one frame: the reducer's rules plus the live checks (monotonic windows, possession of the
     /// matching grant). Mints nothing. At most one frame is outstanding.
     pub(crate) fn stage(&mut self, drafts: &[EventDraft], grant: Option<LiveGrant>, mono: MonoMs, size: JournalSize) -> Result<Staged, StageRejected> {
+        self.stage_frame(drafts, grant, mono, size, false)
+    }
+
+    /// Records the repair of the torn tail `evidence` shows (D3.2c-2, N7). The record is built here from the measured
+    /// length and checksum, never from the caller's figures. `committed` must be exactly this supervision's frames and
+    /// `file`, re-read, exactly `committed`: the tail is gone from the journal. The sidecar must come after every
+    /// recorded one. That the sidecar exists and holds those bytes is the adapter's (F5), and so is the truncation's
+    /// durability. The repair is owed until this frame is confirmed; an uncertain write of it is a second consecutive
+    /// uncertain append, which poisons.
+    pub(crate) fn stage_repair(
+        &mut self,
+        evidence: &TornTailEvidence,
+        sidecar: u32,
+        committed: &[u8],
+        file: &[u8],
+        stated_at_ms: u64,
+        mono: MonoMs,
+        size: JournalSize,
+    ) -> Result<Staged, LiveRefusal> {
+        if self.poisoned {
+            return Err(LiveRefusal::Poisoned);
+        }
+        if self.in_flight.is_some() {
+            return Err(LiveRefusal::InFlight);
+        }
+        if self.unresolved.is_some() {
+            return Err(LiveRefusal::Unresolved);
+        }
+        let shown = evidence.epoch == self.epoch && evidence.run == self.projection.run() && self.owed == Some(evidence.owed);
+        let newest = self
+            .projection
+            .events()
+            .iter()
+            .filter_map(|event| match &event.body {
+                EventBody::JournalRepaired(recorded) => Some(recorded.sidecar()),
+                _ => None,
+            })
+            .max();
+        if !shown || newest.is_some_and(|newest| sidecar <= newest) {
+            return Err(LiveRefusal::RepairUnshown);
+        }
+        if !self.holds(committed) {
+            return Err(LiveRefusal::NotThisJournal);
+        }
+        if file != committed {
+            return Err(LiveRefusal::RepairUnshown);
+        }
+        let repair = JournalRepair::new(sidecar, evidence.owed.len, evidence.owed.crc32c, RepairCause::IncompleteTail)
+            .map_err(|_| LiveRefusal::RepairUnshown)?;
+        let draft = EventDraft::journal(JournalDraft::Repaired(repair), stated_at_ms);
+        self.stage_frame(&[draft], None, mono, size, true).map_err(|rejected| rejected.refusal)
+    }
+
+    /// `repair` is set only by `stage_repair`, for the one repair draft it built from evidence.
+    fn stage_frame(&mut self, drafts: &[EventDraft], grant: Option<LiveGrant>, mono: MonoMs, size: JournalSize, repair: bool) -> Result<Staged, StageRejected> {
         let (mono, _) = self.observe(mono);
         if self.stated(size).exhausted() {
             self.capacity_fault = true;
         }
         let refuse = |refusal, grant| Err(StageRejected { refusal, grant });
+        if self.poisoned {
+            return refuse(LiveRefusal::Poisoned, grant);
+        }
         if self.in_flight.is_some() {
             return refuse(LiveRefusal::InFlight, grant);
         }
         if self.unresolved.is_some() {
             return refuse(LiveRefusal::Unresolved, grant);
+        }
+        // A repair is recorded only with the evidence of the tail it removes (N7).
+        if !repair && self.owed.is_some() {
+            return refuse(LiveRefusal::RepairOwed, grant);
+        }
+        if !repair && drafts.iter().any(|draft| draft.producer() == Producer::Journal) {
+            return refuse(LiveRefusal::RepairUnshown, grant);
         }
         if drafts.iter().any(|draft| draft.producer() == Producer::Reconciler) {
             return refuse(LiveRefusal::Reconciliation, grant);
@@ -447,7 +660,7 @@ impl LiveSupervision {
                 }
             }
         }
-        let applied = match apply(&self.projection, drafts, size) {
+        let applied = match apply(&self.projection, drafts, self.stated(size)) {
             Ok(applied) => applied,
             Err(rejection) => {
                 // A protected draft refused for capacity (D3.2c-1): its stop, end or repair could not be recorded, so
@@ -485,9 +698,13 @@ impl LiveSupervision {
         if after.exhausted() {
             self.capacity_fault = true;
         }
+        let bytes = match encoded(&applied.events) {
+            Ok(bytes) => bytes,
+            Err(refusal) => return refuse(refusal, grant),
+        };
         self.frames += 1;
         self.in_flight = Some((self.frames, applied.events.clone()));
-        Ok(Staged { epoch: self.epoch, frame: self.frames, events: applied.events, projection: applied.projection, mono, progress, descriptions, grant })
+        Ok(Staged { epoch: self.epoch, frame: self.frames, events: applied.events, projection: applied.projection, mono, progress, descriptions, grant, bytes })
     }
 
     /// The grant must be this supervision's, for this run, attempt, approval, kind and exact binding, still
@@ -533,47 +750,125 @@ impl LiveSupervision {
             return Err(LiveRefusal::NotThisSupervision);
         }
         self.in_flight = None;
-        let Staged { events, projection, mono, progress, descriptions, grant, .. } = staged;
+        let Staged { events, projection, mono, progress, descriptions, grant, bytes, .. } = staged;
         if let Some(grant) = grant {
             self.outstanding.retain(|approval| *approval != grant.approval);
         }
+        // A durable append ends a run of uncertain ones; a confirmed repair pays what was owed (only `stage_repair` can
+        // stage one while a repair is owed).
+        self.uncertain = 0;
+        if events.iter().any(|event| matches!(event.body, EventBody::JournalRepaired(_))) {
+            self.owed = None;
+        }
+        self.known_bytes = self.known_bytes.saturating_add(bytes.len() as u64);
         Ok(self.settle(&events, projection, mono, &progress, descriptions, true))
     }
 
     /// The staged frame's write was uncertain or failed. Nothing is minted, a consumed grant is dropped (consumptions
-    /// are never retried), and the supervision stays unresolved until `adopt` or `discard` (F8).
+    /// are never retried), and the supervision stays unresolved until `adopt` or `discard` (F8). The second uncertain
+    /// append in a row, with no confirmed one between, poisons the supervision (r5 5.4); the frame is still returned so
+    /// that nothing is left outstanding, and nothing can resolve it.
     pub(crate) fn abandon(&mut self, staged: Staged) -> Result<Abandoned, LiveRefusal> {
         if !self.is_next(staged.epoch, &staged.projection, &staged.events, self.in_flight.as_ref(), staged.frame) {
             return Err(LiveRefusal::NotThisSupervision);
         }
         self.unresolved = self.in_flight.take();
-        let Staged { epoch, frame, events, projection, mono, progress, descriptions, grant } = staged;
+        self.checked = None;
+        self.uncertain = self.uncertain.saturating_add(1);
+        if self.uncertain >= MAX_CONSECUTIVE_UNCERTAIN {
+            self.poisoned = true;
+        }
+        let Staged { epoch, frame, events, projection, mono, progress, descriptions, grant, bytes } = staged;
         if let Some(grant) = grant {
             self.outstanding.retain(|approval| *approval != grant.approval);
         }
-        Ok(Abandoned { epoch, frame, events, projection, mono, progress, descriptions })
+        Ok(Abandoned { epoch, frame, events, projection, mono, progress, descriptions, bytes })
     }
 
-    /// The abandoned frame is in the file exactly (the adapter's byte-exact check said it landed): the file is the
-    /// truth, so the live projection takes it. Nothing is minted; the caller records what r5 5.4 requires (for example
-    /// `ApprovalVoided{write_uncertain}` for a landed grant).
-    pub(crate) fn adopt(&mut self, abandoned: Abandoned) -> Result<(), LiveRefusal> {
+    /// Compares the re-read journal with the abandoned frame (S3). `committed` must decode, as a clean stream, to exactly
+    /// this supervision's recorded events (framed otherwise, the comparison then diverges and poisons); `file` is the journal as the adapter re-read it under the run's lock, which this core cannot
+    /// check. The expected bytes are this supervision's own encoding of the frame, never the caller's. A `Diverged` or
+    /// `Unknown` result poisons the supervision at once, whatever the caller does with the outcome next, and so do a torn
+    /// tail that is not a prefix of the frame and a second verification of the same frame that shows anything other
+    /// than the first.
+    pub(crate) fn verify_write(&mut self, abandoned: &Abandoned, committed: &[u8], file: &[u8]) -> Result<WriteOutcome, LiveRefusal> {
+        if self.poisoned {
+            return Err(LiveRefusal::Poisoned);
+        }
         if !self.is_next(abandoned.epoch, &abandoned.projection, &abandoned.events, self.unresolved.as_ref(), abandoned.frame) {
             return Err(LiveRefusal::NotThisSupervision);
         }
+        if !self.holds(committed) {
+            return Err(LiveRefusal::NotThisJournal);
+        }
+        let expected = encoded(&abandoned.events)?;
+        let check = if expected.is_empty() {
+            // Nothing was to be written: the file must be exactly the committed bytes.
+            match file.strip_prefix(committed) {
+                Some([]) => PersistCheck::Absent { torn: None },
+                Some(_) => PersistCheck::Diverged(Divergence::Foreign),
+                None if committed.starts_with(file) => PersistCheck::Diverged(Divergence::Shortened),
+                None => PersistCheck::Diverged(Divergence::Altered),
+            }
+        } else {
+            verify_persisted(file, committed, &expected)
+        };
+        // The same frame re-read twice must show the same thing: a caller cannot shop for the outcome it wants.
+        // A torn tail that is not a prefix of the frame written is bytes this supervision never wrote: foreign, as after an
+        // empty frame (review of #122).
+        let foreign_tail = matches!(check, PersistCheck::Absent { torn: Some(tail) } if !tail.pending_prefix);
+        if matches!(check, PersistCheck::Diverged(_) | PersistCheck::Unknown(_)) || foreign_tail || self.checked.is_some_and(|seen| seen != check) {
+            self.poisoned = true;
+        }
+        self.checked = Some(check);
+        Ok(WriteOutcome { epoch: self.epoch, run: self.projection.run(), frame: abandoned.frame, expected, check })
+    }
+
+    /// Whether `outcome` was made by this supervision for exactly `abandoned`.
+    fn outcome_for(&self, outcome: &WriteOutcome, abandoned: &Abandoned) -> bool {
+        outcome.epoch == self.epoch && outcome.run == self.projection.run() && outcome.frame == abandoned.frame && outcome.expected == abandoned.bytes
+    }
+
+    /// The abandoned frame is in the file exactly (`outcome` is `Landed` for this frame): the file is the truth, so the
+    /// live projection takes it. Nothing is minted; the caller records what r5 5.4 requires (for example
+    /// `ApprovalVoided{write_uncertain}` for a landed grant). The append still counts as uncertain.
+    pub(crate) fn adopt(&mut self, abandoned: Abandoned, outcome: WriteOutcome) -> Result<(), LiveRefusal> {
+        if self.poisoned {
+            return Err(LiveRefusal::Poisoned);
+        }
+        if !self.is_next(abandoned.epoch, &abandoned.projection, &abandoned.events, self.unresolved.as_ref(), abandoned.frame) {
+            return Err(LiveRefusal::NotThisSupervision);
+        }
+        if !self.outcome_for(&outcome, &abandoned) || outcome.check != PersistCheck::Landed {
+            return Err(LiveRefusal::OutcomeMismatch);
+        }
         self.unresolved = None;
-        let Abandoned { events, projection, mono, progress, descriptions, .. } = abandoned;
+        let Abandoned { events, projection, mono, progress, descriptions, bytes, .. } = abandoned;
+        self.known_bytes = self.known_bytes.saturating_add(bytes.len() as u64);
         self.settle(&events, projection, mono, &progress, descriptions, false);
         Ok(())
     }
 
-    /// The abandoned frame is absent from the file: nothing changes, and its non-consumption drafts may be staged again.
-    pub(crate) fn discard(&mut self, abandoned: Abandoned) -> Result<(), LiveRefusal> {
+    /// The abandoned frame is absent from the file (`outcome` is `Absent` for this frame): the live projection does not
+    /// move, and its non-consumption drafts may be staged again. A torn tail is returned as evidence and owed its repair
+    /// (`stage_repair`) before anything else is staged; it counts toward the journal's size until then.
+    pub(crate) fn discard(&mut self, abandoned: Abandoned, outcome: WriteOutcome) -> Result<Option<TornTailEvidence>, LiveRefusal> {
+        if self.poisoned {
+            return Err(LiveRefusal::Poisoned);
+        }
         if !self.is_next(abandoned.epoch, &abandoned.projection, &abandoned.events, self.unresolved.as_ref(), abandoned.frame) {
             return Err(LiveRefusal::NotThisSupervision);
         }
+        if !self.outcome_for(&outcome, &abandoned) {
+            return Err(LiveRefusal::OutcomeMismatch);
+        }
+        let PersistCheck::Absent { torn } = outcome.check else { return Err(LiveRefusal::OutcomeMismatch) };
         self.unresolved = None;
-        Ok(())
+        Ok(torn.map(|tail| {
+            let owed = OwedRepair { frame: abandoned.frame, len: tail.len, crc32c: tail.crc32c };
+            self.owed = Some(owed);
+            TornTailEvidence { epoch: self.epoch, run: self.projection.run(), owed }
+        }))
     }
 
     /// Whether a staged or abandoned frame is the one this supervision holds outstanding (`expected`): same epoch, same
@@ -681,7 +976,7 @@ impl LiveSupervision {
         let times = self.attempt_times(attempt);
         let passed = |start: Option<MonoMs>, duration: u64| start.map_or(true, |start| mono >= deadline(start, duration));
         let limits = self.projection.spec().map(|spec| spec.context().limits());
-        let in_reserve = size.in_reserve() || self.projection.events().len() >= (MAX_EVENTS - RESERVED_EVENTS) as usize;
+        let in_reserve = self.stated(size).in_reserve() || self.projection.events().len() >= (MAX_EVENTS - RESERVED_EVENTS) as usize;
         let stop = match (started_or_starting, limits) {
             (false, _) | (_, None) => None,
             (true, _) if self.clock_fault => Some(StopReason::ClockFault),
@@ -747,10 +1042,21 @@ impl Staged {
     pub(crate) fn events(&self) -> &[Event] {
         &self.events
     }
+
+    /// The frame's canonical bytes, exactly what the adapter appends; empty when nothing is to be written.
+    pub(crate) fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    /// How durable the frame must be before it is confirmed (D3.2c-2): the strictest class among its events, generated
+    /// consequences included. Classification only; the barriers themselves are the adapter's.
+    pub(crate) fn durability(&self) -> Durability {
+        frame_durability(&self.events)
+    }
 }
 
 impl Abandoned {
-    /// The frame whose write was uncertain, for the adapter's byte-exact comparison.
+    /// The frame whose write was uncertain.
     pub(crate) fn events(&self) -> &[Event] {
         &self.events
     }

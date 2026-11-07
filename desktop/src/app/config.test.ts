@@ -245,11 +245,12 @@ function withoutReviewedSerde(file: string, text: string): string {
 }
 // Which siblings each lifecycle file may name through `super` (decision 12.8(b), D3.2b-2 to D3.2b-4). The codec names
 // only the model: it never reaches the reducer, the live layer or reconciliation. Replay reaches the codec and the
-// reducer; reconciliation reaches replay only to build a recorded history from one; the live layer reaches neither.
+// reducer; reconciliation reaches replay only to build a recorded history from one. The live layer reaches the codec
+// (D3.2c-2, #122) to encode the frames it stages and to judge an uncertain write against the re-read bytes; never replay.
 const LIFECYCLE_SIBLINGS: Record<string, string[]> = {
   "lifecycle/model.rs": [],
   "lifecycle/reduce.rs": ["model"],
-  "lifecycle/live.rs": ["model", "reduce", "reconcile"],
+  "lifecycle/live.rs": ["model", "reduce", "reconcile", "codec"],
   "lifecycle/reconcile.rs": ["model", "reduce", "live", "replay"],
   "lifecycle/codec.rs": ["model"],
   "lifecycle/replay.rs": ["model", "reduce", "codec"],
@@ -352,7 +353,7 @@ function replayViolations(files: Record<string, string>): string[] {
   }
   for (const [file, fields] of [
     ["lifecycle/replay.rs", "projection|fault|damage|boundaries|tail"],
-    ["lifecycle/reconcile.rs", "projection|status|unrecorded_repairs"],
+    ["lifecycle/reconcile.rs", "projection|status|unrecorded_repairs|bytes"],
   ]) {
     // Spacing around `.` and parentheses around a field path do not hide a field (re-review of #118).
     const code = rustCodeOnly(files[file] ?? "")
@@ -384,7 +385,33 @@ function replayViolations(files: Record<string, string>): string[] {
 
 // D3.2b-2 (#114): live authority exists only in memory, in values that cannot be copied, formatted, serialized or
 // built outside live.rs, and a draft's producer is fixed by its typed constructor. Returns what breaks those rules.
-const LIVE_TYPES = ["LiveGrant", "LiveSupervision", "PendingSupervision", "Staged", "Abandoned"];
+// D3.2c-2 (#122): a write outcome and torn-tail evidence are live values too: built once each, by `verify_write` and
+// `discard`, never copied, formatted or named outside live.rs.
+const LIVE_TYPES = ["LiveGrant", "LiveSupervision", "PendingSupervision", "Staged", "Abandoned", "WriteOutcome", "TornTailEvidence"];
+const EVIDENCE_IMPLS: [string, string][] = [
+  ["WriteOutcome", "impl WriteOutcome {\n    pub(crate) const fn check(&self) -> PersistCheck {\n        self.check\n    }\n}"],
+  [
+    "TornTailEvidence",
+    "impl TornTailEvidence {\n    pub(crate) const fn len(&self) -> u32 {\n        self.owed.len\n    }\n\n    pub(crate) const fn crc32c(&self) -> u32 {\n        self.owed.crc32c\n    }\n}",
+  ],
+];
+const GUARDED_FIELD_MENTIONS: Record<string, number> = { poisoned: 13, capacity_fault: 12, clock_fault: 9, uncertain: 6, owed: 19, checked: 5, known_bytes: 9, last_mono: 5 };
+const REVIEWED_FAULT_ASSIGNMENTS = [
+  "capacity_fault = live.stated(size).exhausted()",
+  "capacity_fault = true",
+  "clock_fault = true",
+  "poisoned = true",
+  "uncertain = 0",
+  "uncertain = self.uncertain.saturating_add(1)",
+  "owed = None",
+  "owed = Some(owed)",
+  "checked = None",
+  "checked = Some(check)",
+  "known_bytes = encoded_len(&applied.events).ok_or(Rejection::InvalidDraft)?",
+  "known_bytes = history.journal_bytes().saturating_add(opening)",
+  "known_bytes = self.known_bytes.saturating_add(bytes.len() as u64)",
+  "last_mono = mono",
+];
 // `Name {` that builds a value: not a declaration, an impl block or a return type.
 const structLiteral = (name: string) => new RegExp(`(?<!(?:\\bstruct|\\bimpl|->|\\blet)\\s*)\\b${name}\\s*\\{`, "g");
 function liveAuthorityViolations(files: Record<string, string>): string[] {
@@ -425,8 +452,47 @@ function liveAuthorityViolations(files: Record<string, string>): string[] {
     const arrow = signature.lastIndexOf("->");
     const params = arrow < 0 ? signature : signature.slice(0, arrow);
     const returns = arrow < 0 ? "" : signature.slice(arrow);
-    if (/LiveGrant/.test(params) && !["stage", "check_grant"].includes(fn)) violations.push(`live.rs: ${fn} takes a grant`);
+    // D3.2c-2: `stage` hands its grant to the private `stage_frame`, which `stage_repair` calls with none.
+    if (/LiveGrant/.test(params) && !["stage", "stage_frame", "check_grant"].includes(fn)) violations.push(`live.rs: ${fn} takes a grant`);
     if (/LiveGrant/.test(returns) && !["confirm", "settle", "mint"].includes(fn)) violations.push(`live.rs: ${fn} returns a grant`);
+    // D3.2c-2: only verify_write makes an outcome, which only adopt and discard (and their private check) take; only
+    // discard makes torn-tail evidence, which only stage_repair takes.
+    if (/\bWriteOutcome\b/.test(returns) && fn !== "verify_write") violations.push(`live.rs: ${fn} returns a write outcome`);
+    if (/\bWriteOutcome\b/.test(params) && !["adopt", "discard", "outcome_for"].includes(fn)) violations.push(`live.rs: ${fn} takes a write outcome`);
+    if (/\bTornTailEvidence\b/.test(returns) && fn !== "discard") violations.push(`live.rs: ${fn} returns torn-tail evidence`);
+    if (/\bTornTailEvidence\b/.test(params) && fn !== "stage_repair") violations.push(`live.rs: ${fn} takes torn-tail evidence`);
+  }
+  // Review of #122: every mention of stage_frame is its private declaration or one of the two reviewed calls, so no
+  // path (`Self::stage_frame`, a visible wrapper) stages a journal draft as a repair.
+  const frameMentions = (live.match(/\bstage_frame\b/g) ?? []).length;
+  const frameDeclaration = (live.match(/\n {4}fn stage_frame\(&mut self, drafts: &\[EventDraft\], grant: Option<LiveGrant>, mono: MonoMs, size: JournalSize, repair: bool\)/g) ?? []).length;
+  if (frameMentions !== 3 || frameDeclaration !== 1 || !live.includes("self.stage_frame(drafts, grant, mono, size, false)") || !live.includes("self.stage_frame(&[draft], None, mono, size, true)")) {
+    violations.push("live.rs: stage_frame is not private, or is called other than by stage and, without a grant, by stage_repair");
+  }
+  // The evidence types expose read-only accessors only: one reviewed impl block each, so no setter can turn an Absent
+  // outcome into Landed.
+  for (const [name, block] of EVIDENCE_IMPLS) {
+    if ((live.match(new RegExp(`\\bimpl\\b[^{;]*\\b${name}\\b[^{;]*\\{`, "g")) ?? []).length !== 1 || live.split(block).length !== 2) {
+      violations.push(`live.rs: ${name} has methods other than the reviewed accessors`);
+    }
+  }
+  // Fault states only ever enter (review of #122): poisoned, clock_fault and capacity_fault are only set, the repair
+  // owed and the uncertain count change only at their reviewed sites, and nothing takes, swaps or borrows them.
+  const assignments = [...live.matchAll(/\.(poisoned|capacity_fault|clock_fault|uncertain|owed|checked|known_bytes|last_mono)\s*=(?![=>])\s*([^;]*);/g)].map((m) => `${m[1]} = ${m[2].trim()}`);
+  for (const assignment of assignments) if (!REVIEWED_FAULT_ASSIGNMENTS.includes(assignment)) violations.push(`live.rs: ${assignment}`);
+  // Re-review of #122: every mention of a guarded field is counted, so no new site (a destructuring, a compound
+  // assignment, a mutable borrow, a `ref mut` pattern) can lower one; the size and the monotonic floor too.
+  // Second re-review of #122: no wholesale reset either. The private constructor is named by its declaration and the
+  // two doors only, nothing assigns through `*self`, and no `ref mut` pattern exists in live.rs.
+  if ((live.match(/\bsupervision\(/g) ?? []).length !== 3 || /\*\s*self\s*=(?!=)/.test(live) || /\bref\s+mut\b/.test(live)) {
+    violations.push("live.rs: a supervision reset or rebound in place");
+  }
+  for (const [field, count] of Object.entries(GUARDED_FIELD_MENTIONS)) {
+    const found = (live.match(new RegExp(`\\b${field}\\b`, "g")) ?? []).length;
+    if (found !== count) violations.push(`live.rs: ${field} named ${found} times, reviewed ${count}`);
+  }
+  if (/\.(?:poisoned|capacity_fault|clock_fault|uncertain|owed|checked)\s*\.\s*(?:take|replace|get_or_insert\w*|as_mut|insert)\b/.test(live) || /&\s*mut\s+[\w.]*\.(?:poisoned|capacity_fault|clock_fault|uncertain|owed|checked)\b/.test(live) || /\bmem::/.test(live)) {
+    violations.push("live.rs: a fault state changed other than by assignment");
   }
   // SupervisedRun (review of #116) borrows an opened supervision: declared once in live.rs with no attribute and no
   // visible field, built once (by `held`), with no trait.
@@ -466,6 +532,9 @@ function liveAuthorityViolations(files: Record<string, string>): string[] {
 // consumer that names no recommendation). The opening frame and the recorded history are built in one place each, with private fields,
 // no derive and no trait, so a frame cannot be forged or reused by the live layer. Returns what breaks those rules.
 const RECONCILE_TYPES = ["ReconciledFrame", "RecordedHistory"];
+// D3.2c-2 (#122): a never-created proof is built once, by `never_created`, from a replay, a mark and the marker; its
+// derives are the ones a summary needs, and its field is private.
+const NEVER_CREATED_DECLARATION = "#[derive(Clone, Debug, PartialEq, Eq)]\npub(crate) struct NeverCreatedRun {\n    run: RunId,\n}";
 const RECOMMENDATIONS_ACCESSOR =
   "#[cfg(test)]\n    pub(crate) fn recommendations(&self) -> &[Recommendation] {\n        &self.recommendations\n    }";
 const INERT_TYPES = ["Recommendation", "ProposalBasis", "PolicyRequirement"];
@@ -507,6 +576,17 @@ function reconciliationViolations(files: Record<string, string>): string[] {
     if (file !== "lifecycle/reconcile.rs") {
       for (const name of RECONCILE_TYPES) if (structLiteral(name).test(code)) violations.push(`${file}: builds a ${name}`);
     }
+  }
+  if (reconcile.split(NEVER_CREATED_DECLARATION).length !== 2) violations.push("reconcile.rs: NeverCreatedRun is not the reviewed declaration");
+  if ((reconcile.match(structLiteral("NeverCreatedRun")) ?? []).length !== 1) violations.push("reconcile.rs: NeverCreatedRun built more than once");
+  for (const m of reconcile.matchAll(/\bfn\s+(\w+)([^{;]*)[{;]/g)) {
+    if (/\bNeverCreatedRun\b/.test(m[2])) violations.push(`reconcile.rs: ${m[1]} takes or returns a never-created proof`);
+  }
+  for (const [file, text] of Object.entries(files)) {
+    const code = rustCodeOnly(text);
+    if (new RegExp(`\\bimpl\\b[^{;]*\\bfor\\s+[(\\s]*(?:[\\w:]*::)?NeverCreatedRun\\b`).test(code)) violations.push(`${file}: a trait is implemented for NeverCreatedRun`);
+    if (/\btype\s+\w+[^=;]*=[^;]*\bNeverCreatedRun\b/.test(code) || /\bNeverCreatedRun\s+as\b/.test(code)) violations.push(`${file}: NeverCreatedRun renamed`);
+    if (file !== "lifecycle/reconcile.rs" && /\bNeverCreatedRun\b/.test(code)) violations.push(`${file}: names NeverCreatedRun`);
   }
   for (const name of RECONCILE_TYPES) {
     const declared = [...reconcile.matchAll(new RegExp(`((?:#\\[[^\\]]*\\]\\s*)*)pub\\(crate\\) struct ${name}\\b([^{;]*)\\{([^}]*)\\}`, "g"))];
@@ -884,10 +964,10 @@ describe("desktop trust boundary", () => {
     expect(pureContentViolations({ "lifecycle/codec.rs": files["lifecycle/codec.rs"] }, () => /\bsuper\b(?!::model\b)/)).not.toEqual([]);
     expect(withoutReviewedSerde("lifecycle/codec.rs", files["lifecycle/codec.rs"])).not.toEqual(files["lifecycle/codec.rs"]);
     for (const file of Object.keys(files).filter((f) => f !== "lifecycle/codec.rs")) expect(withoutReviewedSerde(file, files[file])).toEqual(files[file]);
-    for (const file of ["lifecycle/model.rs", "lifecycle/live.rs", "lifecycle/reconcile.rs", "lifecycle/replay.rs"]) expect(files[file]).toMatch(/\n#\[cfg\(test\)\]\nmod tests;\n$/);
-    // The reducer's and the codec's test fixtures are shared with other lifecycle tests, in test builds only.
-    expect(files["lifecycle/reduce.rs"]).toMatch(/\n#\[cfg\(test\)\]\npub\(crate\) mod tests;\n$/);
-    expect(files["lifecycle/codec.rs"]).toMatch(/\n#\[cfg\(test\)\]\npub\(crate\) mod tests;\n$/);
+    for (const file of ["lifecycle/model.rs", "lifecycle/live.rs", "lifecycle/replay.rs"]) expect(files[file]).toMatch(/\n#\[cfg\(test\)\]\nmod tests;\n$/);
+    // The reducer's, the codec's and reconciliation's test fixtures (D3.2c-2: a never-created summary built through
+    // `never_created`) are shared with other lifecycle tests, in test builds only.
+    for (const file of ["lifecycle/reduce.rs", "lifecycle/codec.rs", "lifecycle/reconcile.rs"]) expect(files[file]).toMatch(/\n#\[cfg\(test\)\]\npub\(crate\) mod tests;\n$/);
     for (const line of LIFECYCLE_IMPORTS) expect(files["lifecycle/model.rs"].split("\n").filter((l) => l === line)).toHaveLength(1);
     // lib.rs declares the module once (pinned in the agents test above) and no other compiled production file names
     // it, the agents module included.
@@ -1024,6 +1104,41 @@ describe("desktop trust boundary", () => {
       "a trait for a parenthesized type": add("lifecycle/live.rs", "impl Default for (Staged) { fn default() -> Staged { todo() } }"),
       "a second staged frame": add("lifecycle/live.rs", "fn fake() -> Staged { Staged { frame: 0 } }"),
       "a second pending supervision": add("lifecycle/live.rs", "fn fake() -> PendingSupervision { PendingSupervision { events: todo() } }"),
+      // D3.2c-2 (#122): write outcomes and torn-tail evidence.
+      "a cloneable outcome": live("#[must_use]\npub(crate) struct WriteOutcome", "#[must_use]\n#[derive(Clone)]\npub(crate) struct WriteOutcome"),
+      "a visible outcome field": live("    expected: Vec<u8>,\n    check: PersistCheck,\n}", "    expected: Vec<u8>,\n    pub(crate) check: PersistCheck,\n}"),
+      "a landed outcome built elsewhere": add("lifecycle/live.rs", "fn landed(o: WriteOutcome) -> WriteOutcome { WriteOutcome { check: PersistCheck::Landed, ..o } }"),
+      "an outcome returned by another function": add("lifecycle/live.rs", "fn keep(&self) -> Option<WriteOutcome> { None }"),
+      "an outcome taken by stage": add("lifecycle/live.rs", "fn stage2(outcome: WriteOutcome) {}"),
+      "an outcome named by reconciliation": add("lifecycle/reconcile.rs", "fn o(_: &super::live::WriteOutcome) {}"),
+      "a default outcome": add("lifecycle/live.rs", "impl Default for WriteOutcome { fn default() -> WriteOutcome { todo() } }"),
+      "copyable evidence": live("#[must_use]\npub(crate) struct TornTailEvidence", "#[must_use]\n#[derive(Clone, Copy)]\npub(crate) struct TornTailEvidence"),
+      "evidence built from figures": add("lifecycle/live.rs", "fn shown(&self, len: u32, crc32c: u32) -> TornTailEvidence { TornTailEvidence { epoch: self.epoch, run: self.projection.run(), owed: OwedRepair { frame: 0, len, crc32c } } }"),
+      "evidence taken by stage": add("lifecycle/live.rs", "fn stage3(evidence: &TornTailEvidence) {}"),
+      "a repair frame staged with a grant": live("self.stage_frame(&[draft], None, mono, size, true)", "self.stage_frame(&[draft], grant, mono, size, true)"),
+      "a plain frame staged as a repair": live("self.stage_frame(drafts, grant, mono, size, false)", "self.stage_frame(drafts, grant, mono, size, true)"),
+      // Review of #122 (G2 to G5).
+      "a repair staged through Self": add("lifecycle/live.rs", "impl LiveSupervision { fn sneak(&mut self, d: EventDraft, mono: MonoMs, size: JournalSize) { let _ = Self::stage_frame(self, &[d], None, mono, size, true); } }"),
+      "a visible stage_frame": live("    fn stage_frame(&mut self", "    pub(crate) fn stage_frame(&mut self"),
+      "an outcome setter": add("lifecycle/live.rs", "impl WriteOutcome { pub(crate) fn set(&mut self, check: PersistCheck) { self.check = check; } }"),
+      "an outcome setter in the reviewed block": live("impl WriteOutcome {\n", "impl WriteOutcome {\n    pub(crate) fn set(&mut self, check: PersistCheck) { self.check = check; }\n"),
+      "an evidence setter": add("lifecycle/live.rs", "impl TornTailEvidence { pub(crate) fn grow(&mut self) { self.owed.len += 1; } }"),
+      "an unpoisoned supervision": add("lifecycle/live.rs", "impl LiveSupervision { pub(crate) fn unpoison(&mut self) { self.poisoned = false; self.uncertain = 0; self.owed = None; } }"),
+      "a capacity fault cleared": add("lifecycle/live.rs", "impl LiveSupervision { fn clear(&mut self) { self.capacity_fault = false; } }"),
+      "a repair owed taken": add("lifecycle/live.rs", "impl LiveSupervision { fn forget(&mut self) { let _ = self.owed.take(); } }"),
+      // Re-review of #122 (N1 to N8, and the size and monotonic floor).
+      "resets at a new site": add("lifecycle/live.rs", "impl LiveSupervision { fn reset(&mut self) { self.owed = None; self.uncertain = 0; self.checked = None; } }"),
+      "a destructured poison flag": add("lifecycle/live.rs", "impl LiveSupervision { fn d(&mut self) { let LiveSupervision { poisoned, uncertain, .. } = self; *poisoned = false; *uncertain = 0; } }"),
+      "a compound decrement": add("lifecycle/live.rs", "impl LiveSupervision { fn d(&mut self) { self.uncertain -= 1; } }"),
+      "a compound clear": add("lifecycle/live.rs", "impl LiveSupervision { fn d(&mut self) { self.poisoned &= false; self.capacity_fault &= false; } }"),
+      "a parenthesized borrow": add("lifecycle/live.rs", "impl LiveSupervision { fn d(&mut self) { *(&mut (self.poisoned)) = false; let _ = Option::take(&mut (self.owed)); } }"),
+      "a ref mut pattern": add("lifecycle/live.rs", "impl LiveSupervision { fn d(&mut self) { match self.poisoned { ref mut p => *p = false } } }"),
+      "a lowered size": add("lifecycle/live.rs", "impl LiveSupervision { fn d(&mut self, committed: &[u8]) { self.known_bytes = committed.len() as u64; } }"),
+      "a lowered monotonic floor": add("lifecycle/live.rs", "impl LiveSupervision { fn d(&mut self) { self.last_mono = MonoMs::new(0); } }"),
+      "a supervision reset in place": add("lifecycle/live.rs", "impl LiveSupervision { fn recover(&mut self) { *self = supervision(self.epoch, self.projection.clone(), MonoMs::new(0)); } }"),
+      "a count-balanced ref mut": add("lifecycle/live.rs", "impl LiveSupervision { fn heal(&mut self, p: &mut bool) { match p { ref mut q => **q = false } } }"),
+      "a poison flag swapped": add("lifecycle/live.rs", "impl LiveSupervision { fn swap(&mut self, other: &mut bool) { std::mem::swap(&mut self.poisoned, other); } }"),
+      "an alias of the outcome": add("lifecycle/live.rs", "type O = WriteOutcome;"),
     };
     for (const [name, files] of Object.entries(authority)) {
       expect(liveAuthorityViolations(files), name).not.toEqual([]);
@@ -1064,12 +1179,18 @@ describe("desktop trust boundary", () => {
       "Recommendation renamed": add("lifecycle/reconcile.rs", "use self::Recommendation as R;"),
       "a cloneable frame": replace("lifecycle/reconcile.rs", "pub(crate) struct ReconciledFrame", "#[derive(Clone)]\npub(crate) struct ReconciledFrame"),
       "a cloneable history": replace("lifecycle/reconcile.rs", "pub(crate) struct RecordedHistory", "#[derive(Clone)]\npub(crate) struct RecordedHistory"),
-      "a visible frame field": replace("lifecycle/reconcile.rs", "    drafts: Vec<EventDraft>,\n}", "    pub(crate) drafts: Vec<EventDraft>,\n}"),
+      "a visible frame field": replace("lifecycle/reconcile.rs", "    drafts: Vec<EventDraft>,\n    /// The size", "    pub(crate) drafts: Vec<EventDraft>,\n    /// The size"),
       "a frame built twice": add("lifecycle/reconcile.rs", "fn fake(f: ReconciledFrame) -> ReconciledFrame { ReconciledFrame { ..f } }"),
       "a frame built by the live layer": add("lifecycle/live.rs", "fn fake(f: ReconciledFrame) -> ReconciledFrame { ReconciledFrame { ..f } }"),
       "a history built twice": add("lifecycle/reconcile.rs", "fn fake(h: RecordedHistory) -> RecordedHistory { RecordedHistory { ..h } }"),
       "a trait for a frame": add("lifecycle/live.rs", "impl Clone for ReconciledFrame { fn clone(&self) -> ReconciledFrame { todo() } }"),
       "an alias of a frame": add("lifecycle/live.rs", "type F = ReconciledFrame;"),
+      // D3.2c-2 (#122): never-created proofs.
+      "a never-created proof from a run id": add("lifecycle/reconcile.rs", "fn assume(run: RunId) -> RunSummary { RunSummary::NeverCreated(NeverCreatedRun { run }) }"),
+      "a never-created proof built by the live layer": add("lifecycle/live.rs", "fn fake(run: RunId) -> super::reconcile::NeverCreatedRun { super::reconcile::NeverCreatedRun { run } }"),
+      "a visible never-created field": replace("lifecycle/reconcile.rs", "pub(crate) struct NeverCreatedRun {\n    run: RunId,", "pub(crate) struct NeverCreatedRun {\n    pub(crate) run: RunId,"),
+      "a default never-created proof": add("lifecycle/reconcile.rs", "impl Default for NeverCreatedRun { fn default() -> NeverCreatedRun { todo() } }"),
+      "a function returning a never-created proof": add("lifecycle/reconcile.rs", "fn proof(s: RunSummary) -> Option<NeverCreatedRun> { None }"),
     };
     for (const [name, files] of Object.entries(inert)) {
       expect(reconciliationViolations(files), name).not.toEqual([]);
@@ -1103,7 +1224,6 @@ describe("desktop trust boundary", () => {
       "the codec naming the live layer": add(codecFile, "use super::live::begin_new;"),
       "the codec naming reconciliation": add(codecFile, "use super::reconcile::RecordedHistory;"),
       "the codec naming replay": add(codecFile, "use super::replay::replay;"),
-      "the live layer naming the codec": add("lifecycle/live.rs", "use super::codec::decode_stream;"),
       "the live layer naming replay": add("lifecycle/live.rs", "use super::replay::replay;"),
       "the reducer naming replay": add("lifecycle/reduce.rs", "use super::replay::ReplayedHistory;"),
       "the model naming the codec": add("lifecycle/model.rs", "use super::codec::encode_frame;"),
@@ -1156,6 +1276,8 @@ describe("desktop trust boundary", () => {
       "another derive on an unverified frame": replace(codecFile, "#[derive(Clone, Debug, PartialEq, Eq)]\npub(crate) struct UnverifiedFrame", "#[derive(Clone, Debug, PartialEq, Eq, Default)]\npub(crate) struct UnverifiedFrame"),
       "an unverified frame read by replay": add("lifecycle/replay.rs", "fn u0(_: &super::codec::UnverifiedFrame) {}"),
       "the audit scan called by reconciliation": add("lifecycle/reconcile.rs", "fn u1(b: &[u8]) { let _ = super::codec::scan_after_corruption(b, 0); }"),
+      // D3.2c-2: the live layer names the codec to encode and judge frames, never to read recovered bytes.
+      "the audit scan called by the live layer": add("lifecycle/live.rs", "fn u3(b: &[u8]) { let _ = super::codec::scan_after_corruption(b, 0); }"),
       "a cloneable decoded stream": replace(codecFile, "pub(crate) struct Decoded {", "#[derive(Clone)]\npub(crate) struct Decoded {"),
       "a trait for a decoded frame": add(codecFile, "impl Clone for DecodedFrame { fn clone(&self) -> DecodedFrame { todo() } }"),
       "a decoded frame renamed": add("lifecycle/replay.rs", "use super::codec::DecodedFrame as Frame;"),

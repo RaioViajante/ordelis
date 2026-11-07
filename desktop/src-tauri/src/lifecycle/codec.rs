@@ -549,6 +549,9 @@ pub(crate) enum PersistCheck {
 pub(crate) struct TornTail {
     pub(crate) len: u32,
     pub(crate) pending_prefix: bool,
+    /// The CRC-32C of the tail bytes themselves, so that the repair record that removes them can be bound to exactly
+    /// these bytes (D3.2c-2, N7).
+    pub(crate) crc32c: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -615,7 +618,9 @@ pub(crate) fn verify_persisted(file: &[u8], committed: &[u8], pending: &[u8]) ->
     match checked_frame(rest) {
         Ok(_) => PersistCheck::Diverged(Divergence::Foreign),
         Err((reason, short)) => match classify_rest(0, rest, reason, short) {
-            StreamEnd::IncompleteTail { len, .. } => PersistCheck::Absent { torn: Some(TornTail { len, pending_prefix: pending.starts_with(rest) }) },
+            StreamEnd::IncompleteTail { len, crc32c, .. } => {
+                PersistCheck::Absent { torn: Some(TornTail { len, pending_prefix: pending.starts_with(rest), crc32c }) }
+            }
             StreamEnd::Corrupt { reason, .. } => PersistCheck::Diverged(Divergence::Corrupt(reason)),
             StreamEnd::Clean | StreamEnd::NewerVersion { .. } => PersistCheck::Diverged(Divergence::Foreign),
         },
